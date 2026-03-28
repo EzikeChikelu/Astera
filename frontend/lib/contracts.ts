@@ -33,6 +33,31 @@ export async function getInvoice(id: number): Promise<Invoice> {
   return scValToNative(result!.retval) as Invoice;
 }
 
+export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'get_metadata',
+    [nativeToScVal(id, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  const due = raw.due_date !== undefined ? Number(raw.due_date) : Number(raw.dueDate);
+
+  return {
+    name: raw.name as string,
+    description: raw.description as string,
+    image: raw.image as string,
+    amount: BigInt(String(raw.amount)),
+    debtor: raw.debtor as string,
+    dueDate: due,
+    status: raw.status as InvoiceMetadata['status'],
+    symbol: raw.symbol as string,
+    decimals: Number(raw.decimals),
+  };
+}
+
 export async function getInvoiceCount(): Promise<number> {
   const sim = await simulateTx(
     INVOICE_CONTRACT_ID,
