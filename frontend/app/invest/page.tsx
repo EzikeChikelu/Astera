@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
 import PoolStats from '@/components/PoolStats';
+import { APYCalculator } from '@/components/APYCalculator';
 import {
   getPoolConfig,
   getInvestorPosition,
