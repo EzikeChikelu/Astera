@@ -340,4 +340,63 @@ export async function buildWithdrawTx(
   return prepared.toXDR();
 }
 
+export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_yield',
+        new Address(admin).toScVal(),
+        nativeToScVal(yieldBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/**
+ * NOTE: mark_defaulted currently requires pool.require_auth() in the Invoice contract.
+ * Since the Pool contract lacks a wrapper, this call may fail from a standard admin wallet
+ * unless the contract admin is also the pool address stored in the invoice.
+ */
+export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'mark_defaulted',
+        nativeToScVal(invoiceId, { type: 'u64' }),
+        new Address(POOL_CONTRACT_ID).toScVal(), // Attempting with Pool contract ID
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
 export { submitTx };
