@@ -20,12 +20,14 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 ## Contracts
 
 ### Invoice Contract
+
 - `create_invoice` — SME mints an invoice token with amount, debtor, due date
 - `mark_funded` — Called by pool when invoice is funded
 - `mark_paid` — SME or pool marks invoice as repaid
 - `mark_defaulted` — Pool flags missed repayment
 
 ### Pool Contract
+
 - `initialize` — Sets admin, first accepted stablecoin (`initial_token`), and invoice contract
 - `add_token` / `remove_token` — Admin maintains a whitelist of accepted stablecoin SAC addresses
 - `deposit` — Investor deposits a whitelisted stablecoin into the pool (positions are per token)
@@ -39,6 +41,7 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 ## Setup
 
 ### Prerequisites
+
 - [Rust + Cargo](https://rustup.rs/)
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/stellar-cli)
 - [Node.js 20+](https://nodejs.org/)
@@ -112,6 +115,7 @@ Open [http://localhost:3000](http://localhost:3000).
 ## User Flows
 
 ### SME Flow
+
 1. Connect Freighter wallet
 2. Go to **New Invoice** — fill debtor, amount, due date
 3. Sign transaction — invoice minted on Stellar
@@ -119,6 +123,7 @@ Open [http://localhost:3000](http://localhost:3000).
 5. When customer pays, call `repay_invoice` to settle
 
 ### Investor Flow
+
 1. Connect Freighter wallet
 2. Go to **Invest** — choose a whitelisted stablecoin and deposit into the pool
 3. Pool admin deploys liquidity to approved invoices
@@ -143,8 +148,36 @@ stellar contract invoke \
 
 ---
 
-## Network
+## Deployment
 
-- **Network:** Stellar Testnet
+### Testnet Deployment
+
+For development and testing, see the [Testnet Deployment Guide](docs/deployment.md) for step-by-step instructions.
+
+### Mainnet Deployment
+
+For production deployment, see the comprehensive [Mainnet Deployment Guide](docs/mainnet-deployment.md) which includes:
+
+- Pre-deployment security checklist
+- Contract verification procedures
+- Monitoring and alerting setup
+- Rollback and emergency procedures
+- Post-deployment verification steps
+
+**⚠️ Important:** Mainnet deployment involves real assets. Complete all security audits and testing before deploying to production.
+
+---
+
+## Network Information
+
+### Testnet
+
 - **RPC:** https://soroban-testnet.stellar.org
+- **Horizon:** https://horizon-testnet.stellar.org
 - **Explorer:** https://stellar.expert/explorer/testnet
+
+### Mainnet
+
+- **RPC:** https://soroban-mainnet.stellar.org
+- **Horizon:** https://horizon.stellar.org
+- **Explorer:** https://stellar.expert/explorer/public
