@@ -78,6 +78,7 @@ pub enum DataKey {
     Oracle,
     Initialized,
     StorageStats,
+    Paused,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -86,6 +87,17 @@ fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+fn require_not_paused(env: &Env) {
+    if env
+        .storage()
+        .instance()
+        .get::<DataKey, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        panic!("contract is paused");
+    }
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -151,11 +163,53 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::StorageStats, &StorageStats::default());
+        env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("paused")), admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("unpaused")), admin);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
         admin.require_auth();
+        require_not_paused(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -178,6 +232,7 @@ impl InvoiceContract {
         verification_hash: String,
     ) -> u64 {
         owner.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         if amount <= 0 {
@@ -244,6 +299,7 @@ impl InvoiceContract {
 
     pub fn verify_invoice(env: Env, id: u64, oracle: Address, approved: bool, reason: String) {
         oracle.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let stored_oracle: Address = env
@@ -287,6 +343,7 @@ impl InvoiceContract {
 
     pub fn resolve_dispute(env: Env, id: u64, admin: Address, approved: bool) {
         admin.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let stored_admin: Address = env
@@ -333,6 +390,7 @@ impl InvoiceContract {
 
     pub fn mark_funded(env: Env, id: u64, pool: Address) {
         pool.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let authorized_pool: Address = env
@@ -369,6 +427,7 @@ impl InvoiceContract {
 
     pub fn mark_paid(env: Env, id: u64, caller: Address) {
         caller.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let pool: Address = env
@@ -416,6 +475,7 @@ impl InvoiceContract {
 
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
         pool.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let authorized_pool: Address = env
@@ -456,6 +516,7 @@ impl InvoiceContract {
 
     pub fn cleanup_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
 
         let admin: Address = env
@@ -543,6 +604,7 @@ impl InvoiceContract {
 
     pub fn set_pool(env: Env, admin: Address, pool: Address) {
         admin.require_auth();
+        require_not_paused(&env);
         bump_instance(&env);
         let stored_admin: Address = env
             .storage()
@@ -925,5 +987,171 @@ mod test {
 
         let stats = client.get_storage_stats();
         assert_eq!(stats.active_invoices, 0);
+    }
+
+    // ---- Circuit Breaker Tests ----
+
+    #[test]
+    fn test_is_paused_false_after_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_pause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let intruder = Address::generate(&env);
+        client.pause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_unpause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        client.pause(&admin);
+        let intruder = Address::generate(&env);
+        client.unpause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_create_invoice_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+        client.pause(&admin);
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_mark_funded_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.pause(&admin);
+        client.mark_funded(&id, &pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_mark_paid_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
+        client.pause(&admin);
+        client.mark_paid(&id, &sme);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_mark_defaulted_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
+        client.pause(&admin);
+        client.mark_defaulted(&id, &pool);
+    }
+
+    #[test]
+    fn test_views_succeed_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
+        client.pause(&admin);
+
+        // All views must succeed while paused
+        let _ = client.get_invoice(&id);
+        let _ = client.get_metadata(&id);
+        let _ = client.get_invoice_count();
+        let _ = client.get_storage_stats();
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_pause_unpause_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+
+        // Should succeed after unpause
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
+        client.mark_paid(&id, &sme);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
     }
 }
