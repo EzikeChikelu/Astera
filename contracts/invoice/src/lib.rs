@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol,
 };
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -9,6 +9,10 @@ const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
 const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const MAX_WASM_HASH_LEN: u32 = 32;
+const MAX_INVOICES_PER_DAY: u32 = 10;
+const SECS_PER_DAY: u64 = 86400;
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -78,6 +82,10 @@ pub enum DataKey {
     Oracle,
     Initialized,
     StorageStats,
+    ProposedWasmHash,
+    UpgradeScheduledAt,
+    DailyInvoiceCount(Address),
+    DailyInvoiceResetTime(Address),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -166,6 +174,8 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Oracle, &oracle);
         bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("set_oracle")), (admin, oracle));
     }
 
     pub fn create_invoice(
@@ -186,6 +196,27 @@ impl InvoiceContract {
         if due_date <= env.ledger().timestamp() {
             panic!("due date must be in the future");
         }
+
+        // Rate limiting: max 10 invoices per day per address
+        let now = env.ledger().timestamp();
+        let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
+        let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
+
+        let reset_time: u64 = env.storage().instance().get(&daily_reset_key).unwrap_or(0);
+        let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
+
+        if now >= reset_time + SECS_PER_DAY {
+            // Reset the daily counter
+            daily_count = 0;
+            env.storage().instance().set(&daily_reset_key, &now);
+        }
+
+        if daily_count >= MAX_INVOICES_PER_DAY {
+            panic!("daily invoice limit exceeded: max 10 per day");
+        }
+
+        daily_count += 1;
+        env.storage().instance().set(&daily_count_key, &daily_count);
 
         let count: u64 = env
             .storage()
@@ -553,6 +584,63 @@ impl InvoiceContract {
             panic!("unauthorized");
         }
         env.storage().instance().set(&DataKey::Pool, &pool);
+        env.events()
+            .publish((EVT, symbol_short!("set_pool")), (admin, pool));
+    }
+
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+        admin.require_auth();
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if wasm_hash.len() != MAX_WASM_HASH_LEN {
+            panic!("invalid wasm hash length");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposedWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, symbol_short!("upgrade_proposed")),
+            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+        );
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let scheduled_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeScheduledAt)
+            .expect("no upgrade proposed");
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+            panic!("upgrade timelock not expired");
+        }
+        let wasm_hash: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposedWasmHash)
+            .expect("no wasm hash proposed");
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
 

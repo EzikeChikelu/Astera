@@ -3,6 +3,7 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short,
     token, Address, Env, Symbol, Vec, IntoVal, String
+
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
@@ -14,6 +15,8 @@ const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
 const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const MAX_WASM_HASH_LEN: u32 = 32;
 
 #[contracttype]
 #[derive(Clone)]
@@ -60,6 +63,8 @@ pub enum DataKey {
     TokenTotals(Address),
     Initialized,
     StorageStats,
+    ProposedWasmHash,
+    UpgradeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -152,6 +157,8 @@ impl FundingPool {
         }
         tokens.push_back(token.clone());
         env.storage().instance().set(&DataKey::AcceptedTokens, &tokens);
+        env.events()
+            .publish((EVT, symbol_short!("add_token")), (admin, token.clone()));
 
         if !env.storage().instance().has(&DataKey::TokenTotals(token.clone())) {
             env.storage().instance().set(
@@ -197,6 +204,8 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
+        env.events()
+            .publish((EVT, symbol_short!("remove_token")), (admin, token));
     }
 
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
@@ -363,6 +372,8 @@ impl FundingPool {
         if yield_bps > 5_000 { panic!("yield cannot exceed 50%"); }
         config.yield_bps = yield_bps;
         env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_yield")), (admin, yield_bps));
     }
 
     pub fn set_compound_interest(env: Env, admin: Address, compound: bool) {
@@ -372,6 +383,8 @@ impl FundingPool {
         let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         config.compound_interest = compound;
         env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_compound")), (admin, compound));
     }
 
     pub fn get_config(env: Env) -> PoolConfig { env.storage().instance().get(&DataKey::Config).expect("not initialized") }
@@ -426,6 +439,47 @@ impl FundingPool {
             if tokens.get(i).unwrap() == *token { return; }
         }
         panic!("token not accepted");
+    }
+
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        if wasm_hash.len() != MAX_WASM_HASH_LEN {
+            panic!("invalid wasm hash length");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposedWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, symbol_short!("upgrade_proposed")),
+            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+        );
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        let scheduled_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeScheduledAt)
+            .expect("no upgrade proposed");
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+            panic!("upgrade timelock not expired");
+        }
+        let wasm_hash: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposedWasmHash)
+            .expect("no wasm hash proposed");
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
 
