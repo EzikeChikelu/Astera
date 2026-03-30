@@ -746,6 +746,108 @@ mod test {
         assert!(client.is_invoice_processed(&1));
     }
 
+    // **Feature: credit-scoring, Property 1: Score bounds invariant**
+    // **Validates: Requirements 1.5, 1.6**
+    #[test]
+    fn test_prop_score_bounds_invariant() {
+        // For any combination of inputs, score must always be in [MIN_SCORE, MAX_SCORE].
+        // Uses a simple LCG to generate 100 varied input combinations.
+        let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for _ in 0..100 {
+            let total_invoices = (lcg(&mut seed) % 50 + 1) as u32;
+            let paid_on_time = (lcg(&mut seed) % (total_invoices as u64 + 1)) as u32;
+            let remaining = total_invoices - paid_on_time;
+            let paid_late = (lcg(&mut seed) % (remaining as u64 + 1)) as u32;
+            let defaulted = remaining - paid_late;
+            let total_volume = (lcg(&mut seed) % 200_000_000_000) as i128;
+            let avg_days = (lcg(&mut seed) % 60) as i64 - 10; // -10 to +49
+
+            let score = calculate_score(
+                total_invoices,
+                paid_on_time,
+                paid_late,
+                defaulted,
+                total_volume,
+                avg_days,
+            );
+            assert!(
+                score >= MIN_SCORE && score <= MAX_SCORE,
+                "score {} out of bounds [{}, {}] for inputs: total={} on_time={} late={} defaulted={} vol={} avg_days={}",
+                score, MIN_SCORE, MAX_SCORE, total_invoices, paid_on_time, paid_late, defaulted, total_volume, avg_days
+            );
+        }
+    }
+
+    // **Feature: credit-scoring, Property 2: Scoring formula monotonicity**
+    // **Validates: Requirements 1.2, 1.3, 1.4**
+    #[test]
+    fn test_prop_scoring_formula_monotonicity() {
+        // For any fixed base, adding an on-time payment scores >= adding a late payment
+        // which scores >= adding a default.
+        let mut seed: u64 = 0xCAFE_BABE_0000_0001;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for _ in 0..100 {
+            let base_invoices = (lcg(&mut seed) % 19 + 1) as u32;
+            let base_on_time = (lcg(&mut seed) % (base_invoices as u64 + 1)) as u32;
+            let base_remaining = base_invoices - base_on_time;
+            let base_late = (lcg(&mut seed) % (base_remaining as u64 + 1)) as u32;
+            let base_defaulted = base_remaining - base_late;
+            let vol = (lcg(&mut seed) % 50_000_000_000) as i128;
+            let avg = (lcg(&mut seed) % 20) as i64;
+
+            let score_on_time = calculate_score(base_invoices + 1, base_on_time + 1, base_late, base_defaulted, vol, avg);
+            let score_late = calculate_score(base_invoices + 1, base_on_time, base_late + 1, base_defaulted, vol, avg);
+            let score_default = calculate_score(base_invoices + 1, base_on_time, base_late, base_defaulted + 1, vol, avg);
+
+            assert!(
+                score_on_time >= score_late,
+                "on_time score {} < late score {} — monotonicity violated",
+                score_on_time, score_late
+            );
+            assert!(
+                score_late >= score_default,
+                "late score {} < default score {} — monotonicity violated",
+                score_late, score_default
+            );
+        }
+    }
+
+    // **Feature: credit-scoring, Property 3: Defaults dominate — score below BASE when defaults exceed on-time**
+    // **Validates: Requirements 4.1**
+    #[test]
+    fn test_prop_defaults_dominate() {
+        // When defaulted > paid_on_time and paid_late == 0, score must be < BASE_SCORE.
+        let mut seed: u64 = 0xF00D_CAFE_ABCD_EF01;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for _ in 0..100 {
+            let on_time = (lcg(&mut seed) % 10) as u32;
+            let defaulted = on_time + (lcg(&mut seed) % 10 + 1) as u32; // always > on_time
+            let total = on_time + defaulted;
+            let vol = (lcg(&mut seed) % 5_000_000_000) as i128;
+            let avg = (lcg(&mut seed) % 15) as i64;
+
+            let score = calculate_score(total, on_time, 0, defaulted, vol, avg);
+            assert!(
+                score < BASE_SCORE,
+                "score {} >= BASE_SCORE {} when defaulted({}) > on_time({}) with no late payments",
+                score, BASE_SCORE, defaulted, on_time
+            );
+        }
+    }
+
     #[test]
     fn test_total_volume_tracking() {
         let env = Env::default();
