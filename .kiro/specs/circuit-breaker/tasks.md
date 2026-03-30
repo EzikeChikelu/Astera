@@ -20,7 +20,7 @@
   - **Property 5: is_paused reflects current state**
   - **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 4.1**
 
-- [ ] 2. Add circuit breaker to FundingPool
+- [x] 2. Add circuit breaker to FundingPool
   - Add `Paused` variant to `DataKey` enum
   - Add `require_not_paused` helper function
   - Add `pause`, `unpause`, and `is_paused` public functions with admin auth
@@ -41,7 +41,7 @@
   - **Property 5: is_paused reflects current state**
   - **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 4.2**
 
-- [ ] 3. Add circuit breaker to CreditScoreContract
+- [x] 3. Add circuit breaker to CreditScoreContract
   - Add `Paused` variant to `DataKey` enum
   - Add `require_not_paused` helper function
   - Add `pause`, `unpause`, and `is_paused` public functions with admin auth
@@ -62,5 +62,5 @@
   - **Property 5: is_paused reflects current state**
   - **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 4.3**
 
-- [ ] 4. Final Checkpoint - Make sure all tests are passing
+- [x] 4. Final Checkpoint - Make sure all tests are passing
   - Ensure all tests pass, ask the user if questions arise.
