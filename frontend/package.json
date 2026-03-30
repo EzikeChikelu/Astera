@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "prepare": "cd .. && git config core.hooksPath frontend/.husky"
+    "prepare": "cd .. && git config core.hooksPath frontend/.husky",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
@@ -20,6 +22,10 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.2",
+    "@testing-library/react": "^14.2.1",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/jest": "^29.5.12",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
@@ -30,6 +36,8 @@
     "eslint-config-next": "^16.2.1",
     "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
     "lint-staged": "^16.4.0",
     "postcss": "^8",
     "prettier": "^3.8.1",
