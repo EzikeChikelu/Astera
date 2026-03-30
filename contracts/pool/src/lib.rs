@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short,
-    token, Address, Env, Symbol, Vec,
+    token, Address, Bytes, Env, Symbol, Vec,
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
@@ -15,6 +15,8 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const POSITION_TTL: u32 = LEDGERS_PER_DAY * 365;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const MAX_WASM_HASH_LEN: u32 = 32;
 
 #[contracttype]
 #[derive(Clone)]
@@ -22,6 +24,7 @@ pub struct PoolConfig {
     pub invoice_contract: Address,
     pub admin: Address,
     pub yield_bps: u32,
+    pub compound_interest: bool,
 }
 
 #[contracttype]
@@ -135,6 +138,29 @@ fn set_position_ttl(env: &Env, key: &DataKey) {
     }
 }
 
+fn calculate_interest(principal: u128, yield_bps: u32, elapsed_secs: u64, is_compound: bool) -> u128 {
+    let denominator = BPS_DENOM as u128 * SECS_PER_YEAR as u128;
+
+    if !is_compound {
+        return (principal * yield_bps as u128 * elapsed_secs as u128) / denominator;
+    }
+
+    let elapsed_days = elapsed_secs / 86400;
+    let mut amount = principal;
+    let daily_rate_num = yield_bps as u128 * 86400;
+
+    for _ in 0..elapsed_days {
+        amount += (amount * daily_rate_num) / denominator;
+    }
+
+    let remaining_secs = elapsed_secs % 86400;
+    if remaining_secs > 0 {
+        amount += (amount * yield_bps as u128 * remaining_secs as u128) / denominator;
+    }
+
+    amount - principal
+}
+
 #[contract]
 pub struct FundingPool;
 
@@ -149,6 +175,7 @@ impl FundingPool {
             invoice_contract,
             admin,
             yield_bps: DEFAULT_YIELD_BPS,
+            compound_interest: false,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -211,6 +238,8 @@ impl FundingPool {
         }
         tokens.push_back(token.clone());
         env.storage().instance().set(&DataKey::AcceptedTokens, &tokens);
+        env.events()
+            .publish((EVT, symbol_short!("add_token")), (admin, token.clone()));
 
         if !env
             .storage()
@@ -262,6 +291,8 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
+        env.events()
+            .publish((EVT, symbol_short!("remove_token")), (admin, token));
     }
 
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
@@ -506,10 +537,12 @@ impl FundingPool {
 
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
-        let total_interest = (record.principal as u128
-            * config.yield_bps as u128
-            * elapsed_secs as u128)
-            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
         let total_due = record.principal + total_interest as i128;
 
         let token_client = token::Client::new(&env, &record.token);
@@ -649,6 +682,25 @@ impl FundingPool {
         }
         config.yield_bps = yield_bps;
         env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_yield")), (admin, yield_bps));
+    }
+
+    pub fn set_compound_interest(env: Env, admin: Address, compound: bool) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("not initialized");
+
+        config.compound_interest = compound;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_compound")), (admin, compound));
     }
 
     // ---- Views ----
@@ -788,10 +840,12 @@ impl FundingPool {
 
         let now = env.ledger().timestamp();
         let elapsed = now - record.funded_at;
-        let interest = (record.principal as u128
-            * config.yield_bps as u128
-            * elapsed as u128)
-            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed,
+            config.compound_interest,
+        );
 
         record.principal + interest as i128
     }
@@ -823,6 +877,47 @@ impl FundingPool {
             }
         }
         panic!("token not accepted");
+    }
+
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        if wasm_hash.len() != MAX_WASM_HASH_LEN {
+            panic!("invalid wasm hash length");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposedWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, symbol_short!("upgrade_proposed")),
+            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+        );
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        let scheduled_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeScheduledAt)
+            .expect("no upgrade proposed");
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+            panic!("upgrade timelock not expired");
+        }
+        let wasm_hash: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposedWasmHash)
+            .expect("no wasm hash proposed");
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
 
