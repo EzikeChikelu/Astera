@@ -215,6 +215,9 @@ impl CreditScoreContract {
             .instance()
             .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
 
+        // Capture the previous paid count before incrementing, for the running average.
+        let prev_paid = (credit_data.paid_on_time + credit_data.paid_late) as i64;
+
         match status {
             PaymentStatus::PaidOnTime => {
                 credit_data.paid_on_time += 1;
@@ -229,10 +232,12 @@ impl CreditScoreContract {
 
         credit_data.total_invoices += 1;
         credit_data.total_volume += amount;
+        // Only paid (on-time + late) invoices contribute to the average; defaults are excluded.
+        // Running sum = previous_average * previous_paid_count + new_days_late
         credit_data.average_payment_days = calculate_average_payment_days(
             credit_data.paid_on_time,
             credit_data.paid_late,
-            credit_data.average_payment_days * (credit_data.total_invoices - 1) as i64 + days_late,
+            credit_data.average_payment_days * prev_paid + days_late,
         );
         credit_data.score = calculate_score(
             credit_data.total_invoices,
@@ -319,11 +324,7 @@ impl CreditScoreContract {
         credit_data.defaulted += 1;
         credit_data.total_invoices += 1;
         credit_data.total_volume += amount;
-        credit_data.average_payment_days = calculate_average_payment_days(
-            credit_data.paid_on_time,
-            credit_data.paid_late,
-            credit_data.average_payment_days * (credit_data.total_invoices - 1) as i64 + days_late,
-        );
+        // Defaults do not affect average_payment_days — only paid invoices contribute.
         credit_data.score = calculate_score(
             credit_data.total_invoices,
             credit_data.paid_on_time,
