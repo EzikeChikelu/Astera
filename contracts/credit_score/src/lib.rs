@@ -61,9 +61,21 @@ pub enum DataKey {
     PoolContract,
     Initialized,
     ScoreVersion,
+    Paused,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
+
+fn require_not_paused(env: &Env) {
+    if env
+        .storage()
+        .instance()
+        .get::<DataKey, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        panic!("contract is paused");
+    }
+}
 
 #[contract]
 pub struct CreditScoreContract;
@@ -146,6 +158,28 @@ impl CreditScoreContract {
             .set(&DataKey::PoolContract, &pool_contract);
         env.storage().instance().set(&DataKey::ScoreVersion, &1u32);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        env.storage().instance().set(&DataKey::Paused, &false);
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((EVT, symbol_short!("unpaused")), admin);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn record_payment(
@@ -166,6 +200,8 @@ impl CreditScoreContract {
         if caller != pool {
             pool.require_auth();
         }
+
+        require_not_paused(&env);
 
         if env
             .storage()
@@ -274,6 +310,8 @@ impl CreditScoreContract {
         if caller != pool {
             pool.require_auth();
         }
+
+        require_not_paused(&env);
 
         if env
             .storage()
@@ -428,6 +466,7 @@ impl CreditScoreContract {
     pub fn set_invoice_contract(env: Env, admin: Address, invoice_contract: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        require_not_paused(&env);
         env.storage()
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
@@ -436,6 +475,7 @@ impl CreditScoreContract {
     pub fn set_pool_contract(env: Env, admin: Address, pool_contract: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        require_not_paused(&env);
         env.storage()
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
@@ -783,5 +823,106 @@ mod test {
 
         let score_data = client.get_credit_score(&sme);
         assert_eq!(score_data.total_volume, 6_000_000_000i128);
+    }
+
+    // ---- Circuit Breaker Tests ----
+
+    #[test]
+    fn test_credit_is_paused_false_after_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _inv, _pool) = setup(&env);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_credit_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _inv, _pool) = setup(&env);
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_credit_pause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _inv, _pool) = setup(&env);
+        let intruder = Address::generate(&env);
+        client.pause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_credit_unpause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _inv, _pool) = setup(&env);
+        client.pause(&admin);
+        let intruder = Address::generate(&env);
+        client.unpause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_record_payment_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        client.pause(&admin);
+        client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_record_default_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 200_000);
+        let (client, admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        client.pause(&admin);
+        client.record_default(&pool, &1, &sme, &1_000i128, &100_000u64);
+    }
+
+    #[test]
+    fn test_credit_views_succeed_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+        client.pause(&admin);
+
+        let _ = client.get_credit_score(&sme);
+        let _ = client.get_payment_history(&sme);
+        let _ = client.get_payment_history_length(&sme);
+        let _ = client.get_score_band(&500);
+        let _ = client.is_invoice_processed(&1);
+        let _ = client.get_config();
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_credit_pause_unpause_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+        let data = client.get_credit_score(&sme);
+        assert_eq!(data.total_invoices, 1);
     }
 }
