@@ -848,6 +848,217 @@ mod test {
         }
     }
 
+    // **Feature: credit-scoring, Property 7: Score band coverage**
+    // **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5, 6.6**
+    #[test]
+    fn test_prop_score_band_coverage() {
+        // For every score in [MIN_SCORE, MAX_SCORE], get_score_band returns the correct band.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _invoice, _pool) = setup(&env);
+
+        for score in MIN_SCORE..=MAX_SCORE {
+            let band = client.get_score_band(&score);
+            let expected = if score >= 800 {
+                "Excellent"
+            } else if score >= 740 {
+                "Very Good"
+            } else if score >= 670 {
+                "Good"
+            } else if score >= 580 {
+                "Fair"
+            } else if score >= 500 {
+                "Poor"
+            } else {
+                "Very Poor"
+            };
+            assert_eq!(
+                band,
+                soroban_sdk::String::from_str(&env, expected),
+                "score {} should map to '{}' but got '{:?}'",
+                score, expected, band
+            );
+        }
+    }
+
+    // **Feature: credit-scoring, Property 8: Payment history ordering invariant**
+    // **Validates: Requirements 7.1, 7.2, 7.3**
+    #[test]
+    fn test_prop_payment_history_ordering() {
+        // For any sequence of N records, get_payment_history returns N records in insertion order,
+        // and get_payment_record(i) matches get_payment_history()[i].
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let mut seed: u64 = 0x0F0F_0F0F_A5A5_A5A5;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..20u64 {
+            let (client, _admin, _invoice, pool) = setup(&env);
+            let sme = Address::generate(&env);
+            let n = (lcg(&mut seed) % 10 + 1) as u64;
+            let due_date = 200_000u64;
+            let mut expected_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+
+            for i in 0..n {
+                let invoice_id = trial * 20 + i + 1;
+                expected_ids.push_back(invoice_id);
+                let is_default = lcg(&mut seed) % 3 == 0;
+                if is_default {
+                    client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
+                } else {
+                    client.record_payment(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+                }
+            }
+
+            // History length matches
+            assert_eq!(client.get_payment_history_length(&sme), n as u32,
+                "trial {}: history length mismatch", trial);
+
+            // Full history in order
+            let history = client.get_payment_history(&sme);
+            assert_eq!(history.len(), n as u32,
+                "trial {}: history vec length mismatch", trial);
+
+            // Individual record lookup matches history
+            for i in 0..n as u32 {
+                let by_index = client.get_payment_record(&sme, &i).unwrap();
+                let from_history = history.get(i).unwrap();
+                assert_eq!(by_index.invoice_id, from_history.invoice_id,
+                    "trial {}: record {} invoice_id mismatch", trial, i);
+                assert_eq!(by_index.invoice_id, expected_ids.get(i).unwrap(),
+                    "trial {}: record {} not in insertion order", trial, i);
+            }
+        }
+    }
+
+    // **Feature: credit-scoring, Property 9: Idempotency guard**
+    // **Validates: Requirements 4.3**
+    // Three separate should_panic tests cover all duplicate-processing paths.
+    #[test]
+    #[should_panic(expected = "invoice already processed")]
+    fn test_prop_idempotency_duplicate_payment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(&pool, &99, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+        client.record_payment(&pool, &99, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice already processed")]
+    fn test_prop_idempotency_duplicate_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_default(&pool, &98, &sme, &1_000_000_000i128, &due_date);
+        client.record_default(&pool, &98, &sme, &1_000_000_000i128, &due_date);
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice already processed")]
+    fn test_prop_idempotency_payment_then_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(&pool, &97, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+        client.record_default(&pool, &97, &sme, &1_000_000_000i128, &due_date);
+    }
+
+    #[test]
+    fn test_prop_invoice_count_accumulation() {
+        // For any sequence of N record_payment/record_default calls, total_invoices == N.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let mut seed: u64 = 0x1234_5678_9ABC_DEF0;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..20u64 {
+            let (client, _admin, _invoice, pool) = setup(&env);
+            let sme = Address::generate(&env);
+            let n = (lcg(&mut seed) % 15 + 1) as u64; // 1..=15 invoices per trial
+            let due_date = 200_000u64;
+
+            for i in 0..n {
+                let invoice_id = trial * 100 + i + 1;
+                let is_default = lcg(&mut seed) % 3 == 0;
+                if is_default {
+                    client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
+                } else {
+                    client.record_payment(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+                }
+            }
+
+            let data = client.get_credit_score(&sme);
+            assert_eq!(
+                data.total_invoices, n as u32,
+                "trial {}: expected total_invoices={} got {}",
+                trial, n, data.total_invoices
+            );
+        }
+    }
+
+    // **Feature: credit-scoring, Property 5: Volume accumulation invariant**
+    // **Validates: Requirements 3.4**
+    #[test]
+    fn test_prop_volume_accumulation() {
+        // For any sequence of payments/defaults with amounts a1..aN, total_volume == sum(ai).
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let mut seed: u64 = 0xABCD_EF01_2345_6789;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..20u64 {
+            let (client, _admin, _invoice, pool) = setup(&env);
+            let sme = Address::generate(&env);
+            let n = (lcg(&mut seed) % 10 + 1) as u64;
+            let due_date = 200_000u64;
+            let mut expected_volume: i128 = 0;
+
+            for i in 0..n {
+                let invoice_id = trial * 50 + i + 1;
+                let amount = (lcg(&mut seed) % 5_000_000_000 + 1_000_000) as i128;
+                expected_volume += amount;
+                let is_default = lcg(&mut seed) % 4 == 0;
+                if is_default {
+                    client.record_default(&pool, &invoice_id, &sme, &amount, &due_date);
+                } else {
+                    client.record_payment(&pool, &invoice_id, &sme, &amount, &due_date, &(due_date - 1000));
+                }
+            }
+
+            let data = client.get_credit_score(&sme);
+            assert_eq!(
+                data.total_volume, expected_volume,
+                "trial {}: expected total_volume={} got {}",
+                trial, expected_volume, data.total_volume
+            );
+        }
+    }
+
     #[test]
     fn test_total_volume_tracking() {
         let env = Env::default();
