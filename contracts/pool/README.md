@@ -34,6 +34,7 @@ pub struct PoolConfig {
     pub invoice_contract: Address,  // Invoice contract address
     pub admin: Address,             // Pool administrator
     pub yield_bps: u32,             // Annual yield in basis points (800 = 8%)
+    pub factoring_fee_bps: u32,     // Protocol fee in basis points charged per funded invoice
 }
 ```
 
@@ -46,6 +47,7 @@ pub struct PoolTokenTotals {
     pub total_deposited: i128,  // Total deposited (including earned interest)
     pub total_deployed: i128,   // Currently locked in active invoices
     pub total_paid_out: i128,   // Total paid out (principal + interest)
+    pub total_fee_revenue: i128,// Protocol fee revenue retained by the pool
 }
 ```
 
@@ -75,6 +77,7 @@ pub struct FundedInvoice {
     pub principal: i128,   // Total funding target
     pub committed: i128,   // Amount committed so far
     pub funded_at: u64,    // Timestamp when fully funded (0 while open)
+    pub factoring_fee: i128,// Fee amount locked when funding completes
     pub due_date: u64,     // Invoice due date
     pub repaid: bool,      // Whether invoice has been repaid
 }
@@ -322,7 +325,7 @@ Investor commits available balance toward funding an invoice. When total committ
 pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address)
 ```
 
-SME repays the invoice. The payer transfers `principal + accrued interest` to the pool. Each co-funder's position is credited with their proportional share of principal + interest.
+SME repays the invoice. The payer transfers `principal + accrued interest + factoring fee` to the pool. Each co-funder's position is credited with their proportional share of principal + interest, while the factoring fee is retained as protocol revenue.
 
 **Interest formula:**
 ```
@@ -389,6 +392,27 @@ Admin updates the pool's annual yield rate.
 **Panics:**
 - `"unauthorized"` — caller is not admin
 - `"yield cannot exceed 50%"` — yield_bps > 5000
+
+---
+
+### set_factoring_fee
+
+```rust
+pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32)
+```
+
+Admin updates the factoring fee charged when an invoice becomes fully funded.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Must be pool admin (must sign) |
+| `factoring_fee_bps` | `u32` | New fee in basis points (e.g. `250` = 2.5%) |
+
+**Auth:** `admin.require_auth()`
+
+**Panics:**
+- `"unauthorized"` — caller is not admin
+- `"factoring fee cannot exceed 100%"` — factoring_fee_bps > 10000
 
 ---
 
@@ -474,7 +498,7 @@ Returns undeployed liquidity for a specific token: `total_deposited - total_depl
 pub fn estimate_repayment(env: Env, invoice_id: u64) -> i128
 ```
 
-Estimates total repayment amount at the current time (principal + accrued interest).
+Estimates total repayment amount at the current time (`principal + accrued interest + locked factoring fee` once the invoice has been fully funded).
 
 **Panics:**
 - `"not initialized"` — contract not initialized

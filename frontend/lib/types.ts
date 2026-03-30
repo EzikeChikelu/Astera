@@ -39,12 +39,15 @@ export interface PoolConfig {
   invoiceContract: string;
   admin: string;
   yieldBps: number;
+  factoringFeeBps: number;
+  compoundInterest: boolean;
 }
 
 export interface PoolTokenTotals {
   totalDeposited: bigint;
   totalDeployed: bigint;
   totalPaidOut: bigint;
+  totalFeeRevenue: bigint;
 }
 
 export interface FundedInvoice {
@@ -55,6 +58,7 @@ export interface FundedInvoice {
   principal: bigint;
   committed: bigint;
   fundedAt: number;
+  factoringFee: bigint;
   dueDate: number;
   repaid: boolean;
 }
