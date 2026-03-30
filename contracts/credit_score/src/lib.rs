@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
 };
 
 const MIN_SCORE: u32 = 200;
@@ -14,6 +14,8 @@ const PTS_DEFAULTED: i32 = -50;
 const PTS_NEW_INVOICE: u32 = 5;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const MAX_WASM_HASH_LEN: u32 = 32;
 
 #[contracttype]
 #[derive(Clone)]
@@ -61,6 +63,8 @@ pub enum DataKey {
     PoolContract,
     Initialized,
     ScoreVersion,
+    ProposedWasmHash,
+    UpgradeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -431,6 +435,8 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
+        env.events()
+            .publish((EVT, symbol_short!("set_invoice_contract")), (admin, invoice_contract));
     }
 
     pub fn set_pool_contract(env: Env, admin: Address, pool_contract: Address) {
@@ -439,6 +445,8 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
+        env.events()
+            .publish((EVT, symbol_short!("set_pool_contract")), (admin, pool_contract));
     }
 
     fn get_or_create_credit_data(env: &Env, sme: &Address) -> CreditScoreData {
@@ -473,6 +481,45 @@ impl CreditScoreContract {
         if admin != &stored_admin {
             panic!("unauthorized");
         }
+    }
+
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if wasm_hash.len() != MAX_WASM_HASH_LEN {
+            panic!("invalid wasm hash length");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposedWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, symbol_short!("upgrade_proposed")),
+            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+        );
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let scheduled_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeScheduledAt)
+            .expect("no upgrade proposed");
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+            panic!("upgrade timelock not expired");
+        }
+        let wasm_hash: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposedWasmHash)
+            .expect("no wasm hash proposed");
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
 
