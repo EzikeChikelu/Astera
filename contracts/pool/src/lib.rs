@@ -6,6 +6,7 @@ use soroban_sdk::{
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
+const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
 const BPS_DENOM: u32 = 10_000;
 const SECS_PER_YEAR: u64 = 31_536_000;
 
@@ -22,6 +23,7 @@ pub struct PoolConfig {
     pub invoice_contract: Address,
     pub admin: Address,
     pub yield_bps: u32,
+    pub factoring_fee_bps: u32,
     pub compound_interest: bool,
 }
 
@@ -31,6 +33,7 @@ pub struct PoolTokenTotals {
     pub total_deposited: i128,
     pub total_deployed: i128,
     pub total_paid_out: i128,
+    pub total_fee_revenue: i128,
 }
 
 #[contracttype]
@@ -56,6 +59,8 @@ pub struct FundedInvoice {
     pub committed: i128,
     /// Ledger timestamp when fully funded (0 while still open for commitments)
     pub funded_at: u64,
+    /// Protocol fee locked when the invoice becomes fully funded.
+    pub factoring_fee: i128,
     pub due_date: u64,
     pub repaid: bool,
 }
@@ -147,6 +152,10 @@ fn calculate_interest(principal: u128, yield_bps: u32, elapsed_secs: u64, is_com
     amount - principal
 }
 
+fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> i128 {
+    ((principal as u128 * factoring_fee_bps as u128) / BPS_DENOM as u128) as i128
+}
+
 #[contract]
 pub struct FundingPool;
 
@@ -161,6 +170,7 @@ impl FundingPool {
             invoice_contract,
             admin,
             yield_bps: DEFAULT_YIELD_BPS,
+            factoring_fee_bps: DEFAULT_FACTORING_FEE_BPS,
             compound_interest: false,
         };
 
@@ -331,6 +341,7 @@ impl FundingPool {
             principal,
             committed: 0,
             funded_at: 0,
+            factoring_fee: 0,
             due_date,
             repaid: false,
         };
@@ -440,6 +451,11 @@ impl FundingPool {
         tt.total_deployed += amount;
 
         if record.committed == record.principal {
+            let config: PoolConfig = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config)
+                .expect("not initialized");
             let token_client = token::Client::new(&env, &record.token);
             token_client.transfer(
                 &env.current_contract_address(),
@@ -448,6 +464,8 @@ impl FundingPool {
             );
 
             record.funded_at = env.ledger().timestamp();
+            record.factoring_fee =
+                calculate_factoring_fee(record.principal, config.factoring_fee_bps);
             env.events().publish(
                 (EVT, symbol_short!("funded")),
                 (invoice_id, record.sme.clone(), record.principal),
@@ -494,7 +512,7 @@ impl FundingPool {
             elapsed_secs,
             config.compound_interest,
         );
-        let total_due = record.principal + total_interest as i128;
+        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
 
         let token_client = token::Client::new(&env, &record.token);
         token_client.transfer(&payer, &env.current_contract_address(), &total_due);
@@ -562,6 +580,7 @@ impl FundingPool {
         tt.total_deployed -= record.principal;
         tt.total_paid_out += total_due;
         tt.total_deposited += total_interest as i128;
+        tt.total_fee_revenue += record.factoring_fee;
         env.storage()
             .instance()
             .set(&DataKey::TokenTotals(record.token.clone()), &tt);
@@ -630,6 +649,22 @@ impl FundingPool {
             panic!("yield cannot exceed 50%");
         }
         config.yield_bps = yield_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+
+    pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32) {
+        admin.require_auth();
+        bump_instance(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("not initialized");
+        Self::require_admin(&env, &admin);
+        if factoring_fee_bps > BPS_DENOM {
+            panic!("factoring fee cannot exceed 100%");
+        }
+        config.factoring_fee_bps = factoring_fee_bps;
         env.storage().instance().set(&DataKey::Config, &config);
     }
 
@@ -791,7 +826,7 @@ impl FundingPool {
             config.compound_interest,
         );
 
-        record.principal + interest as i128
+        record.principal + interest as i128 + record.factoring_fee
     }
 
     fn require_admin(env: &Env, admin: &Address) {
@@ -870,6 +905,7 @@ mod test {
         assert_eq!(tt.total_deposited, 1_500_000_000);
         let config = client.get_config();
         assert_eq!(config.yield_bps, DEFAULT_YIELD_BPS);
+        assert_eq!(config.factoring_fee_bps, DEFAULT_FACTORING_FEE_BPS);
     }
 
     #[test]
@@ -960,6 +996,7 @@ mod test {
 
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.total_deployed, principal);
+        assert_eq!(record.factoring_fee, 0);
     }
 
     #[test]
@@ -1390,8 +1427,30 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
-        #[test]
+    fn test_set_factoring_fee() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _usdc_id) = setup(&env);
+
+        client.set_factoring_fee(&admin, &250);
+
+        let config = client.get_config();
+        assert_eq!(config.factoring_fee_bps, 250);
+    }
+
+    #[test]
+    #[should_panic(expected = "factoring fee cannot exceed 100%")]
+    fn test_set_factoring_fee_above_100_percent_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _usdc_id) = setup(&env);
+
+        client.set_factoring_fee(&admin, &(BPS_DENOM + 1));
+    }
+
+    #[test]
     #[should_panic(expected = "amount must be positive")]
     fn test_withdraw_zero_amount_panics() {
         let env = Env::default();
@@ -1526,5 +1585,56 @@ mod test {
         
         let interest = est_compound - principal;
         assert_eq!(pos.earned, interest);
+    }
+
+    #[test]
+    fn test_factoring_fee_is_charged_and_tracked_separately() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.set_factoring_fee(&admin, &250);
+        client.deposit(&investor, &usdc_id, &principal);
+        client.init_co_funding(
+            &admin,
+            &1,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+        client.commit_to_invoice(&investor, &1, &principal);
+
+        let funded = client.get_funded_invoice(&1).unwrap();
+        let expected_fee = principal * 250 / BPS_DENOM as i128;
+        assert_eq!(funded.factoring_fee, expected_fee);
+
+        client.set_factoring_fee(&admin, &500);
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+
+        let expected_interest =
+            (principal as u128 * DEFAULT_YIELD_BPS as u128 * (30 * 86_400) as u128)
+                / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let expected_total_due = principal + expected_interest as i128 + expected_fee;
+
+        assert_eq!(client.estimate_repayment(&1), expected_total_due);
+
+        client.repay_invoice(&1, &sme);
+
+        let pos = client.get_position(&investor, &usdc_id).unwrap();
+        assert_eq!(pos.available, principal + expected_interest as i128);
+        assert_eq!(pos.earned, expected_interest as i128);
+
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.total_fee_revenue, expected_fee);
+        assert_eq!(tt.total_deposited, principal + expected_interest as i128);
+        assert_eq!(tt.total_paid_out, expected_total_due);
     }
 }
