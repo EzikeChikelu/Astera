@@ -79,8 +79,7 @@ pub enum DataKey {
     TokenTotals(Address),
     Initialized,
     StorageStats,
-    ProposedWasmHash,
-    UpgradeScheduledAt,
+    Paused,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -89,6 +88,17 @@ fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+fn require_not_paused(env: &Env) {
+    if env
+        .storage()
+        .instance()
+        .get::<DataKey, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        panic!("contract is paused");
+    }
 }
 
 fn set_funded_invoice_ttl(env: &Env, invoice_id: u64, is_completed: bool) {
@@ -157,12 +167,38 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::StorageStats, &PoolStorageStats::default());
+        env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance(&env);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance(&env);
+        env.events().publish((EVT, symbol_short!("unpaused")), admin);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn add_token(env: Env, admin: Address, token: Address, share_token: Address) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
 
         let mut tokens: Vec<Address> = env
@@ -193,6 +229,7 @@ impl FundingPool {
     pub fn remove_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
 
         let tokens: Vec<Address> = env
@@ -311,6 +348,7 @@ impl FundingPool {
     ) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
         Self::assert_accepted_token(&env, &token);
 
@@ -350,6 +388,7 @@ impl FundingPool {
     pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address) {
         payer.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
 
         let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         let mut record: FundedInvoice = env.storage().persistent().get(&DataKey::FundedInvoice(invoice_id)).expect("invoice not found");
@@ -400,6 +439,7 @@ impl FundingPool {
     pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         let mut config: PoolConfig = env
             .storage()
             .instance()
@@ -437,6 +477,7 @@ impl FundingPool {
     pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
         let record: FundedInvoice = env.storage().persistent().get(&DataKey::FundedInvoice(invoice_id)).expect("funded invoice not found");
         if !record.repaid { panic!("can only cleanup repaid invoices"); }
@@ -468,6 +509,10 @@ impl FundingPool {
     fn require_admin(env: &Env, admin: &Address) {
         let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         if admin != &config.admin { panic!("unauthorized"); }
+    }
+
+    fn require_not_paused(env: &Env) {
+        require_not_paused(env);
     }
 
     fn assert_accepted_token(env: &Env, token: &Address) {
