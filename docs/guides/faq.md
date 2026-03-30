@@ -33,7 +33,7 @@ Currently, Astera runs on Stellar Testnet for development and testing. Mainnet d
 
 - **Invoice creation**: Small transaction fee in XLM
 - **Interest rate**: 8% APY default (paid when you repay)
-- **No platform fees** during testnet phase
+- **Platform fee**: Pools may charge a configurable factoring fee in addition to interest
 
 ### What if my customer pays late?
 
