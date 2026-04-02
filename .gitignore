@@ -27,3 +27,5 @@ yarn-error.log*
 
 # Soroban
 .soroban/
+node_modules/
+target/

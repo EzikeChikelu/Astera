@@ -11,22 +11,25 @@ export default function PoolStats({ config, tokenTotals, tokenLabel }: Props) {
   const deposited = tokenTotals?.totalDeposited ?? 0n;
   const deployed = tokenTotals?.totalDeployed ?? 0n;
   const paidOut = tokenTotals?.totalPaidOut ?? 0n;
+  const feeRevenue = tokenTotals?.totalFeeRevenue ?? 0n;
   const available = deposited - deployed;
 
   const utilizationRate = deposited > 0n ? Number((deployed * 100n) / deposited) : 0;
 
   const apy = (config.yieldBps / 100).toFixed(1);
+  const factoringFee = (config.factoringFeeBps / 100).toFixed(2);
 
   return (
     <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
       <h2 className="text-lg font-semibold mb-1">Pool Overview</h2>
       <p className="text-xs text-brand-muted mb-6">Showing {tokenLabel} liquidity</p>
 
-      <div className="grid grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
         <Stat label="Total Deposited" value={formatUSDC(deposited)} />
         <Stat label="Deployed" value={formatUSDC(deployed)} />
         <Stat label="Available" value={formatUSDC(available)} highlight />
         <Stat label="Total Paid In" value={formatUSDC(paidOut)} />
+        <Stat label="Fee Revenue" value={formatUSDC(feeRevenue)} />
       </div>
 
       <div className="mb-4">
@@ -45,6 +48,11 @@ export default function PoolStats({ config, tokenTotals, tokenLabel }: Props) {
       <div className="flex items-center justify-between p-3 bg-brand-gold/10 border border-brand-gold/20 rounded-xl">
         <span className="text-sm text-brand-muted">Target APY</span>
         <span className="text-brand-gold font-bold text-lg">{apy}%</span>
+      </div>
+
+      <div className="flex items-center justify-between p-3 mt-3 bg-brand-dark rounded-xl border border-brand-border">
+        <span className="text-sm text-brand-muted">Factoring Fee</span>
+        <span className="text-white font-bold text-lg">{factoringFee}%</span>
       </div>
     </div>
   );
