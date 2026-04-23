@@ -12,6 +12,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
 const MAX_INVOICES_PER_DAY: u32 = 10;
 const SECS_PER_DAY: u64 = 86400;
+const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -171,6 +172,9 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::StorageStats, &StorageStats::default());
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriodDays, &DEFAULT_GRACE_PERIOD_DAYS);
         bump_instance(&env);
     }
 
@@ -186,8 +190,7 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
-        env.events()
-            .publish((EVT, symbol_short!("paused")), admin);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
     }
 
     pub fn unpause(env: Env, admin: Address) {
@@ -442,8 +445,8 @@ impl InvoiceContract {
             .get(&DataKey::Invoice(id))
             .expect("invoice not found");
 
-        let is_fundable = invoice.status == InvoiceStatus::Pending
-            || invoice.status == InvoiceStatus::Verified;
+        let is_fundable =
+            invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
         if !is_fundable {
             panic!("invoice is not in fundable state");
         }
@@ -529,6 +532,19 @@ impl InvoiceContract {
 
         if invoice.status != InvoiceStatus::Funded {
             panic!("invoice is not funded");
+        }
+
+        // Check grace period
+        let grace_period_days: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
+        let now = env.ledger().timestamp();
+
+        if now < invoice.due_date + grace_period_secs {
+            panic!("grace period has not expired");
         }
 
         invoice.status = InvoiceStatus::Defaulted;
@@ -701,8 +717,10 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::ProposedWasmHash)
             .expect("no wasm hash proposed");
-        env.deployer().update_current_contract_wasm(wasm_hash);
-        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
+        let wasm_hash_bytes: BytesN<32> = wasm_hash.try_into().unwrap();
+        env.deployer().update_current_contract_wasm(wasm_hash_bytes);
+        env.events()
+            .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
 
