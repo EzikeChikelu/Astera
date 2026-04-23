@@ -1,0 +1,7 @@
+[advisories]
+# Add known-safe advisory IDs here as needed, e.g.:
+# ignore = ["RUSTSEC-2023-XXXX"]
+ignore = []
+
+[output]
+deny = ["unmaintained", "unsound", "vulnerability"]
