@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol,
 };
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -10,7 +10,6 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
-const MAX_WASM_HASH_LEN: u32 = 32;
 const MAX_INVOICES_PER_DAY: u32 = 10;
 const SECS_PER_DAY: u64 = 86400;
 
@@ -83,6 +82,10 @@ pub enum DataKey {
     Initialized,
     StorageStats,
     Paused,
+    DailyInvoiceCount(Address),
+    DailyInvoiceResetTime(Address),
+    ProposedWasmHash,
+    UpgradeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -225,7 +228,7 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::Oracle, &oracle);
         bump_instance(&env);
         env.events()
-            .publish((EVT, symbol_short!("set_oracle")), (admin, oracle));
+            .publish((EVT, symbol_short!("set_orc")), (admin, oracle));
     }
 
     pub fn create_invoice(
@@ -276,7 +279,11 @@ impl InvoiceContract {
             .unwrap_or(0);
         let id = count + 1;
 
-        let placeholder: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let pool_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("pool not configured");
         let empty_str = String::from_str(&env, "");
 
         let has_oracle = env.storage().instance().has(&DataKey::Oracle);
@@ -297,7 +304,7 @@ impl InvoiceContract {
             created_at: env.ledger().timestamp(),
             funded_at: 0,
             paid_at: 0,
-            pool_contract: placeholder,
+            pool_contract: pool_addr,
             verification_hash,
             oracle_verified: false,
             dispute_reason: empty_str,
@@ -646,7 +653,7 @@ impl InvoiceContract {
             .publish((EVT, symbol_short!("set_pool")), (admin, pool));
     }
 
-    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
         admin.require_auth();
         bump_instance(&env);
         let stored_admin: Address = env
@@ -657,9 +664,6 @@ impl InvoiceContract {
         if admin != stored_admin {
             panic!("unauthorized");
         }
-        if wasm_hash.len() != MAX_WASM_HASH_LEN {
-            panic!("invalid wasm hash length");
-        }
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
@@ -667,8 +671,8 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
         env.events().publish(
-            (EVT, symbol_short!("upgrade_proposed")),
-            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+            (EVT, symbol_short!("upg_prop")),
+            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
         );
     }
 
@@ -692,7 +696,7 @@ impl InvoiceContract {
         if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
             panic!("upgrade timelock not expired");
         }
-        let wasm_hash: Bytes = env
+        let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::ProposedWasmHash)
@@ -1237,5 +1241,232 @@ mod test {
         client.mark_funded(&id, &pool);
         client.mark_paid(&id, &sme);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
+    }
+
+    // ---- Issue #56: Pool Address Fix Tests ----
+
+    #[test]
+    fn test_pool_address_stored_on_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "h");
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &hash,
+        );
+
+        let invoice = client.get_invoice(&id);
+        // pool_contract must be the pool address, never the admin address
+        assert_eq!(invoice.pool_contract, pool);
+        assert_ne!(invoice.pool_contract, admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized pool")]
+    fn test_admin_cannot_bypass_pool_to_mark_funded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "h");
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &hash,
+        );
+        // Admin must not be able to call mark_funded; only the authorized pool address can
+        client.mark_funded(&id, &admin);
+    }
+
+    // ---- Issue #61: Edge-Case Tests ----
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_create_invoice_negative_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &-1i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_boundary_amount_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &i128::MAX,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        assert_eq!(client.get_invoice(&id).amount, i128::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized oracle")]
+    fn test_verify_invoice_unauthorized_oracle_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+
+        let rogue = Address::generate(&env);
+        client.verify_invoice(&id, &rogue, &true, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice is not in fundable state")]
+    fn test_fund_non_verified_invoice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        // Invoice will be in AwaitingVerification after create
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        // Trying to fund before verification must panic
+        client.mark_funded(&id, &pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_mark_paid_random_caller_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "h");
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &hash,
+        );
+        client.mark_funded(&id, &pool);
+        let random = Address::generate(&env);
+        client.mark_paid(&id, &random);
+    }
+
+    #[test]
+    #[should_panic(expected = "can only cleanup completed invoices")]
+    fn test_cleanup_active_invoice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "h");
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &hash,
+        );
+        // Invoice is still Pending — cleanup must panic
+        client.cleanup_invoice(&id, &admin);
+    }
+
+    #[test]
+    fn test_daily_invoice_limit_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let due = env.ledger().timestamp() + 50_000;
+        let d = String::from_str(&env, "D");
+        let desc = String::from_str(&env, "i");
+
+        // Create exactly MAX_INVOICES_PER_DAY (10) invoices — should all succeed
+        for _ in 0..10 {
+            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "daily invoice limit exceeded")]
+    fn test_daily_invoice_limit_exceeded_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let due = env.ledger().timestamp() + 50_000;
+        let d = String::from_str(&env, "D");
+        let desc = String::from_str(&env, "i");
+
+        // Create 11 invoices — the 11th must panic
+        for _ in 0..11 {
+            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        }
+    }
+
+    #[test]
+    fn test_daily_limit_resets_after_24_hours() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let d = String::from_str(&env, "D");
+        let desc = String::from_str(&env, "i");
+
+        // Exhaust today's limit
+        for _ in 0..10 {
+            let due = env.ledger().timestamp() + 50_000;
+            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        }
+
+        // Advance 24h+1s
+        env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+        // Should succeed again after reset
+        let due = env.ledger().timestamp() + 50_000;
+        let id = client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        assert!(id > 0);
     }
 }

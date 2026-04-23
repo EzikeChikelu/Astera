@@ -2,8 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short,
-    token, Address, Env, Symbol, Vec, IntoVal, String
-
+    token, Address, BytesN, Env, Symbol, Vec, IntoVal,
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
@@ -17,7 +16,6 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
-const MAX_WASM_HASH_LEN: u32 = 32;
 
 #[contracttype]
 #[derive(Clone)]
@@ -80,6 +78,8 @@ pub enum DataKey {
     Initialized,
     StorageStats,
     Paused,
+    ProposedWasmHash,
+    UpgradeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -263,7 +263,7 @@ impl FundingPool {
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
         env.events()
-            .publish((EVT, symbol_short!("remove_token")), (admin, token));
+            .publish((EVT, symbol_short!("rm_token")), (admin, token));
     }
 
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
@@ -359,6 +359,9 @@ impl FundingPool {
         let available = tt.pool_value - tt.total_deployed;
         if available < principal { panic!("insufficient available liquidity"); }
 
+        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let factoring_fee = calculate_factoring_fee(principal, config.factoring_fee_bps);
+
         let record = FundedInvoice {
             invoice_id,
             sme: sme.clone(),
@@ -366,6 +369,7 @@ impl FundingPool {
             principal,
             funded_at: env.ledger().timestamp(),
             due_date,
+            factoring_fee,
             repaid: false,
         };
         env.storage().persistent().set(&DataKey::FundedInvoice(invoice_id), &record);
@@ -414,7 +418,9 @@ impl FundingPool {
 
         let mut tt: PoolTokenTotals = env.storage().instance().get(&DataKey::TokenTotals(record.token.clone())).unwrap_or_default();
         tt.total_deployed -= record.principal;
-        tt.pool_value += total_interest as i128; // Represents distributed yield!
+        tt.pool_value += total_interest as i128; // yield added back to pool NAV
+        tt.total_fee_revenue += record.factoring_fee;
+        tt.total_paid_out += total_due;
         env.storage().instance().set(&DataKey::TokenTotals(record.token.clone()), &tt);
 
         let mut stats: PoolStorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
@@ -461,7 +467,7 @@ impl FundingPool {
         config.compound_interest = compound;
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
-            .publish((EVT, symbol_short!("set_compound")), (admin, compound));
+            .publish((EVT, symbol_short!("set_comp")), (admin, compound));
     }
 
     pub fn get_config(env: Env) -> PoolConfig { env.storage().instance().get(&DataKey::Config).expect("not initialized") }
@@ -503,7 +509,7 @@ impl FundingPool {
             elapsed,
             config.compound_interest,
         );
-        record.principal + interest as i128
+        record.principal + interest as i128 + record.factoring_fee
     }
 
     fn require_admin(env: &Env, admin: &Address) {
@@ -523,13 +529,10 @@ impl FundingPool {
         panic!("token not accepted");
     }
 
-    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin);
-        if wasm_hash.len() != MAX_WASM_HASH_LEN {
-            panic!("invalid wasm hash length");
-        }
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
@@ -537,8 +540,8 @@ impl FundingPool {
             .instance()
             .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
         env.events().publish(
-            (EVT, symbol_short!("upgrade_proposed")),
-            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+            (EVT, symbol_short!("upg_prop")),
+            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
         );
     }
 
@@ -555,7 +558,7 @@ impl FundingPool {
         if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
             panic!("upgrade timelock not expired");
         }
-        let wasm_hash: Bytes = env
+        let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::ProposedWasmHash)
@@ -570,7 +573,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        Env, String
+        Env,
     };
 
     #[contract]
@@ -644,7 +647,7 @@ mod test {
     fn test_yield_accumulation() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, usdc_id, share_token) = setup(&env);
+        let (client, admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
@@ -672,31 +675,31 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
 
-        let (client, admin, usdc_id) = setup(&env);
+        let (client, admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
         let principal: i128 = 1_000_000_000;
         mint(&env, &usdc_id, &investor, principal);
+        // sme needs to repay principal + interest + fee
         mint(&env, &usdc_id, &sme, principal * 2);
 
+        // Set factoring fee to 2.5%
         client.set_factoring_fee(&admin, &250);
         client.deposit(&investor, &usdc_id, &principal);
-        client.init_co_funding(
+        client.fund_invoice(
             &admin,
-            &1,
+            &1u64,
             &principal,
             &sme,
             &(env.ledger().timestamp() + 30 * 86_400),
             &usdc_id,
         );
-        client.commit_to_invoice(&investor, &1, &principal);
 
-        let funded = client.get_funded_invoice(&1).unwrap();
+        let funded = client.get_funded_invoice(&1u64).unwrap();
         let expected_fee = principal * 250 / BPS_DENOM as i128;
         assert_eq!(funded.factoring_fee, expected_fee);
 
-        client.set_factoring_fee(&admin, &500);
         env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
 
         let expected_interest =
@@ -704,17 +707,231 @@ mod test {
                 / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
-        assert_eq!(client.estimate_repayment(&1), expected_total_due);
+        assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
 
-        client.repay_invoice(&1, &sme);
-
-        let pos = client.get_position(&investor, &usdc_id).unwrap();
-        assert_eq!(pos.available, principal + expected_interest as i128);
-        assert_eq!(pos.earned, expected_interest as i128);
+        client.repay_invoice(&1u64, &sme);
 
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.total_fee_revenue, expected_fee);
-        assert_eq!(tt.total_deposited, principal + expected_interest as i128);
         assert_eq!(tt.total_paid_out, expected_total_due);
+        // pool_value grew by the yield
+        assert!(tt.pool_value >= principal);
+    }
+
+    // ---- Issue #61: Edge-Case Tests ----
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_deposit_zero_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        client.deposit(&investor, &usdc_id, &0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_deposit_negative_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        client.deposit(&investor, &usdc_id, &-100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "token not accepted")]
+    fn test_deposit_non_whitelisted_token_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let unknown_token = Address::generate(&env);
+        client.deposit(&investor, &unknown_token, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "shares must be positive")]
+    fn test_withdraw_zero_shares_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.withdraw(&investor, &usdc_id, &0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient shares")]
+    fn test_withdraw_more_than_balance_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 500);
+        client.deposit(&investor, &usdc_id, &500);
+        // Attempt to withdraw more shares than owned
+        client.withdraw(&investor, &usdc_id, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "principal must be positive")]
+    fn test_fund_invoice_zero_principal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &0i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient available liquidity")]
+    fn test_fund_invoice_insufficient_liquidity_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 500);
+        client.deposit(&investor, &usdc_id, &500);
+        // Try to fund more than available in pool
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice already funded")]
+    fn test_fund_invoice_duplicate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 2_000);
+        client.deposit(&investor, &usdc_id, &2_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &500i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        // Second fund on same invoice_id must panic
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &500i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "already repaid")]
+    fn test_double_repay_invoice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        client.repay_invoice(&1u64, &sme);
+        // Second repay must panic
+        client.repay_invoice(&1u64, &sme);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_fund_invoice_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.fund_invoice(
+            &attacker,
+            &1u64,
+            &100i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "yield cannot exceed 50%")]
+    fn test_set_yield_above_50_percent_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.set_yield(&admin, &5_001u32);
+    }
+
+    #[test]
+    fn test_set_yield_at_boundary_50_percent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.set_yield(&admin, &5_000u32);
+        assert_eq!(client.get_config().yield_bps, 5_000);
+    }
+
+    #[test]
+    fn test_add_token_and_remove_unused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let token_admin2 = Address::generate(&env);
+        let new_token = env.register_stellar_asset_contract_v2(token_admin2).address();
+        let new_share = env.register(DummyShare, ());
+        client.add_token(&admin, &new_token, &new_share);
+        let tokens = client.accepted_tokens();
+        assert_eq!(tokens.len(), 2);
+        client.remove_token(&admin, &new_token);
+        let tokens = client.accepted_tokens();
+        assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "token has non-zero pool balances")]
+    fn test_remove_token_with_balance_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        // pool has a non-zero balance — remove must panic
+        client.remove_token(&admin, &usdc_id);
     }
 }

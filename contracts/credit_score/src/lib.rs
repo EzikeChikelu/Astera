@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 const MIN_SCORE: u32 = 200;
@@ -15,7 +15,6 @@ const PTS_NEW_INVOICE: u32 = 5;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
-const MAX_WASM_HASH_LEN: u32 = 32;
 
 #[contracttype]
 #[derive(Clone)]
@@ -64,6 +63,8 @@ pub enum DataKey {
     Initialized,
     ScoreVersion,
     Paused,
+    ProposedWasmHash,
+    UpgradeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -474,7 +475,7 @@ impl CreditScoreContract {
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
         env.events()
-            .publish((EVT, symbol_short!("set_invoice_contract")), (admin, invoice_contract));
+            .publish((EVT, symbol_short!("set_inv_c")), (admin, invoice_contract));
     }
 
     pub fn set_pool_contract(env: Env, admin: Address, pool_contract: Address) {
@@ -485,7 +486,7 @@ impl CreditScoreContract {
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
         env.events()
-            .publish((EVT, symbol_short!("set_pool_contract")), (admin, pool_contract));
+            .publish((EVT, symbol_short!("set_pc")), (admin, pool_contract));
     }
 
     fn get_or_create_credit_data(env: &Env, sme: &Address) -> CreditScoreData {
@@ -522,12 +523,9 @@ impl CreditScoreContract {
         }
     }
 
-    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: Bytes) {
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
-        if wasm_hash.len() != MAX_WASM_HASH_LEN {
-            panic!("invalid wasm hash length");
-        }
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
@@ -535,8 +533,8 @@ impl CreditScoreContract {
             .instance()
             .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
         env.events().publish(
-            (EVT, symbol_short!("upgrade_proposed")),
-            (admin, wasm_hash, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+            (EVT, symbol_short!("upg_prop")),
+            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
         );
     }
 
@@ -552,7 +550,7 @@ impl CreditScoreContract {
         if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
             panic!("upgrade timelock not expired");
         }
-        let wasm_hash: Bytes = env
+        let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::ProposedWasmHash)
@@ -1283,5 +1281,103 @@ mod test {
         client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
         let data = client.get_credit_score(&sme);
         assert_eq!(data.total_invoices, 1);
+    }
+
+    // ---- Issue #61: Edge-Case Tests ----
+
+    #[test]
+    fn test_score_floor_never_below_200() {
+        // Mass defaults must never push score below MIN_SCORE (200)
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 300_000);
+        let (client, _admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 100_000u64;
+
+        for i in 1..=50u64 {
+            client.record_default(&pool, &i, &sme, &1_000_000_000i128, &due_date);
+        }
+
+        let data = client.get_credit_score(&sme);
+        assert!(
+            data.score >= MIN_SCORE,
+            "score {} dropped below floor {}",
+            data.score, MIN_SCORE
+        );
+    }
+
+    #[test]
+    fn test_score_ceiling_never_above_850() {
+        // Perfect payment history must never push score above MAX_SCORE (850)
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for i in 1..=50u64 {
+            // Pay early to maximize score
+            client.record_payment(&pool, &i, &sme, &100_000_000_000i128, &due_date, &(due_date - 86_400));
+        }
+
+        let data = client.get_credit_score(&sme);
+        assert!(
+            data.score <= MAX_SCORE,
+            "score {} exceeded ceiling {}",
+            data.score, MAX_SCORE
+        );
+    }
+
+    #[test]
+    fn test_score_band_classification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _inv, _pool) = setup(&env);
+
+        assert_eq!(client.get_score_band(&MIN_SCORE), String::from_str(&env, "Very Poor"));
+        assert_eq!(client.get_score_band(&MAX_SCORE), String::from_str(&env, "Excellent"));
+        assert_eq!(client.get_score_band(&500), String::from_str(&env, "Poor"));
+        assert_eq!(client.get_score_band(&580), String::from_str(&env, "Fair"));
+        assert_eq!(client.get_score_band(&670), String::from_str(&env, "Good"));
+        assert_eq!(client.get_score_band(&740), String::from_str(&env, "Very Good"));
+        assert_eq!(client.get_score_band(&800), String::from_str(&env, "Excellent"));
+    }
+
+    #[test]
+    fn test_default_does_not_affect_average_payment_days() {
+        // Defaults must not be included in average_payment_days calculation
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _inv, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        // One on-time payment
+        client.record_payment(&pool, &1, &sme, &1_000i128, &due_date, &(due_date - 1000));
+        let data_before = client.get_credit_score(&sme);
+
+        // Add a default — must not change average_payment_days
+        client.record_default(&pool, &2, &sme, &1_000i128, &due_date);
+        let data_after = client.get_credit_score(&sme);
+
+        assert_eq!(
+            data_before.average_payment_days, data_after.average_payment_days,
+            "default must not affect average_payment_days"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_unauthorized_record_payment_panics() {
+        // A random address that is not the pool must fail require_auth
+        let env = Env::default();
+        // No mock_all_auths — auth checks are enforced
+        let (client, _admin, _inv, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.record_payment(&attacker, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
     }
 }
