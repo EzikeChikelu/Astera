@@ -205,6 +205,85 @@ fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
     ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
 }
 
+fn fund_invoice_request(
+    env: &Env,
+    config: &PoolConfig,
+    accepted_tokens: &Vec<Address>,
+    stats: &mut PoolStorageStats,
+    request: &FundingRequest,
+) {
+    if request.principal <= 0 {
+        panic!("principal must be positive");
+    }
+
+    // Verify the token is accepted.
+    let mut token_ok = false;
+    for i in 0..accepted_tokens.len() {
+        if accepted_tokens.get(i).unwrap() == request.token {
+            token_ok = true;
+            break;
+        }
+    }
+    if !token_ok {
+        panic!("token not accepted");
+    }
+
+    // Ensure sufficient liquidity (cash = NAV - deployed).
+    let token_totals_key = DataKey::TokenTotals(request.token.clone());
+    let mut tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&token_totals_key)
+        .unwrap_or_default();
+    let available_liquidity = tt.pool_value - tt.total_deployed;
+    if available_liquidity < request.principal {
+        panic!("insufficient available liquidity");
+    }
+
+    let now = env.ledger().timestamp();
+    let factoring_fee = calculate_factoring_fee(request.principal, config.factoring_fee_bps);
+    let funded = FundedInvoice {
+        invoice_id: request.invoice_id,
+        sme: request.sme.clone(),
+        token: request.token.clone(),
+        principal: request.principal,
+        funded_at: now,
+        factoring_fee,
+        due_date: request.due_date,
+        repaid: false,
+    };
+
+    // Transfer principal to SME; NAV is unchanged because the funded invoice becomes an asset.
+    let token_client = token::Client::new(env, &request.token);
+    token_client.transfer(
+        &env.current_contract_address(),
+        &request.sme,
+        &request.principal,
+    );
+
+    // Persist invoice record and update totals/stats.
+    env.storage()
+        .persistent()
+        .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
+    set_funded_invoice_ttl(env, request.invoice_id, false);
+
+    tt.total_deployed += request.principal;
+    env.storage().instance().set(&token_totals_key, &tt);
+
+    stats.total_funded_invoices += 1;
+    stats.active_funded_invoices += 1;
+
+    env.events().publish(
+        (EVT, symbol_short!("funded")),
+        (
+            request.invoice_id,
+            request.sme.clone(),
+            request.principal,
+            request.token.clone(),
+        ),
+    );
+}
+
 #[contract]
 pub struct FundingPool;
 
@@ -510,13 +589,18 @@ impl FundingPool {
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
         let config = get_config_cached(&env);
-        let accepted_tokens: Vec<Address> = env
+        if env
             .storage()
             .persistent()
             .has(&DataKey::FundedInvoice(invoice_id))
         {
             panic!("invoice already funded");
         }
+        let accepted_tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .expect("not initialized");
 
         // Collateral check: high-value invoices must have collateral deposited first.
         let collateral_cfg: CollateralConfig = env
@@ -546,7 +630,7 @@ impl FundingPool {
             }
         }
 
-        let mut tt: PoolTokenTotals = env
+        let mut stats: PoolStorageStats = env
             .storage()
             .instance()
             .get(&DataKey::StorageStats)
