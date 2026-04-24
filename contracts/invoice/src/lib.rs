@@ -745,8 +745,7 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::ProposedWasmHash)
             .expect("no wasm hash proposed");
-        let wasm_hash_bytes: BytesN<32> = wasm_hash.try_into().unwrap();
-        env.deployer().update_current_contract_wasm(wasm_hash_bytes);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
@@ -1469,7 +1468,14 @@ mod test {
 
         // Create exactly MAX_INVOICES_PER_DAY (10) invoices — should all succeed
         for _ in 0..10 {
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1487,7 +1493,14 @@ mod test {
 
         // Create 11 invoices — the 11th must panic
         for _ in 0..11 {
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1504,7 +1517,14 @@ mod test {
         // Exhaust today's limit
         for _ in 0..10 {
             let due = env.ledger().timestamp() + 50_000;
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
 
         // Advance 24h+1s
@@ -1512,7 +1532,14 @@ mod test {
 
         // Should succeed again after reset
         let due = env.ledger().timestamp() + 50_000;
-        let id = client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &d,
+            &100i128,
+            &due,
+            &desc,
+            &String::from_str(&env, "h"),
+        );
         assert!(id > 0);
     }
 }
