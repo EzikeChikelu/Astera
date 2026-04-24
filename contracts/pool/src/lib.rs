@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
-    token, Address, BytesN, Env, Symbol, Vec, IntoVal,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, IntoVal,
+    Symbol, Vec,
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
@@ -386,18 +386,14 @@ impl FundingPool {
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token_key = DataKey::ShareToken(token.clone());
-        
+
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
             .get(&token_totals_key)
             .unwrap_or_default();
 
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .unwrap();
+        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
 
         // Calculate shares (single external call)
         let total_shares: i128 = env.invoke_contract(
@@ -405,20 +401,18 @@ impl FundingPool {
             &Symbol::new(&env, "total_supply"),
             Vec::new(&env),
         );
-        
+
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
             amount
         } else {
-            (amount as i128 * total_shares) / tt.pool_value
+            (amount * total_shares) / tt.pool_value
         };
 
         // Update pool value
         tt.pool_value += amount;
-        
+
         // Batch write: update token totals
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
 
         // Mint shares (single external call)
         let mut mint_args = Vec::new(&env);
@@ -443,13 +437,9 @@ impl FundingPool {
         // Batch read: get share token and token totals
         let share_token_key = DataKey::ShareToken(token.clone());
         let token_totals_key = DataKey::TokenTotals(token.clone());
-        
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .unwrap();
-            
+
+        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
+
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
@@ -472,7 +462,7 @@ impl FundingPool {
         );
 
         // Calculate amount and check liquidity
-        let amount = (shares as i128 * tt.pool_value) / total_shares;
+        let amount = (shares * tt.pool_value) / total_shares;
         let available_liquidity = tt.pool_value - tt.total_deployed;
         if available_liquidity < amount {
             panic!("insufficient available liquidity");
@@ -486,9 +476,7 @@ impl FundingPool {
 
         // Update pool value and write once
         tt.pool_value -= amount;
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
 
         // Transfer tokens
         let token_client = token::Client::new(&env, &token);
@@ -659,13 +647,9 @@ impl FundingPool {
         stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
         // Batch write: update all storage at once
-        env.storage()
-            .persistent()
-            .set(&funded_invoice_key, &record);
+        env.storage().persistent().set(&funded_invoice_key, &record);
         set_funded_invoice_ttl(&env, invoice_id, true);
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         env.events().publish(
@@ -703,12 +687,7 @@ impl FundingPool {
     /// Admin sets the collateral configuration.
     /// `threshold` — minimum principal (inclusive) that requires collateral.
     /// `collateral_bps` — required collateral as % of principal in basis points (max 10000 = 100%).
-    pub fn set_collateral_config(
-        env: Env,
-        admin: Address,
-        threshold: i128,
-        collateral_bps: u32,
-    ) {
+    pub fn set_collateral_config(env: Env, admin: Address, threshold: i128, collateral_bps: u32) {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -891,7 +870,8 @@ impl FundingPool {
         );
     }
 
-    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {        admin.require_auth();
+    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {
+        admin.require_auth();
         bump_instance(&env);
         let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         Self::require_admin(&env, &admin);
@@ -1152,8 +1132,7 @@ impl FundingPool {
             .instance()
             .get(&DataKey::ProposedWasmHash)
             .expect("no wasm hash proposed");
-        let wasm_hash_bytes: BytesN<32> = wasm_hash.try_into().unwrap();
-        env.deployer().update_current_contract_wasm(wasm_hash_bytes);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
@@ -1531,7 +1510,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let token_admin2 = Address::generate(&env);
-        let new_token = env.register_stellar_asset_contract_v2(token_admin2).address();
+        let new_token = env
+            .register_stellar_asset_contract_v2(token_admin2)
+            .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
         let tokens = client.accepted_tokens();
@@ -1778,7 +1759,10 @@ mod test {
         // Pool value should have increased by collateral amount, deployed reduced
         let tt_after = client.get_token_totals(&usdc_id);
         assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
-        assert_eq!(tt_after.total_deployed, tt_before.total_deployed - principal);
+        assert_eq!(
+            tt_after.total_deployed,
+            tt_before.total_deployed - principal
+        );
     }
 
     #[test]
