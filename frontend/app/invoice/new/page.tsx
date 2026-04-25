@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx } from '@/lib/contracts';
 import { toStroops } from '@/lib/stellar';
@@ -17,7 +18,6 @@ export default function NewInvoicePage() {
     description: '',
   });
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
@@ -28,7 +28,6 @@ export default function NewInvoicePage() {
     if (!wallet.address) return;
 
     setLoading(true);
-    setError(null);
 
     try {
       const dueTimestamp = Math.floor(new Date(form.dueDate).getTime() / 1000);
@@ -50,10 +49,11 @@ export default function NewInvoicePage() {
       if (signError) throw new Error(signError.message);
 
       await submitTx(signedTxXdr);
+      toast.success('Invoice tokenized successfully!');
       router.push('/dashboard');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Transaction failed.';
-      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -164,11 +164,6 @@ export default function NewInvoicePage() {
               </div>
             )}
 
-            {error && (
-              <div className="p-3 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-                {error}
-              </div>
-            )}
 
             <button
               type="submit"

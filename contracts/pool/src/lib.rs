@@ -66,7 +66,8 @@ pub struct FundedInvoice {
     /// Protocol fee locked when the invoice becomes fully funded.
     pub factoring_fee: i128,
     pub due_date: u64,
-    pub repaid: bool,
+    /// Total amount repaid so far (supports partial repayments)
+    pub repaid_amount: i128,
 }
 
 #[contracttype]
@@ -255,7 +256,7 @@ fn fund_invoice_request(
         funded_at: now,
         factoring_fee,
         due_date: request.due_date,
-        repaid: false,
+        repaid_amount: 0i128,
     };
 
     // Transfer principal to SME; NAV is unchanged because the funded invoice becomes an asset.
@@ -683,10 +684,14 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
     }
 
-    pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address) {
+    pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address, amount: i128) {
         payer.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
+
+        if amount <= 0 {
+            panic!("payment amount must be positive");
+        }
 
         // Batch read: get config and funded invoice record
         let config: PoolConfig = get_config_cached(&env);
@@ -697,11 +702,7 @@ impl FundingPool {
             .get(&funded_invoice_key)
             .expect("invoice not found");
 
-        if record.repaid {
-            panic!("already repaid");
-        }
-
-        // Calculate interest (pure computation, no storage access)
+        // Calculate total due (principal + interest + factoring fee)
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
         let total_interest = calculate_interest(
@@ -712,9 +713,24 @@ impl FundingPool {
         );
         let total_due = record.principal + total_interest as i128 + record.factoring_fee;
 
+        // Check if already fully repaid
+        if record.repaid_amount >= total_due {
+            panic!("invoice already fully repaid");
+        }
+
+        // Check if payment would exceed total due
+        if record.repaid_amount + amount > total_due {
+            panic!("payment exceeds total due");
+        }
+
         // Transfer payment
         let token_client = token::Client::new(&env, &record.token);
-        token_client.transfer(&payer, &env.current_contract_address(), &total_due);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+
+        // Update repaid amount
+        record.repaid_amount += amount;
+
+        let fully_repaid = record.repaid_amount >= total_due;
 
         // Batch read: get token totals and stats
         let token_totals_key = DataKey::TokenTotals(record.token.clone());
@@ -724,52 +740,65 @@ impl FundingPool {
             .get(&token_totals_key)
             .unwrap_or_default();
 
-        // Update values
-        record.repaid = true;
-        tt.total_deployed -= record.principal;
-        tt.pool_value += total_interest as i128; // yield added back to pool NAV
-        tt.total_fee_revenue += record.factoring_fee;
-        tt.total_paid_out += total_due;
-
         let mut stats: PoolStorageStats = env
             .storage()
             .instance()
             .get(&DataKey::StorageStats)
             .unwrap_or_default();
-        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+
+        // Only update pool totals when fully repaid
+        if fully_repaid {
+            tt.total_deployed -= record.principal;
+            tt.pool_value += total_interest as i128; // yield added back to pool NAV
+            tt.total_fee_revenue += record.factoring_fee;
+            tt.total_paid_out += total_due;
+            stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+        }
 
         // Batch write: update all storage at once
         env.storage().persistent().set(&funded_invoice_key, &record);
-        set_funded_invoice_ttl(&env, invoice_id, true);
+        if fully_repaid {
+            set_funded_invoice_ttl(&env, invoice_id, true);
+        }
         env.storage().instance().set(&token_totals_key, &tt);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish(
-            (EVT, symbol_short!("repaid")),
-            (invoice_id, record.principal, total_interest as i128),
-        );
+        if fully_repaid {
+            env.events().publish(
+                (EVT, symbol_short!("repaid")),
+                (invoice_id, record.principal, total_interest as i128),
+            );
+        } else {
+            // Emit partial repayment event
+            env.events().publish(
+                (EVT, symbol_short!("part_pay")),
+                (invoice_id, amount, record.repaid_amount),
+            );
+        }
 
-        // Release collateral back to depositor if any was locked for this invoice.
-        if let Some(mut col) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
-        {
-            if !col.settled {
-                let col_token_client = token::Client::new(&env, &col.token);
-                col_token_client.transfer(
-                    &env.current_contract_address(),
-                    &col.depositor,
-                    &col.amount,
-                );
-                col.settled = true;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::CollateralDeposit(invoice_id), &col);
-                env.events().publish(
-                    (EVT, symbol_short!("col_ret")),
-                    (invoice_id, col.depositor, col.amount),
-                );
+        // Release collateral back to depositor if any was locked for this invoice (only when fully repaid)
+        if fully_repaid {
+            if let Some(mut col) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
+            {
+                if !col.settled {
+                    let col_token_client = token::Client::new(&env, &col.token);
+                    col_token_client.transfer(
+                        &env.current_contract_address(),
+                        &col.depositor,
+                        &col.amount,
+                    );
+                    col.settled = true;
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::CollateralDeposit(invoice_id), &col);
+                    env.events().publish(
+                        (EVT, symbol_short!("col_ret")),
+                        (invoice_id, col.depositor, col.amount),
+                    );
+                }
             }
         }
     }
@@ -918,7 +947,19 @@ impl FundingPool {
             .get(&DataKey::FundedInvoice(invoice_id))
             .expect("funded invoice not found");
 
-        if record.repaid {
+        // Calculate total due to check if fully repaid
+        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let now = env.ledger().timestamp();
+        let elapsed_secs = now - record.funded_at;
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
+        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+
+        if record.repaid_amount >= total_due {
             panic!("invoice already repaid; collateral was returned on repayment");
         }
 
@@ -1098,8 +1139,21 @@ impl FundingPool {
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
             .expect("funded invoice not found");
-        if !record.repaid {
-            panic!("can only cleanup repaid invoices");
+
+        // Calculate total due to check if fully repaid
+        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let now = env.ledger().timestamp();
+        let elapsed_secs = now - record.funded_at;
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
+        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+
+        if record.repaid_amount < total_due {
+            panic!("can only cleanup fully repaid invoices");
         }
         env.storage()
             .persistent()
@@ -1136,7 +1190,14 @@ impl FundingPool {
             elapsed,
             config.compound_interest,
         );
-        record.principal + interest as i128 + record.factoring_fee
+        let total_due = record.principal + interest as i128 + record.factoring_fee;
+        // Return remaining amount due (total - already repaid)
+        let remaining = total_due - record.repaid_amount;
+        if remaining < 0 {
+            0
+        } else {
+            remaining
+        }
     }
 
     fn require_admin(env: &Env, admin: &Address) {
@@ -1394,7 +1455,8 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 100_000); // 100k secs
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Wait, 5000 principal at 8% APY for 100k secs.
         let tt = client.get_token_totals(&usdc_id);
@@ -1445,7 +1507,7 @@ mod test {
 
         assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
 
-        client.repay_invoice(&1u64, &sme);
+        client.repay_invoice(&1u64, &sme, &expected_total_due);
 
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.total_fee_revenue, expected_fee);
@@ -1601,9 +1663,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
         // Second repay must panic
-        client.repay_invoice(&1u64, &sme);
+        client.repay_invoice(&1u64, &sme, &amount_due);
     }
 
     #[test]
@@ -1881,7 +1944,8 @@ mod test {
 
         let sme_balance_before = token::Client::new(&env, &usdc_id).balance(&sme);
 
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
 
         let sme_balance_after = token::Client::new(&env, &usdc_id).balance(&sme);
         // SME should have gotten collateral back (minus repayment cost)
@@ -2006,7 +2070,8 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Trying to seize after repayment must panic
         client.seize_collateral(&admin, &1u64);
@@ -2217,7 +2282,8 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
         let attacker = Address::generate(&env);
         client.cleanup_funded_invoice(&attacker, &1u64);
     }
@@ -2267,7 +2333,8 @@ mod test {
             &usdc_id,
         );
         client.pause(&admin);
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
     }
 
     #[test]
@@ -2310,9 +2377,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
         let fi = client.get_funded_invoice(&1u64).unwrap();
-        assert!(fi.repaid);
+        assert!(fi.repaid_amount >= amount_due);
     }
 
     // --- KYC gate tests ---
