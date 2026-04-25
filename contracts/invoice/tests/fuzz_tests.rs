@@ -16,7 +16,7 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
     let pool = Address::generate(env);
     let sme = Address::generate(env);
     let expiration = 30u64 * 86_400u64;
-    client.initialize(&admin, &pool, &i128::MAX, &expiration);
+    client.initialize(&admin, &pool, &i128::MAX, &expiration, &u32::MAX);
     (client, admin, pool, sme)
 }
 
@@ -394,4 +394,6 @@ mod deterministic_fuzz {
         assert_eq!(invoices.get(1).unwrap().id, id1);
         assert_eq!(invoices.get(2).unwrap().id, id2);
     }
+
+    
 }
