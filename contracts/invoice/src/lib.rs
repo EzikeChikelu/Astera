@@ -729,14 +729,16 @@ impl InvoiceContract {
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
         bump_instance(&env);
-        load_invoice(&env, id)
+        let inv = load_invoice(&env, id);
+        maybe_expire_pending_invoice(&env, inv)
     }
 
     pub fn get_multiple_invoices(env: Env, ids: Vec<u64>) -> Vec<Invoice> {
         bump_instance(&env);
         let mut invoices: Vec<Invoice> = Vec::new(&env);
         for i in 0..ids.len() {
-            invoices.push_back(load_invoice(&env, ids.get(i).unwrap()));
+            let inv = load_invoice(&env, ids.get(i).unwrap());
+            invoices.push_back(maybe_expire_pending_invoice(&env, inv));
         }
         invoices
     }
@@ -744,6 +746,7 @@ impl InvoiceContract {
     /// SEP-oriented metadata for invoice id `id` (same ledger fields as `get_invoice`).
     pub fn get_metadata(env: Env, id: u64) -> InvoiceMetadata {
         let inv = load_invoice(&env, id);
+        let inv = maybe_expire_pending_invoice(&env, inv);
 
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);

@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useStore, getStoredWalletAddress } from '@/lib/store';
 import toast from 'react-hot-toast';
-import { useStore } from '@/lib/store';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
 
@@ -23,6 +23,31 @@ export default function WalletConnect() {
   const [retryCount, setRetryCount] = useState(0);
 
   const loading = step !== 'idle';
+
+  // Auto-reconnect on mount if a wallet address was previously stored
+  useEffect(() => {
+    const stored = getStoredWalletAddress();
+    if (!stored || wallet.connected) return;
+
+    void (async () => {
+      try {
+        const freighter = await import('@stellar/freighter-api');
+        const { isConnected } = await freighter.isConnected();
+        if (!isConnected) return;
+
+        const { isAllowed } = await freighter.isAllowed();
+        if (!isAllowed) return;
+
+        const { address, error: addrError } = await freighter.getAddress();
+        if (addrError || !address) return;
+
+        setWallet({ address, connected: true, network: 'testnet' });
+      } catch {
+        // Silent failure — user can reconnect manually
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function connect(attempt = 0) {
     setStep('detecting');

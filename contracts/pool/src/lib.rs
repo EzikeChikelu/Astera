@@ -13,6 +13,8 @@ const SECS_PER_YEAR: u64 = 31_536_000;
 const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 /// Default collateral ratio: 20% of principal (2000 bps).
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
+const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
+const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -29,6 +31,9 @@ pub struct PoolConfig {
     pub yield_bps: u32,
     pub factoring_fee_bps: u32,
     pub compound_interest: bool,
+    pub last_yield_change_at: u64,
+    pub yield_change_cooldown_secs: u64,
+    pub max_yield_change_bps: u32,
 }
 
 #[contracttype]
@@ -306,6 +311,9 @@ impl FundingPool {
             yield_bps: DEFAULT_YIELD_BPS,
             factoring_fee_bps: DEFAULT_FACTORING_FEE_BPS,
             compound_interest: false,
+            last_yield_change_at: env.ledger().timestamp(),
+            yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
+            max_yield_change_bps: DEFAULT_MAX_YIELD_CHANGE_BPS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -962,10 +970,56 @@ impl FundingPool {
         if yield_bps > 5_000 {
             panic!("yield cannot exceed 50%");
         }
+
+        let now = env.ledger().timestamp();
+        let next_allowed = config
+            .last_yield_change_at
+            .saturating_add(config.yield_change_cooldown_secs);
+        if now < next_allowed {
+            panic!("yield change cooldown active");
+        }
+
+        let current = config.yield_bps;
+        let delta = if yield_bps >= current {
+            yield_bps - current
+        } else {
+            current - yield_bps
+        };
+        if delta > config.max_yield_change_bps {
+            panic!("yield change exceeds maximum step");
+        }
+
         config.yield_bps = yield_bps;
+        config.last_yield_change_at = now;
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("set_yield")), (admin, yield_bps));
+    }
+
+    pub fn set_yield_change_policy(
+        env: Env,
+        admin: Address,
+        cooldown_secs: u64,
+        max_change_bps: u32,
+    ) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        Self::require_admin(&env, &admin);
+        if cooldown_secs == 0 {
+            panic!("cooldown must be non-zero");
+        }
+        if max_change_bps == 0 {
+            panic!("max change must be non-zero");
+        }
+        config.yield_change_cooldown_secs = cooldown_secs;
+        config.max_yield_change_bps = max_change_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("set_y_pol")),
+            (admin, cooldown_secs, max_change_bps),
+        );
     }
 
     pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32) {
@@ -1227,7 +1281,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        Env,
+        BytesN, Env,
     };
 
     #[contract]
@@ -1584,8 +1638,40 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
+        // Allow a large one-time step so we can test the 50% ceiling independently.
+        client.set_yield_change_policy(&admin, &1u64, &5_000u32);
+        env.ledger().with_mut(|l| l.timestamp += 1);
         client.set_yield(&admin, &5_000u32);
         assert_eq!(client.get_config().yield_bps, 5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "yield change cooldown active")]
+    fn test_set_yield_cooldown_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        // setup() sets timestamp; first change must wait out cooldown
+        env.ledger()
+            .with_mut(|l| l.timestamp += DEFAULT_YIELD_CHANGE_COOLDOWN_SECS);
+        client.set_yield(&admin, &900u32);
+
+        // immediate second change should fail
+        client.set_yield(&admin, &950u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "yield change exceeds maximum step")]
+    fn test_set_yield_max_step_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        env.ledger()
+            .with_mut(|l| l.timestamp += DEFAULT_YIELD_CHANGE_COOLDOWN_SECS);
+        // DEFAULT_YIELD_BPS = 800, max step = 200 => delta 301 should fail
+        client.set_yield(&admin, &1_101u32);
     }
 
     #[test]
@@ -1924,5 +2010,373 @@ mod test {
 
         // Trying to seize after repayment must panic
         client.seize_collateral(&admin, &1u64);
+    }
+
+    // ---- Issue #105: Comprehensive Access Control Tests ----
+
+    // --- Admin-gated function guards ---
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_pause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_unpause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.pause(&admin);
+        let attacker = Address::generate(&env);
+        client.unpause(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_add_token_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        let ta = Address::generate(&env);
+        let new_token = env.register_stellar_asset_contract_v2(ta).address();
+        let new_share = env.register(DummyShare, ());
+        client.add_token(&attacker, &new_token, &new_share);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_remove_token_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let ta2 = Address::generate(&env);
+        let new_token = env.register_stellar_asset_contract_v2(ta2).address();
+        let new_share = env.register(DummyShare, ());
+        client.add_token(&admin, &new_token, &new_share);
+        let attacker = Address::generate(&env);
+        client.remove_token(&attacker, &new_token);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_yield_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_yield(&attacker, &500u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_factoring_fee_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_factoring_fee(&attacker, &100u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_compound_interest_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_compound_interest(&attacker, &true);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_collateral_config_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_collateral_config(&attacker, &1_000i128, &2_000u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_exchange_rate_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_exchange_rate(&attacker, &usdc_id, &10_000u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_kyc_required_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.set_kyc_required(&attacker, &true);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_investor_kyc_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        let investor = Address::generate(&env);
+        client.set_investor_kyc(&attacker, &investor, &true);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_propose_upgrade_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+        client.propose_upgrade(&attacker, &hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_fund_multiple_invoices_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 2_000);
+        client.deposit(&investor, &usdc_id, &2_000);
+
+        let mut requests = Vec::new(&env);
+        requests.push_back(FundingRequest {
+            invoice_id: 1u64,
+            principal: 500,
+            sme,
+            due_date: env.ledger().timestamp() + 10_000,
+            token: usdc_id,
+        });
+        let attacker = Address::generate(&env);
+        client.fund_multiple_invoices(&attacker, &requests);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_seize_collateral_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        let attacker = Address::generate(&env);
+        client.seize_collateral(&attacker, &1u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_cleanup_funded_invoice_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        client.repay_invoice(&1u64, &sme);
+        let attacker = Address::generate(&env);
+        client.cleanup_funded_invoice(&attacker, &1u64);
+    }
+
+    // --- Pause mechanism tests ---
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_fund_invoice_when_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 2_000);
+        client.deposit(&investor, &usdc_id, &2_000);
+        client.pause(&admin);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_repay_invoice_when_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        client.pause(&admin);
+        client.repay_invoice(&1u64, &sme);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_deposit_collateral_when_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        mint(&env, &usdc_id, &sme, 1_000);
+        client.pause(&admin);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
+    }
+
+    #[test]
+    fn test_pause_and_unpause_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 2_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &2_000);
+
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        client.repay_invoice(&1u64, &sme);
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert!(fi.repaid);
+    }
+
+    // --- KYC gate tests ---
+
+    #[test]
+    #[should_panic(expected = "investor not KYC approved")]
+    fn test_deposit_when_kyc_required_unapproved_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+    }
+
+    #[test]
+    fn test_deposit_when_kyc_required_and_approved_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        client.set_investor_kyc(&admin, &investor, &true);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "investor not KYC approved")]
+    fn test_kyc_revocation_blocks_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        client.set_investor_kyc(&admin, &investor, &true);
+        mint(&env, &usdc_id, &investor, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+
+        // Revoke KYC — subsequent deposit must be blocked
+        client.set_investor_kyc(&admin, &investor, &false);
+        client.deposit(&investor, &usdc_id, &1_000);
+    }
+
+    #[test]
+    fn test_kyc_not_required_allows_any_investor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        // KYC disabled by default — any investor can deposit
+        assert!(!client.kyc_required());
+        mint(&env, &usdc_id, &investor, 500);
+        client.deposit(&investor, &usdc_id, &500);
+
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, 500);
     }
 }

@@ -1,6 +1,13 @@
 import { create } from 'zustand';
 import type { WalletState, PoolConfig, InvestorPosition } from './types';
 
+const WALLET_KEY = 'astera_wallet_address';
+
+export function getStoredWalletAddress(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(WALLET_KEY);
+}
+
 interface AsteraStore {
   wallet: WalletState;
   poolConfig: PoolConfig | null;
@@ -17,9 +24,22 @@ export const useStore = create<AsteraStore>((set) => ({
   poolConfig: null,
   position: null,
 
-  setWallet: (wallet) => set({ wallet }),
+  setWallet: (wallet) => {
+    if (typeof window !== 'undefined') {
+      if (wallet.connected && wallet.address) {
+        localStorage.setItem(WALLET_KEY, wallet.address);
+      } else {
+        localStorage.removeItem(WALLET_KEY);
+      }
+    }
+    set({ wallet });
+  },
   setPoolConfig: (poolConfig) => set({ poolConfig }),
   setPosition: (position) => set({ position }),
-  disconnect: () =>
-    set({ wallet: { address: null, connected: false, network: 'testnet' }, position: null }),
+  disconnect: () => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(WALLET_KEY);
+    }
+    set({ wallet: { address: null, connected: false, network: 'testnet' }, position: null });
+  },
 }));
