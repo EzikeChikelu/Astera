@@ -10,6 +10,7 @@ import NotificationBell from './NotificationBell';
 const links = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/invest', label: 'Invest' },
+  { href: '/analytics', label: 'Analytics' },
   { href: '/portfolio', label: 'Portfolio' },
   { href: '/invoice/new', label: 'New Invoice' },
 ];
@@ -35,6 +36,15 @@ export default function Navbar() {
     };
   }, [drawerOpen]);
 
+  // Close drawer on Escape key
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && drawerOpen) setDrawerOpen(false);
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [drawerOpen]);
+
   return (
     <>
       <header className="fixed top-0 left-0 right-0 z-50 border-b border-brand-border bg-brand-dark/80 backdrop-blur-md">
@@ -43,7 +53,7 @@ export default function Navbar() {
             <span className="gradient-text">Astera</span>
           </Link>
 
-          {/* Desktop nav — unchanged */}
+          {/* Desktop nav */}
           <nav className="hidden md:flex items-center gap-1">
             {links.map((l) => (
               <Link
@@ -74,7 +84,8 @@ export default function Navbar() {
               onClick={() => setDrawerOpen(true)}
               aria-label="Open menu"
               aria-expanded={drawerOpen}
-              className="p-2 rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
+              aria-controls="mobile-nav"
+              className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
             >
               <svg
                 width="20"
@@ -111,6 +122,7 @@ export default function Navbar() {
         Both the backdrop and drawer are hidden on md+ so desktop is unaffected.
       */}
       <aside
+        id="mobile-nav"
         role="dialog"
         aria-label="Navigation menu"
         aria-modal="true"
@@ -124,7 +136,7 @@ export default function Navbar() {
           <button
             onClick={() => setDrawerOpen(false)}
             aria-label="Close menu"
-            className="p-2 rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
+            className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
           >
             <svg
               width="18"
@@ -147,7 +159,7 @@ export default function Navbar() {
             <Link
               key={l.href}
               href={l.href}
-              className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors ${
+              className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
                 path === l.href
                   ? 'bg-brand-gold/10 text-brand-gold'
                   : 'text-brand-muted hover:text-white hover:bg-brand-card'
