@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
+import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import { getPoolConfig, getInvoiceCount, getInvoice } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
@@ -10,12 +12,10 @@ export default function AdminDashboardPage() {
   const { poolConfig, setPoolConfig } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadData() {
       setLoading(true);
-      setError(null);
       try {
         const [config, count] = await Promise.all([getPoolConfig(), getInvoiceCount()]);
         setPoolConfig(config);
@@ -27,7 +27,7 @@ export default function AdminDashboardPage() {
         }
         setInvoices(all);
       } catch (e) {
-        setError('Failed to load protocol statistics.');
+        toast.error('Failed to load protocol statistics.');
         console.error(e);
       } finally {
         setLoading(false);
@@ -59,25 +59,18 @@ export default function AdminDashboardPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <div className="h-10 w-48 bg-brand-card animate-pulse rounded-lg" />
+        <Skeleton className="h-10 w-48 rounded-lg" />
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="h-32 bg-brand-card animate-pulse rounded-2xl border border-brand-border"
-            />
-          ))}
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+          <StatCardSkeleton />
         </div>
       </div>
     );
   }
 
-  if (error || !stats) {
-    return (
-      <div className="p-6 bg-red-900/20 border border-red-800/50 rounded-2xl text-red-500">
-        {error || 'Failed to calculate stats.'}
-      </div>
-    );
+  if (!stats) {
+    return null;
   }
 
   return (

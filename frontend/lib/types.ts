@@ -67,7 +67,8 @@ export interface FundedInvoice {
   fundedAt: number;
   factoringFee: bigint;
   dueDate: number;
-  repaid: boolean;
+  /** Total amount repaid so far (supports partial repayments) */
+  repaidAmount: bigint;
 }
 
 export type WalletState = {

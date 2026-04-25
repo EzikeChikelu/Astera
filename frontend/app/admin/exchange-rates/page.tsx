@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
+import { Skeleton } from '@/components/Skeleton';
 import {
   getAcceptedTokens,
   getExchangeRate,
@@ -16,8 +18,6 @@ export default function AdminExchangeRatesPage() {
   const [rates, setRates] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [txLoading, setTxLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [selectedToken, setSelectedToken] = useState('');
   const [newRatePct, setNewRatePct] = useState('');
 
@@ -60,23 +60,21 @@ export default function AdminExchangeRatesPage() {
 
     const bps = Math.round(parseFloat(newRatePct) * 100);
     if (isNaN(bps) || bps <= 0) {
-      setError('Rate must be a positive number (e.g. 100 for 1:1 with USD).');
+      toast.error('Rate must be a positive number (e.g. 100 for 1:1 with USD).');
       return;
     }
 
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
     try {
       const xdr = await buildSetExchangeRateTx(wallet.address, selectedToken, bps);
       await signAndSubmit(xdr);
       setRates((prev) => ({ ...prev, [selectedToken]: bps }));
-      setSuccess(
+      toast.success(
         `Exchange rate for ${stablecoinLabel(selectedToken)} set to ${newRatePct}% of USD (${bps} bps).`,
       );
       setNewRatePct('');
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
       setTxLoading(false);
     }
@@ -96,7 +94,11 @@ export default function AdminExchangeRatesPage() {
       <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
         <h2 className="font-semibold mb-4">Current Rates</h2>
         {loading ? (
-          <div className="h-20 animate-pulse bg-brand-dark rounded-xl" />
+          <div className="space-y-3">
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+          </div>
         ) : tokens.length === 0 ? (
           <p className="text-brand-muted text-sm">No tokens configured.</p>
         ) : (
@@ -150,17 +152,6 @@ export default function AdminExchangeRatesPage() {
               className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
             />
           </div>
-
-          {error && (
-            <div className="p-3 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-              {error}
-            </div>
-          )}
-          {success && (
-            <div className="p-3 bg-green-900/20 border border-green-800/50 rounded-xl text-green-400 text-sm">
-              {success}
-            </div>
-          )}
 
           <button
             type="submit"
