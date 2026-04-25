@@ -254,7 +254,7 @@ export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice
     fundedAt: Number(r.funded_at),
     factoringFee: BigInt((r.factoring_fee as string | number | bigint) ?? 0),
     dueDate: Number(r.due_date),
-    repaid: Boolean(r.repaid),
+    repaidAmount: BigInt((r.repaid_amount as string | number | bigint) ?? 0),
   };
 }
 
@@ -328,7 +328,7 @@ export async function buildCommitToInvoiceTx(params: {
   return prepared.toXDR();
 }
 
-export async function buildRepayTx(params: { payer: string; invoiceId: number }): Promise<string> {
+export async function buildRepayTx(params: { payer: string; invoiceId: number; amount: bigint }): Promise<string> {
   const account = await rpc.getAccount(params.payer);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -341,6 +341,7 @@ export async function buildRepayTx(params: { payer: string; invoiceId: number })
         'repay_invoice',
         nativeToScVal(params.invoiceId, { type: 'u64' }),
         new Address(params.payer).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
       ),
     )
     .setTimeout(30)

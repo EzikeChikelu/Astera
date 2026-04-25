@@ -151,6 +151,7 @@ export default function InvoiceDetailPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [repayAmount, setRepayAmount] = useState<string>('');
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -270,13 +271,29 @@ export default function InvoiceDetailPage() {
         )
       : 0;
 
+  // Calculate remaining amount due for partial repayments
+  const remainingDue = fundedInvoice && poolConfig
+    ? fundedInvoice.principal + projectedInterest + fundedInvoice.factoringFee - fundedInvoice.repaidAmount
+    : 0n;
+  const fullyRepaid = remainingDue <= 0n;
+
   async function handleRepay() {
-    if (!wallet.address || !invoice) return;
+    if (!wallet.address || !invoice || !fundedInvoice) return;
+
+    const amount = repayAmount ? BigInt(repayAmount) : remainingDue;
+    if (amount <= 0n) {
+      toast.error('Please enter a valid repayment amount.');
+      return;
+    }
+    if (amount > remainingDue) {
+      toast.error('Payment exceeds remaining amount due.');
+      return;
+    }
 
     setActionLoading(true);
 
     try {
-      const xdr = await buildRepayTx({ payer: wallet.address, invoiceId: invoice.id });
+      const xdr = await buildRepayTx({ payer: wallet.address, invoiceId: invoice.id, amount });
       const freighter = await import('@stellar/freighter-api');
       const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
         networkPassphrase: 'Test SDF Network ; September 2015',
@@ -286,7 +303,9 @@ export default function InvoiceDetailPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      toast.success('Invoice repaid successfully!');
+      const msg = amount === remainingDue ? 'Invoice repaid successfully!' : 'Partial payment recorded successfully!';
+      toast.success(msg);
+      setRepayAmount('');
       await loadInvoice();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to repay invoice.';
@@ -466,8 +485,16 @@ export default function InvoiceDetailPage() {
               <div className="flex items-center justify-between">
                 <span className="text-brand-muted">Estimated total due</span>
                 <span className="font-semibold">
-                  {formatUSDC(fundedInvoice.principal + projectedInterest)}
+                  {formatUSDC(fundedInvoice.principal + projectedInterest + fundedInvoice.factoringFee)}
                 </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-brand-muted">Already repaid</span>
+                <span className="font-medium text-green-400">{formatUSDC(fundedInvoice.repaidAmount)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-brand-muted font-semibold">Remaining due</span>
+                <span className="font-semibold text-brand-gold">{formatUSDC(remainingDue)}</span>
               </div>
               <div className="h-2 bg-brand-border rounded-full overflow-hidden">
                 <div
@@ -541,14 +568,33 @@ export default function InvoiceDetailPage() {
         )}
 
         <div className="space-y-3">
-          {isOwner && metadata.status === 'Funded' && fundedInvoice && (
-            <button
-              onClick={() => void handleRepay()}
-              disabled={actionLoading}
-              className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
-            >
-              {actionLoading ? 'Processing repayment...' : 'Repay invoice'}
-            </button>
+          {isOwner && metadata.status === 'Funded' && fundedInvoice && !fullyRepaid && (
+            <div className="p-4 bg-brand-card border border-brand-border rounded-2xl space-y-3">
+              <label className="block text-sm text-brand-muted mb-1">
+                Repayment Amount (USDC)
+              </label>
+              <input
+                type="text"
+                value={repayAmount}
+                onChange={(e) => setRepayAmount(e.target.value)}
+                placeholder={`Max: ${formatUSDC(remainingDue)}`}
+                disabled={actionLoading}
+                className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
+              />
+              <button
+                onClick={() => void handleRepay()}
+                disabled={actionLoading || !repayAmount}
+                className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
+              >
+                {actionLoading ? 'Processing payment...' : repayAmount ? `Pay ${formatUSDC(BigInt(repayAmount))}` : 'Pay full amount'}
+              </button>
+            </div>
+          )}
+
+          {isOwner && metadata.status === 'Funded' && fundedInvoice && fullyRepaid && (
+            <div className="p-4 bg-green-900/20 border border-green-800/50 rounded-xl text-sm text-green-400 text-center">
+              Invoice fully repaid ✓
+            </div>
           )}
 
           {isAdmin && (metadata.status === 'Pending' || metadata.status === 'Verified') && (
