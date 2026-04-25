@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import toast from 'react-hot-toast';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -150,7 +151,6 @@ export default function InvoiceDetailPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -274,7 +274,6 @@ export default function InvoiceDetailPage() {
     if (!wallet.address || !invoice) return;
 
     setActionLoading(true);
-    setActionError(null);
 
     try {
       const xdr = await buildRepayTx({ payer: wallet.address, invoiceId: invoice.id });
@@ -287,10 +286,11 @@ export default function InvoiceDetailPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
+      toast.success('Invoice repaid successfully!');
       await loadInvoice();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to repay invoice.';
-      setActionError(msg);
+      toast.error(msg);
       console.error(e);
     } finally {
       setActionLoading(false);
@@ -541,12 +541,6 @@ export default function InvoiceDetailPage() {
         )}
 
         <div className="space-y-3">
-          {actionError && (
-            <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-sm text-red-300">
-              {actionError}
-            </div>
-          )}
-
           {isOwner && metadata.status === 'Funded' && fundedInvoice && (
             <button
               onClick={() => void handleRepay()}

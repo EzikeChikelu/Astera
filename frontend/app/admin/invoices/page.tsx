@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import {
   getMultipleInvoices,
@@ -20,8 +21,6 @@ export default function AdminInvoicesPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState(0);
   const [scannedCount, setScannedCount] = useState(0);
 
@@ -38,7 +37,6 @@ export default function AdminInvoicesPage() {
 
   const loadInvoices = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const count = await getInvoiceCount();
       setTotalCount(count);
@@ -53,7 +51,7 @@ export default function AdminInvoicesPage() {
       setInvoices(pending);
       setScannedCount(Math.min(PAGE_SIZE, count));
     } catch (e) {
-      setError('Failed to load pending invoices.');
+      toast.error('Failed to load pending invoices.');
       console.error(e);
     } finally {
       setLoading(false);
@@ -94,8 +92,6 @@ export default function AdminInvoicesPage() {
     }
 
     setActionLoading(invoice.id);
-    setError(null);
-    setSuccess(null);
 
     try {
       const xdr = await buildInitCoFundingTx({
@@ -116,11 +112,11 @@ export default function AdminInvoicesPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      setSuccess(`Invoice #${invoice.id} has been approved for co-funding.`);
+      toast.success(`Invoice #${invoice.id} has been approved for co-funding.`);
       await loadInvoices();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to approve invoice.';
-      setError(msg);
+      toast.error(msg);
       console.error(e);
     } finally {
       setActionLoading(null);
@@ -135,24 +131,6 @@ export default function AdminInvoicesPage() {
           Review and approve new invoice applications for co-funding.
         </p>
       </div>
-
-      {error && (
-        <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-red-500 text-sm flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-lg">
-            &times;
-          </button>
-        </div>
-      )}
-
-      {success && (
-        <div className="p-4 bg-green-900/20 border border-green-800/50 rounded-xl text-green-500 text-sm flex items-center justify-between">
-          <span>{success}</span>
-          <button onClick={() => setSuccess(null)} className="text-lg">
-            &times;
-          </button>
-        </div>
-      )}
 
       <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">

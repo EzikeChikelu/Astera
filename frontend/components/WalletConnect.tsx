@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
@@ -19,20 +20,18 @@ const MAX_RETRIES = 2;
 export default function WalletConnect() {
   const { wallet, setWallet, disconnect } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
-  const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
 
   const loading = step !== 'idle';
 
   async function connect(attempt = 0) {
     setStep('detecting');
-    setError(null);
     try {
       const freighter = await import('@stellar/freighter-api');
 
       const { isConnected } = await freighter.isConnected();
       if (!isConnected) {
-        setError('Freighter not detected. Please install the browser extension and reload.');
+        toast.error('Freighter not detected. Please install the browser extension and reload.');
         setStep('idle');
         return;
       }
@@ -46,12 +45,13 @@ export default function WalletConnect() {
       setStep('fetching-address');
       const { address, error: addrError } = await freighter.getAddress();
       if (addrError) {
-        setError('Could not retrieve wallet address. Please try again.');
+        toast.error('Could not retrieve wallet address. Please try again.');
         setStep('idle');
         return;
       }
 
       setWallet({ address, connected: true, network: 'testnet' });
+      toast.success('Wallet connected successfully!');
       setRetryCount(0);
       setStep('idle');
     } catch (e) {
@@ -61,7 +61,7 @@ export default function WalletConnect() {
         // Brief delay before auto-retry
         setTimeout(() => connect(attempt + 1), 800);
       } else {
-        setError('Failed to connect wallet after multiple attempts. Please try again.');
+        toast.error('Failed to connect wallet after multiple attempts. Please try again.');
         setRetryCount(0);
         setStep('idle');
       }
@@ -102,16 +102,13 @@ export default function WalletConnect() {
         {STEP_LABELS[step]}
       </button>
 
-      {error && (
-        <div role="alert" className="flex flex-col items-end gap-1">
-          <p className="text-red-400 text-xs max-w-[220px] text-right">{error}</p>
-          <button
-            onClick={handleRetry}
-            className="text-xs text-brand-gold hover:text-brand-amber underline transition-colors"
-          >
-            Retry
-          </button>
-        </div>
+      {retryCount > 0 && (
+        <button
+          onClick={handleRetry}
+          className="text-xs text-brand-gold hover:text-brand-amber underline transition-colors"
+        >
+          Retry
+        </button>
       )}
 
       {loading && retryCount > 0 && (

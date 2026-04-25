@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import {
   getKycRequired,
@@ -15,8 +16,6 @@ export default function AdminKycPage() {
   const [kycRequired, setKycRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [txLoading, setTxLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   const [lookupAddress, setLookupAddress] = useState('');
   const [lookupResult, setLookupResult] = useState<boolean | null>(null);
@@ -53,15 +52,13 @@ export default function AdminKycPage() {
   async function handleToggleKyc() {
     if (!wallet.address) return;
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
     try {
       const xdr = await buildSetKycRequiredTx(wallet.address, !kycRequired);
       await signAndSubmit(xdr);
       setKycRequired((prev) => !prev);
-      setSuccess(`KYC requirement ${!kycRequired ? 'enabled' : 'disabled'}.`);
+      toast.success(`KYC requirement ${!kycRequired ? 'enabled' : 'disabled'}.`);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
       setTxLoading(false);
     }
@@ -87,17 +84,15 @@ export default function AdminKycPage() {
     e.preventDefault();
     if (!wallet.address || !manageAddress) return;
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
     try {
       const xdr = await buildSetInvestorKycTx(wallet.address, manageAddress, manageApproved);
       await signAndSubmit(xdr);
-      setSuccess(
+      toast.success(
         `Investor ${manageAddress.slice(0, 8)}… has been ${manageApproved ? 'approved' : 'revoked'}.`,
       );
       setManageAddress('');
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
       setTxLoading(false);
     }
@@ -134,17 +129,6 @@ export default function AdminKycPage() {
             {txLoading ? 'Processing…' : kycRequired ? 'Disable KYC' : 'Enable KYC'}
           </button>
         </div>
-
-        {error && (
-          <div className="p-3 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-            {error}
-          </div>
-        )}
-        {success && (
-          <div className="p-3 bg-green-900/20 border border-green-800/50 rounded-xl text-green-400 text-sm">
-            {success}
-          </div>
-        )}
       </div>
 
       {/* Approve / Revoke investor */}

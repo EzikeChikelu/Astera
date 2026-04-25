@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { getPoolConfig, getInvoiceCount, getInvoice } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
@@ -10,12 +11,10 @@ export default function AdminDashboardPage() {
   const { poolConfig, setPoolConfig } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadData() {
       setLoading(true);
-      setError(null);
       try {
         const [config, count] = await Promise.all([getPoolConfig(), getInvoiceCount()]);
         setPoolConfig(config);
@@ -27,7 +26,7 @@ export default function AdminDashboardPage() {
         }
         setInvoices(all);
       } catch (e) {
-        setError('Failed to load protocol statistics.');
+        toast.error('Failed to load protocol statistics.');
         console.error(e);
       } finally {
         setLoading(false);
@@ -72,12 +71,8 @@ export default function AdminDashboardPage() {
     );
   }
 
-  if (error || !stats) {
-    return (
-      <div className="p-6 bg-red-900/20 border border-red-800/50 rounded-2xl text-red-500">
-        {error || 'Failed to calculate stats.'}
-      </div>
-    );
+  if (!stats) {
+    return null;
   }
 
   return (

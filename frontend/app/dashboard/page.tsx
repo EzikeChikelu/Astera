@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
 import InvoiceCard from '@/components/InvoiceCard';
@@ -41,7 +42,6 @@ export default function DashboardPage() {
   const [committedMap, setCommittedMap] = useState<Record<number, bigint>>({});
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const [search, setSearch] = useState('');
@@ -145,7 +145,6 @@ export default function DashboardPage() {
   /** Initial load — fetches the first PAGE_SIZE invoices (from newest) */
   const loadInvoices = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
@@ -162,7 +161,7 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
-      setError('Failed to load invoices. Make sure contracts are deployed.');
+      toast.error('Failed to load invoices. Make sure contracts are deployed.');
       console.error(e);
     } finally {
       setLoading(false);
@@ -389,10 +388,6 @@ export default function DashboardPage() {
                         className="h-32 bg-brand-card border border-brand-border rounded-2xl animate-pulse"
                       />
                     ))}
-                  </div>
-                ) : error ? (
-                  <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-                    {error}
                   </div>
                 ) : invoices.length === 0 ? (
                   <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">

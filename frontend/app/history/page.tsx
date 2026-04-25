@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import {
   rpc,
@@ -217,7 +218,6 @@ export default function HistoryPage() {
   const { wallet } = useStore();
   const [events, setEvents] = useState<HistoryEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [visible, setVisible] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
@@ -228,7 +228,7 @@ export default function HistoryPage() {
       if (!wallet.connected || !wallet.address) return;
 
       if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
-        setError(
+        toast.error(
           'Contract IDs not configured. Set NEXT_PUBLIC_INVOICE_CONTRACT_ID and NEXT_PUBLIC_POOL_CONTRACT_ID.',
         );
         setLoading(false);
@@ -237,7 +237,6 @@ export default function HistoryPage() {
 
       if (!append) setLoading(true);
       else setLoadingMore(true);
-      setError(null);
 
       try {
         const latest = await rpc.getLatestLedger();
@@ -271,7 +270,7 @@ export default function HistoryPage() {
         setHasMore(raw.length === EVENT_LIMIT && Boolean(responseCursor));
         setCursor(responseCursor);
       } catch (e) {
-        setError('Failed to load transaction history. Make sure contracts are deployed.');
+        toast.error('Failed to load transaction history. Make sure contracts are deployed.');
         console.error(e);
       } finally {
         setLoading(false);
@@ -340,10 +339,6 @@ export default function HistoryPage() {
                 className="h-20 bg-brand-card border border-brand-border rounded-2xl animate-pulse"
               />
             ))}
-          </div>
-        ) : error ? (
-          <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-            {error}
           </div>
         ) : events.length === 0 ? (
           <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">

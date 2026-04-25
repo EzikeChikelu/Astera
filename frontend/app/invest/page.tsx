@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
@@ -25,8 +26,6 @@ export default function InvestPage() {
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
   const [loading, setLoading] = useState(false);
   const [txLoading, setTxLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirmed' | 'failed'>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
@@ -121,8 +120,6 @@ export default function InvestPage() {
     if (!wallet.address || !amount || !selectedToken) return;
 
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
     setTxStatus('pending');
     setTxHash(null);
     setTxError(null);
@@ -148,7 +145,7 @@ export default function InvestPage() {
         setTxError(progress.error ?? null);
       });
       const sym = stablecoinLabel(selectedToken);
-      setSuccess(
+      toast.success(
         `${mode === 'deposit' ? 'Deposited' : 'Withdrew'} ${formatUSDC(stroops)} ${sym} successfully.`,
       );
       setTxStatus('confirmed');
@@ -158,7 +155,7 @@ export default function InvestPage() {
       await loadPosition(wallet.address, selectedToken);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Transaction failed.';
-      setError(msg);
+      toast.error(msg);
       setTxStatus('failed');
       setTxError(msg);
     } finally {
@@ -253,8 +250,6 @@ export default function InvestPage() {
                       key={m}
                       onClick={() => {
                         setMode(m);
-                        setError(null);
-                        setSuccess(null);
                       }}
                       className={`flex-1 py-2.5 text-sm font-medium capitalize transition-colors ${
                         mode === m
@@ -274,8 +269,6 @@ export default function InvestPage() {
                       value={selectedToken}
                       onChange={(e) => {
                         setSelectedToken(e.target.value);
-                        setError(null);
-                        setSuccess(null);
                       }}
                       disabled={acceptedTokens.length === 0}
                       className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold"
@@ -315,16 +308,6 @@ export default function InvestPage() {
                     )}
                   </div>
 
-                  {error && (
-                    <div className="p-3 bg-red-900/20 border border-red-800/50 rounded-xl text-red-400 text-sm">
-                      {error}
-                    </div>
-                  )}
-                  {success && (
-                    <div className="p-3 bg-green-900/20 border border-green-800/50 rounded-xl text-green-400 text-sm">
-                      {success}
-                    </div>
-                  )}
 
                   {txStatus !== 'idle' && (
                     <div

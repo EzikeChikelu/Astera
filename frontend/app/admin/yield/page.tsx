@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import {
   getPoolConfig,
@@ -15,8 +16,6 @@ export default function AdminYieldPage() {
   const [newFactoringFee, setNewFactoringFee] = useState('');
   const [loading, setLoading] = useState(false);
   const [txLoading, setTxLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -52,24 +51,22 @@ export default function AdminYieldPage() {
 
     const bps = Math.round(parseFloat(newYield) * 100);
     if (isNaN(bps) || bps < 0 || bps > 5000) {
-      setError('Yield must be between 0% and 50% (5000 bps).');
+      toast.error('Yield must be between 0% and 50% (5000 bps).');
       return;
     }
 
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
 
     try {
       const xdr = await buildSetYieldTx(wallet.address, bps);
       await signAndSubmit(xdr);
-      setSuccess(`Yield rate updated to ${newYield}% (${bps} bps).`);
+      toast.success(`Yield rate updated to ${newYield}% (${bps} bps).`);
 
       const updatedConfig = await getPoolConfig();
       setPoolConfig(updatedConfig);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update yield rate.';
-      setError(msg);
+      toast.error(msg);
       console.error(e);
     } finally {
       setTxLoading(false);
@@ -82,24 +79,22 @@ export default function AdminYieldPage() {
 
     const bps = Math.round(parseFloat(newFactoringFee) * 100);
     if (isNaN(bps) || bps < 0 || bps > 10000) {
-      setError('Factoring fee must be between 0% and 100% (10000 bps).');
+      toast.error('Factoring fee must be between 0% and 100% (10000 bps).');
       return;
     }
 
     setTxLoading(true);
-    setError(null);
-    setSuccess(null);
 
     try {
       const xdr = await buildSetFactoringFeeTx(wallet.address, bps);
       await signAndSubmit(xdr);
-      setSuccess(`Factoring fee updated to ${newFactoringFee}% (${bps} bps).`);
+      toast.success(`Factoring fee updated to ${newFactoringFee}% (${bps} bps).`);
 
       const updatedConfig = await getPoolConfig();
       setPoolConfig(updatedConfig);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update factoring fee.';
-      setError(msg);
+      toast.error(msg);
       console.error(e);
     } finally {
       setTxLoading(false);
@@ -158,17 +153,6 @@ export default function AdminYieldPage() {
               Example: 8.5% is equivalent to 850 basis points.
             </p>
           </div>
-
-          {error && (
-            <div className="p-3 bg-red-900/20 border border-red-800/50 rounded-xl text-red-500 text-sm">
-              {error}
-            </div>
-          )}
-          {success && (
-            <div className="p-3 bg-green-900/20 border border-green-800/50 rounded-xl text-green-500 text-sm">
-              {success}
-            </div>
-          )}
 
           <button
             type="submit"

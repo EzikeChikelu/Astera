@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { getInvoice, getInvoiceCount, buildMarkDefaultedTx, submitTx } from '@/lib/contracts';
 import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
@@ -11,12 +12,9 @@ export default function AdminDefaultsPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   const loadOverdueInvoices = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const count = await getInvoiceCount();
       const all: Invoice[] = [];
@@ -31,7 +29,7 @@ export default function AdminDefaultsPage() {
       }
       setInvoices(all);
     } catch (e) {
-      setError('Failed to load overdue invoices.');
+      toast.error('Failed to load overdue invoices.');
       console.error(e);
     } finally {
       setLoading(false);
@@ -54,8 +52,6 @@ export default function AdminDefaultsPage() {
     }
 
     setActionLoading(invoice.id);
-    setError(null);
-    setSuccess(null);
 
     try {
       const xdr = await buildMarkDefaultedTx(wallet.address, invoice.id);
@@ -69,14 +65,14 @@ export default function AdminDefaultsPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      setSuccess(`Invoice #${invoice.id} has been marked as DEFAULTED.`);
+      toast.success(`Invoice #${invoice.id} has been marked as DEFAULTED.`);
       await loadOverdueInvoices();
     } catch (e: unknown) {
       const msg =
         e instanceof Error
           ? e.message
           : 'Failed to mark invoice as defaulted. Note: This action may require specialized contract permissions.';
-      setError(msg);
+      toast.error(msg);
       console.error(e);
     } finally {
       setActionLoading(null);
@@ -91,24 +87,6 @@ export default function AdminDefaultsPage() {
           Monitor and manage invoices that have passed their due date without repayment.
         </p>
       </div>
-
-      {error && (
-        <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-red-500 text-sm flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-lg">
-            &times;
-          </button>
-        </div>
-      )}
-
-      {success && (
-        <div className="p-4 bg-green-900/20 border border-green-800/50 rounded-xl text-green-500 text-sm flex items-center justify-between">
-          <span>{success}</span>
-          <button onClick={() => setSuccess(null)} className="text-lg">
-            &times;
-          </button>
-        </div>
-      )}
 
       <div className="grid grid-cols-1 gap-6">
         <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden shadow-sm">
