@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
+import ToastHost from '@/components/Toast';
+import WalletConnectionMonitor from '@/components/WalletConnectionMonitor';
 
 export const metadata: Metadata = {
   title: 'Astera — Real World Assets on Stellar',
@@ -29,6 +31,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider>
           <Navbar />
           <main>{children}</main>
+          <WalletConnectionMonitor />
+          <ToastHost />
         </ThemeProvider>
       </body>
     </html>
