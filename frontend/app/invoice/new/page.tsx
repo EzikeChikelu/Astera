@@ -7,28 +7,89 @@ import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx } from '@/lib/contracts';
 import { toStroops } from '@/lib/stellar';
 
+const MIN_AMOUNT = 10;
+const MAX_AMOUNT = 1_000_000;
+const MAX_DUE_DAYS = 365;
+const MAX_DESCRIPTION_LEN = 256;
+
+function validateForm(form: { debtor: string; amount: string; dueDate: string; description: string }) {
+  const errors: Record<string, string> = {};
+
+  // Debtor
+  const debtor = form.debtor.trim();
+  if (!debtor) {
+    errors.debtor = 'Debtor name is required.';
+  } else if (debtor.length < 2) {
+    errors.debtor = 'Debtor name must be at least 2 characters.';
+  } else if (debtor.length > 100) {
+    errors.debtor = 'Debtor name must be 100 characters or fewer.';
+  }
+
+  // Amount
+  const amount = parseFloat(form.amount);
+  if (!form.amount) {
+    errors.amount = 'Amount is required.';
+  } else if (isNaN(amount) || amount <= 0) {
+    errors.amount = 'Amount must be a positive number.';
+  } else if (amount < MIN_AMOUNT) {
+    errors.amount = `Minimum invoice amount is $${MIN_AMOUNT} USDC.`;
+  } else if (amount > MAX_AMOUNT) {
+    errors.amount = `Maximum invoice amount is $${MAX_AMOUNT.toLocaleString()} USDC.`;
+  }
+
+  // Due date
+  if (!form.dueDate) {
+    errors.dueDate = 'Due date is required.';
+  } else {
+    const due = new Date(form.dueDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const maxDate = new Date(today);
+    maxDate.setDate(maxDate.getDate() + MAX_DUE_DAYS);
+
+    if (due <= today) {
+      errors.dueDate = 'Due date must be in the future.';
+    } else if (due > maxDate) {
+      errors.dueDate = `Due date must be within ${MAX_DUE_DAYS} days from today.`;
+    }
+  }
+
+  // Description (optional but bounded)
+  if (form.description.length > MAX_DESCRIPTION_LEN) {
+    errors.description = `Description must be ${MAX_DESCRIPTION_LEN} characters or fewer.`;
+  }
+
+  return errors;
+}
+
 export default function NewInvoicePage() {
   const { wallet } = useStore();
   const router = useRouter();
 
-  const [form, setForm] = useState({
-    debtor: '',
-    amount: '',
-    dueDate: '',
-    description: '',
-  });
+  const [form, setForm] = useState({ debtor: '', amount: '', dueDate: '', description: '' });
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
 
+  const errors = validateForm(form);
+  const isValid = Object.keys(errors).length === 0;
+
   function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) {
-    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+    setTouched((prev) => ({ ...prev, [name]: true }));
+  }
+
+  function handleBlur(e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    setTouched((prev) => ({ ...prev, [e.target.name]: true }));
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!wallet.address) return;
+    // Mark all fields touched to show all errors on submit attempt
+    setTouched({ debtor: true, amount: true, dueDate: true, description: true });
+    if (!isValid || !wallet.address) return;
 
     setLoading(true);
-
     try {
       const dueTimestamp = Math.floor(new Date(form.dueDate).getTime() / 1000);
       const amountStroops = toStroops(parseFloat(form.amount));
@@ -52,14 +113,14 @@ export default function NewInvoicePage() {
       toast.success('Invoice tokenized successfully!');
       router.push('/dashboard');
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Transaction failed.';
-      toast.error(msg);
+      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
       setLoading(false);
     }
   }
 
   const minDate = new Date(Date.now() + 86_400_000).toISOString().split('T')[0];
+  const maxDate = new Date(Date.now() + MAX_DUE_DAYS * 86_400_000).toISOString().split('T')[0];
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
@@ -76,53 +137,69 @@ export default function NewInvoicePage() {
             <p className="text-brand-muted">Connect your wallet first.</p>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-5" noValidate>
             <div className="p-6 bg-brand-card border border-brand-border rounded-2xl space-y-5">
+              {/* Debtor */}
               <Field
                 label="Debtor (who owes you)"
                 name="debtor"
                 placeholder="ACME Corporation Ltd."
                 value={form.debtor}
                 onChange={handleChange}
-                required
+                onBlur={handleBlur}
+                error={touched.debtor ? errors.debtor : undefined}
               />
 
+              {/* Amount */}
               <div>
                 <label className="block text-sm text-brand-muted mb-2">Invoice Amount (USDC)</label>
                 <div className="relative">
                   <input
                     type="number"
                     name="amount"
-                    min="10"
+                    min={MIN_AMOUNT}
+                    max={MAX_AMOUNT}
                     step="0.01"
                     placeholder="0.00"
                     value={form.amount}
                     onChange={handleChange}
-                    required
-                    className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg"
+                    onBlur={handleBlur}
+                    className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg ${
+                      touched.amount && errors.amount ? 'border-red-500' : 'border-brand-border'
+                    }`}
                   />
                   <span className="absolute right-4 top-1/2 -translate-y-1/2 text-brand-muted text-sm font-medium">
                     USDC
                   </span>
                 </div>
+                <ErrorMsg message={touched.amount ? errors.amount : undefined} />
               </div>
 
+              {/* Due Date */}
               <div>
                 <label className="block text-sm text-brand-muted mb-2">Due Date</label>
                 <input
                   type="date"
                   name="dueDate"
                   min={minDate}
+                  max={maxDate}
                   value={form.dueDate}
                   onChange={handleChange}
-                  required
-                  className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold"
+                  onBlur={handleBlur}
+                  className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold ${
+                    touched.dueDate && errors.dueDate ? 'border-red-500' : 'border-brand-border'
+                  }`}
                 />
+                <ErrorMsg message={touched.dueDate ? errors.dueDate : undefined} />
               </div>
 
+              {/* Description */}
               <div>
                 <label className="block text-sm text-brand-muted mb-2">
-                  Description <span className="text-brand-muted/60">(optional)</span>
+                  Description{' '}
+                  <span className="text-brand-muted/60">
+                    (optional, {form.description.length}/{MAX_DESCRIPTION_LEN})
+                  </span>
                 </label>
                 <textarea
                   name="description"
@@ -130,19 +207,23 @@ export default function NewInvoicePage() {
                   placeholder="Invoice #001 - Goods delivery, 500 units..."
                   value={form.description}
                   onChange={handleChange}
-                  className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold resize-none"
+                  onBlur={handleBlur}
+                  className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold resize-none ${
+                    touched.description && errors.description ? 'border-red-500' : 'border-brand-border'
+                  }`}
                 />
+                <ErrorMsg message={touched.description ? errors.description : undefined} />
               </div>
             </div>
 
             {/* Summary */}
-            {form.amount && form.dueDate && (
+            {form.amount && form.dueDate && !errors.amount && !errors.dueDate && (
               <div className="p-4 bg-brand-gold/10 border border-brand-gold/20 rounded-xl text-sm space-y-2">
                 <p className="text-brand-gold font-medium">Invoice Summary</p>
                 <div className="flex justify-between text-brand-muted">
                   <span>Invoice amount</span>
                   <span className="text-white">
-                    ${parseFloat(form.amount || '0').toLocaleString()} USDC
+                    ${parseFloat(form.amount).toLocaleString()} USDC
                   </span>
                 </div>
                 <div className="flex justify-between text-brand-muted">
@@ -158,12 +239,11 @@ export default function NewInvoicePage() {
                 <div className="flex justify-between text-brand-muted">
                   <span>Estimated repayment (8% APY)</span>
                   <span className="text-white">
-                    ${(parseFloat(form.amount || '0') * 1.08).toFixed(2)} USDC
+                    ${(parseFloat(form.amount) * 1.08).toFixed(2)} USDC
                   </span>
                 </div>
               </div>
             )}
-
 
             <button
               type="submit"
@@ -183,20 +263,27 @@ export default function NewInvoicePage() {
   );
 }
 
+function ErrorMsg({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="mt-1.5 text-xs text-red-400">{message}</p>;
+}
+
 function Field({
   label,
   name,
   placeholder,
   value,
   onChange,
-  required,
+  onBlur,
+  error,
 }: {
   label: string;
   name: string;
   placeholder: string;
   value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  required?: boolean;
+  onBlur: (e: React.FocusEvent<HTMLInputElement>) => void;
+  error?: string;
 }) {
   return (
     <div>
@@ -207,9 +294,12 @@ function Field({
         placeholder={placeholder}
         value={value}
         onChange={onChange}
-        required={required}
-        className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
+        onBlur={onBlur}
+        className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold ${
+          error ? 'border-red-500' : 'border-brand-border'
+        }`}
       />
+      <ErrorMsg message={error} />
     </div>
   );
 }
