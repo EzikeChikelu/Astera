@@ -43,7 +43,12 @@ pub struct PoolTokenTotals {
     pub total_deployed: i128,
     pub total_paid_out: i128,
     pub total_fee_revenue: i128,
+    /// Cumulative interest earned per share unit, scaled by REWARD_PRECISION.
+    pub reward_per_share: i128,
 }
+
+/// Scaling factor for reward_per_share to maintain precision with integer arithmetic.
+const REWARD_PRECISION: i128 = 1_000_000_000_000;
 
 #[contracttype]
 #[derive(Clone)]
@@ -146,6 +151,8 @@ pub enum DataKey {
     CollateralDeposit(u64),
 
     ReentrancyGuard,
+    /// Stores each investor's reward_per_share snapshot at last claim: (investor, token) -> i128
+    InvestorRewardSnapshot(Address, Address),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -617,6 +624,68 @@ impl FundingPool {
             .publish((EVT, symbol_short!("withdraw")), (investor, amount, shares));
     }
 
+    /// Claim accrued yield for `investor` on `token`.
+    ///
+    /// Uses a reward-per-share accumulator pattern: each fully-repaid invoice
+    /// increments `reward_per_share`; investors claim the delta since their last
+    /// snapshot proportional to their share balance.
+    pub fn claim_yield(env: Env, investor: Address, token: Address) {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+
+        let snapshot_key = DataKey::InvestorRewardSnapshot(investor.clone(), token.clone());
+        let last_rps: i128 = env
+            .storage()
+            .persistent()
+            .get(&snapshot_key)
+            .unwrap_or(0);
+
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareToken(token.clone()))
+            .unwrap();
+
+        let investor_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "balance"),
+            {
+                let mut args = Vec::new(&env);
+                args.push_back(investor.clone().into_val(&env));
+                args
+            },
+        );
+
+        let claimable = if investor_shares > 0 && tt.reward_per_share > last_rps {
+            ((tt.reward_per_share - last_rps) * investor_shares) / REWARD_PRECISION
+        } else {
+            0
+        };
+
+        // Update snapshot before transfer (checks-effects-interactions).
+        env.storage()
+            .persistent()
+            .set(&snapshot_key, &tt.reward_per_share);
+
+        if claimable > 0 {
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&env.current_contract_address(), &investor, &claimable);
+        }
+
+        env.events().publish(
+            (EVT, symbol_short!("yld_claim")),
+            (investor, token, claimable),
+        );
+    }
+
     pub fn fund_invoice(
         env: Env,
         admin: Address,
@@ -776,6 +845,21 @@ impl FundingPool {
             tt.total_fee_revenue += record.factoring_fee;
             tt.total_paid_out += total_due;
             stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+
+            // Distribute interest proportionally to share holders via reward_per_share accumulator.
+            let share_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::ShareToken(record.token.clone()))
+                .unwrap();
+            let total_shares: i128 = env.invoke_contract(
+                &share_token,
+                &Symbol::new(&env, "total_supply"),
+                Vec::new(&env),
+            );
+            if total_shares > 0 {
+                tt.reward_per_share += (total_interest as i128 * REWARD_PRECISION) / total_shares;
+            }
         }
 
         // Write all state BEFORE external call

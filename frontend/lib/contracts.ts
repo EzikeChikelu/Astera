@@ -635,4 +635,45 @@ export async function fetchInvestorPosition(investor: string): Promise<InvestorP
   return null;
 }
 
+// ---- Error message mapping (issue #163) ----
+// Maps contract panic strings to user-friendly messages.
+// Full error code reference: docs/API_REFERENCE.md
+
+const CONTRACT_ERROR_MESSAGES: Record<string, string> = {
+  // Invoice contract errors
+  'already initialized': 'This contract has already been set up.',
+  'not initialized': 'The contract is not yet configured. Please contact support.',
+  'unauthorized': 'You are not authorised to perform this action.',
+  'unauthorized pool': 'The pool contract is not authorised for this invoice.',
+  'amount must be positive': 'Amount must be greater than zero.',
+  'due date must be in the future': 'The due date must be a future date.',
+  'invoice not found': 'Invoice not found. Please check the invoice ID.',
+  'invoice is not pending': 'This invoice is not in a pending state.',
+  'invoice is not funded': 'This invoice has not been funded yet.',
+  'contract is paused': 'The contract is currently paused. Please try again later.',
+  // Pool contract errors
+  'token not accepted': 'This token is not supported by the pool.',
+  'insufficient available liquidity': 'The pool does not have enough liquidity for this invoice.',
+  'invoice already funded': 'This invoice has already been funded.',
+  'invoice already fully repaid': 'This invoice has already been fully repaid.',
+  'payment exceeds total due': 'The payment amount exceeds the total amount owed.',
+  'shares must be positive': 'Share amount must be greater than zero.',
+  'insufficient shares': 'You do not have enough shares to withdraw that amount.',
+  'yield cannot exceed 50%': 'Yield rate cannot exceed 50% APY.',
+  // Credit score contract errors
+  'invoice already processed': 'This invoice has already been recorded in the credit score.',
+};
+
+/**
+ * Converts a raw contract panic string to a user-friendly message.
+ * Falls back to the original message if no mapping is found.
+ */
+export function getContractErrorMessage(raw: string): string {
+  const lower = raw.toLowerCase();
+  for (const [key, friendly] of Object.entries(CONTRACT_ERROR_MESSAGES)) {
+    if (lower.includes(key)) return friendly;
+  }
+  return raw;
+}
+
 export { submitTx };
