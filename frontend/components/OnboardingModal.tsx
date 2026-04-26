@@ -9,84 +9,72 @@ interface OnboardingModalProps {
 
 const ONBOARDING_STORAGE_KEY = 'astera-onboarding-completed';
 
+type UserRole = 'sme' | 'investor' | null;
+
+const SME_STEPS = [
+  {
+    title: 'Welcome to Astera',
+    content:
+      'Astera lets you get paid early on your outstanding invoices. Tokenize your invoices on the Stellar blockchain and receive USDC directly to your wallet.',
+  },
+  {
+    title: 'Connect Your Wallet',
+    content:
+      'Connect your Freighter wallet to get started. Freighter is a browser extension for the Stellar network — install it from the Chrome Web Store if you haven't already.',
+  },
+  {
+    title: 'Create Your First Invoice',
+    content:
+      'Go to the Invoice page and fill in your debtor's name, invoice amount, and due date. You'll need your debtor's information and the amount owed to you.',
+  },
+  {
+    title: 'Wait for Verification',
+    content:
+      'Our oracle will verify your invoice details. Verified invoices become eligible for funding from the liquidity pool. This typically takes a short time.',
+  },
+  {
+    title: 'Receive Your Funds',
+    content:
+      'Once funded, you'll receive USDC directly to your connected wallet. Repay the invoice when your customer settles — and you're done!',
+  },
+];
+
+const INVESTOR_STEPS = [
+  {
+    title: 'Welcome to Astera',
+    content:
+      'Deposit stablecoins to earn yield from invoice financing. Your funds are deployed to verified SME invoices and you earn interest on repayment.',
+  },
+  {
+    title: 'Connect Your Wallet',
+    content:
+      'Connect your Freighter wallet to access the investor dashboard. Freighter is a Stellar browser extension — install it if you haven't already.',
+  },
+  {
+    title: 'Deposit USDC',
+    content:
+      'Go to the Invest page and deposit USDC into the liquidity pool. You will receive share tokens representing your proportional ownership of the pool.',
+  },
+  {
+    title: 'Your Funds Go to Work',
+    content:
+      'The pool deploys your funds to verified SME invoices. Your share of the pool grows as invoices are repaid with interest.',
+  },
+  {
+    title: 'Earn Yield Automatically',
+    content:
+      'Withdraw anytime your funds are available. Claim accrued yield at any time from the dashboard. Your earnings are proportional to your share of the pool.',
+  },
+];
+
 export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProps) {
+  const [role, setRole] = useState<UserRole>(null);
   const [currentStep, setCurrentStep] = useState(0);
   const modalRef = useRef<HTMLDivElement>(null);
   const firstFocusableRef = useRef<HTMLButtonElement>(null);
 
-  const steps = [
-    {
-      title: 'Welcome to Astera',
-      content: (
-        <div className="space-y-4">
-          <p className="text-brand-muted">
-            Astera is a decentralized invoice financing platform that helps SMEs access immediate
-            liquidity by tokenizing their invoices on the Stellar blockchain.
-          </p>
-          <div className="bg-brand-card border border-brand-border rounded-lg p-4">
-            <h4 className="font-semibold mb-2">How it works:</h4>
-            <ul className="space-y-2 text-sm text-brand-muted">
-              <li>• Create invoices with your debtor information</li>
-              <li>• Tokenize them on the Stellar blockchain</li>
-              <li>• Get funded by investors or use co-funding</li>
-              <li>• Repay when your customer pays the invoice</li>
-            </ul>
-          </div>
-        </div>
-      ),
-    },
-    {
-      title: 'Getting Testnet USDC',
-      content: (
-        <div className="space-y-4">
-          <p className="text-brand-muted">
-            To test the platform, you&apos;ll need some testnet USDC in your wallet.
-          </p>
-          <div className="bg-brand-card border border-brand-border rounded-lg p-4">
-            <h4 className="font-semibold mb-2">Steps to get testnet USDC:</h4>
-            <ol className="space-y-2 text-sm text-brand-muted list-decimal list-inside">
-              <li>• Connect your Freighter wallet</li>
-              <li>• Visit the Stellar Testnet Faucet</li>
-              <li>• Enter your wallet address</li>
-              <li>• Request testnet USDC (10 USDC per request)</li>
-              <li>• Wait for the tokens to arrive in your wallet</li>
-            </ol>
-          </div>
-          <div className="bg-blue-900/20 border border-blue-800/50 rounded-lg p-3">
-            <p className="text-sm text-blue-400">
-              <strong>Note:</strong> Testnet USDC has no real value and is only for testing
-              purposes.
-            </p>
-          </div>
-        </div>
-      ),
-    },
-    {
-      title: 'Creating Your First Invoice',
-      content: (
-        <div className="space-y-4">
-          <p className="text-brand-muted">
-            Ready to create your first invoice? Here&apos;s what you&apos;ll need:
-          </p>
-          <div className="bg-brand-card border border-brand-border rounded-lg p-4">
-            <h4 className="font-semibold mb-2">Required Information:</h4>
-            <ul className="space-y-2 text-sm text-brand-muted">
-              <li>• Debtor&apos;s wallet address (who owes you)</li>
-              <li>• Invoice amount in USDC</li>
-              <li>• Due date (when payment is expected)</li>
-              <li>• Description of goods/services</li>
-            </ul>
-          </div>
-          <div className="bg-green-900/20 border border-green-800/50 rounded-lg p-3">
-            <p className="text-sm text-green-400">
-              <strong>Pro tip:</strong> Start with a small amount to test the process before
-              creating larger invoices.
-            </p>
-          </div>
-        </div>
-      ),
-    },
-  ];
+  const steps = role === 'sme' ? SME_STEPS : role === 'investor' ? INVESTOR_STEPS : [];
+  const totalSteps = steps.length;
 
   useEffect(() => {
     if (isOpen && firstFocusableRef.current) {
@@ -137,7 +125,7 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
   if (!isOpen) return null;
 
   const handleNext = () => {
-    if (currentStep < steps.length - 1) {
+    if (currentStep < totalSteps - 1) {
       setCurrentStep(currentStep + 1);
     } else {
       handleComplete();
@@ -160,6 +148,11 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
     onClose();
   };
 
+  const handleRoleSelect = (selected: UserRole) => {
+    setRole(selected);
+    setCurrentStep(0);
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div
@@ -173,7 +166,7 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
             <h2 id="onboarding-title" className="text-xl font-bold">
-              {steps[currentStep].title}
+              {role === null ? 'Get Started' : steps[currentStep]?.title}
             </h2>
             <button
               ref={firstFocusableRef}
@@ -192,52 +185,112 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
             </button>
           </div>
 
-          {/* Progress indicator */}
-          <div className="flex items-center justify-center mb-6">
-            <div className="flex items-center space-x-2">
-              {steps.map((_, index) => (
-                <div
-                  key={index}
-                  className={`h-2 rounded-full transition-all duration-300 ${
-                    index === currentStep
-                      ? 'w-8 bg-brand-gold'
-                      : index < currentStep
-                        ? 'w-2 bg-brand-gold/60'
-                        : 'w-2 bg-brand-border'
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Content */}
-          <div className="mb-8">{steps[currentStep].content}</div>
-
-          {/* Actions */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              {currentStep > 0 && (
+          {/* Role selection */}
+          {role === null ? (
+            <div className="space-y-4">
+              <p className="text-brand-muted text-sm">
+                Tell us how you'll use Astera so we can show you the right guide.
+              </p>
+              <div className="grid grid-cols-2 gap-4">
                 <button
-                  onClick={handlePrevious}
-                  className="px-4 py-2 text-brand-muted hover:text-white transition-colors"
+                  onClick={() => handleRoleSelect('sme')}
+                  className="flex flex-col items-center gap-3 p-5 bg-brand-card border border-brand-border rounded-xl hover:border-brand-gold transition-colors text-left"
+                  aria-label="I am an SME seeking invoice financing"
                 >
-                  Previous
+                  <span className="text-3xl" aria-hidden="true">🏢</span>
+                  <div>
+                    <p className="font-semibold text-sm">SME / Business</p>
+                    <p className="text-xs text-brand-muted mt-1">
+                      I want to finance my invoices
+                    </p>
+                  </div>
                 </button>
-              )}
-              <button
-                onClick={handleSkip}
-                className="px-4 py-2 text-brand-muted hover:text-white transition-colors"
-              >
-                Skip
-              </button>
+                <button
+                  onClick={() => handleRoleSelect('investor')}
+                  className="flex flex-col items-center gap-3 p-5 bg-brand-card border border-brand-border rounded-xl hover:border-brand-gold transition-colors text-left"
+                  aria-label="I am an investor looking to earn yield"
+                >
+                  <span className="text-3xl" aria-hidden="true">💰</span>
+                  <div>
+                    <p className="font-semibold text-sm">Investor</p>
+                    <p className="text-xs text-brand-muted mt-1">
+                      I want to deposit and earn yield
+                    </p>
+                  </div>
+                </button>
+              </div>
+              <div className="flex justify-end pt-2">
+                <button
+                  onClick={handleSkip}
+                  className="px-4 py-2 text-sm text-brand-muted hover:text-white transition-colors"
+                >
+                  Skip tour
+                </button>
+              </div>
             </div>
-            <button
-              onClick={handleNext}
-              className="px-6 py-2 bg-brand-gold text-brand-dark font-semibold rounded-lg hover:bg-brand-amber transition-colors"
-            >
-              {currentStep === steps.length - 1 ? 'Get Started' : 'Next'}
-            </button>
-          </div>
+          ) : (
+            <>
+              {/* Step indicator */}
+              <div className="flex items-center justify-center mb-6" aria-label={`Step ${currentStep + 1} of ${totalSteps}`}>
+                <div className="flex items-center space-x-2">
+                  {steps.map((_, index) => (
+                    <div
+                      key={index}
+                      aria-hidden="true"
+                      className={`h-2 rounded-full transition-all duration-300 ${
+                        index === currentStep
+                          ? 'w-8 bg-brand-gold'
+                          : index < currentStep
+                            ? 'w-2 bg-brand-gold/60'
+                            : 'w-2 bg-brand-border'
+                      }`}
+                    />
+                  ))}
+                </div>
+                <span className="sr-only">{`Step ${currentStep + 1} of ${totalSteps}`}</span>
+              </div>
+
+              {/* Content */}
+              <div className="mb-8 bg-brand-card border border-brand-border rounded-lg p-4">
+                <p className="text-brand-muted text-sm leading-relaxed">
+                  {steps[currentStep]?.content}
+                </p>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  {currentStep > 0 ? (
+                    <button
+                      onClick={handlePrevious}
+                      className="px-4 py-2 text-brand-muted hover:text-white transition-colors"
+                    >
+                      Previous
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setRole(null)}
+                      className="px-4 py-2 text-brand-muted hover:text-white transition-colors"
+                    >
+                      Back
+                    </button>
+                  )}
+                  <button
+                    onClick={handleSkip}
+                    className="px-4 py-2 text-brand-muted hover:text-white transition-colors"
+                  >
+                    Skip
+                  </button>
+                </div>
+                <button
+                  onClick={handleNext}
+                  className="px-6 py-2 bg-brand-gold text-brand-dark font-semibold rounded-lg hover:bg-brand-amber transition-colors"
+                >
+                  {currentStep === totalSteps - 1 ? 'Get Started' : 'Next'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
