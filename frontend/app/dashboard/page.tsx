@@ -5,6 +5,7 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
+import { useDebounce } from '@/lib/hooks';
 import InvoiceCard from '@/components/InvoiceCard';
 import { StatCardSkeleton, InvoiceCardSkeleton } from '@/components/Skeleton';
 import CreditScore from '@/components/CreditScore';
@@ -51,15 +52,10 @@ export default function DashboardPage() {
   const [sort, setSort] = useState<SortOption>('created-desc');
   const [hydrated, setHydrated] = useState(false);
 
-  const STATUS_TABS: StatusFilter[] = [
-    'Pending',
-    'AwaitingVerification',
-    'Verified',
-    'Disputed',
-    'Funded',
-    'Paid',
-    'Defaulted',
-  ];
+  /** Debounced search value (300ms) to avoid excessive filtering on every keystroke */
+  const debouncedSearch = useDebounce(search, 300);
+
+  const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
   const SORT_OPTIONS: { value: SortOption; label: string }[] = [
     { value: 'created-desc', label: t('sort.createdDesc') },
@@ -118,12 +114,12 @@ export default function DashboardPage() {
 
     const params = new URLSearchParams();
     if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
-    if (statusFilters.length > 0) params.set('status', statusFilters.join(','));
+    if (statusFilter !== 'All') params.set('status', statusFilter);
     if (sort !== 'created-desc') params.set('sort', sort);
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [debouncedSearch, hydrated, pathname, router, sort, statusFilters]);
+  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilter]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -293,7 +289,7 @@ export default function DashboardPage() {
     }
 
     return result;
-  }, [debouncedSearch, invoices, sort, statusFilters]);
+  }, [invoices, debouncedSearch, statusFilter, sort]);
 
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
 
