@@ -1875,47 +1875,61 @@ None — read-only operation.
 
 ## Error Reference
 
-This section consolidates every error variant that can be returned by any public contract method. Errors are grouped by contract.
+This section consolidates every error that can be returned by any public contract method.
+Errors are grouped by contract with assigned numeric code ranges for stable frontend mapping.
 
-### Invoice Contract Errors
+### Error Code Namespace
 
-| Error Message | Meaning | Affected Methods |
-|------|---------|---------|
-| `"already initialized"` | Contract has been initialized before. Each contract can only be initialized once. | `initialize` |
-| `"not initialized"` | Contract has not been initialized yet. All methods (except `initialize`) require the contract to be initialized first. | `mark_funded`, `mark_paid`, `mark_defaulted`, `get_invoice`, `get_metadata`, `set_pool` |
-| `"amount must be positive"` | Amount parameter is <= 0. Invoices must have a positive face value. | `create_invoice` |
-| `"due date must be in the future"` | Due date is not strictly in the future. Due date must be after the current ledger timestamp. | `create_invoice` |
-| `"invoice not found"` | Invoice ID does not exist in the contract state. | `get_invoice`, `mark_funded`, `mark_paid`, `mark_defaulted` |
-| `"unauthorized"` | Caller is not authorized to perform the action. For `mark_paid`: caller must be owner, pool, or admin. For `set_pool`: caller must be the admin. | `mark_paid`, `set_pool` |
-| `"unauthorized pool"` | The pool address is not the currently authorized pool. Usually indicates the pool contract has been replaced. | `mark_funded`, `mark_defaulted` |
-| `"invoice is not pending"` | Invoice is not in `Pending` state. `mark_funded` requires the invoice to be `Pending`. | `mark_funded` |
-| `"invoice is not funded"` | Invoice is not in `Funded` state. `mark_paid` requires the invoice to be `Funded`. | `mark_paid` |
+Each contract owns a distinct numeric range so codes never collide across contracts:
 
-### Pool Contract Errors
+| Range | Contract |
+|---|---|
+| `1xx` (100–199) | Invoice contract |
+| `2xx` (200–299) | Pool contract |
+| `3xx` (300–399) | Credit Score contract |
+| `4xx` (400–499) | Share Token contract |
 
-| Error Message | Meaning | Affected Methods |
-|------|---------|---------|
-| `"already initialized"` | Contract has been initialized before. Each contract can only be initialized once. | `initialize` |
-| `"not initialized"` | Contract has not been initialized yet. All methods (except `initialize`) require initialization first. | `add_token`, `remove_token`, `deposit`, `init_co_funding`, `commit_to_invoice`, `repay_invoice`, `withdraw`, `set_yield`, `get_config`, `accepted_tokens`, `get_token_totals`, `available_liquidity`, `estimate_repayment` |
-| `"amount must be positive"` | Amount parameter is <= 0. Deposits, commitments, and withdrawals require positive amounts. | `deposit`, `commit_to_invoice`, `withdraw` |
-| `"unauthorized"` | Caller is not authorized. For admin-only methods: caller must match the stored admin address. | `add_token`, `remove_token`, `init_co_funding`, `set_yield` |
-| `"token not accepted"` | Token is not on the whitelist of accepted tokens. | `deposit`, `init_co_funding` |
-| `"token already accepted"` | Token is already on the whitelist. Cannot add a duplicate. | `add_token` |
-| `"token not in whitelist"` | Token is not on the whitelist. Cannot remove a token that was never added. | `remove_token` |
-| `"token has non-zero pool balances"` | Token has nonzero `total_deposited`, `total_deployed`, or `total_paid_out`. Cannot remove a token with active balances. | `remove_token` |
-| `"principal must be positive"` | Principal is <= 0. Invoice funding targets must be positive. | `init_co_funding` |
-| `"invoice already registered for funding"` | Invoice ID was already opened for co-funding. Cannot register the same invoice twice. | `init_co_funding` |
-| `"invoice not registered for co-funding"` | Invoice ID is not registered for co-funding. Often indicates the invoice does not exist in the pool's records. | `commit_to_invoice` |
-| `"invoice already fully funded"` | Invoice is already fully funded (`funded_at != 0`). Cannot commit to a funded invoice. | `commit_to_invoice` |
-| `"invoice already repaid"` | Invoice has been repaid (`repaid == true`). Cannot commit to a repaid invoice or repay twice. | `commit_to_invoice`, `repay_invoice` |
-| `"amount exceeds remaining funding gap"` | Commitment amount exceeds the remaining principal to be funded. Cannot over-commit. | `commit_to_invoice` |
-| `"investor has no position in this invoice token"` | Investor has never deposited in this token. Must deposit before committing. | `commit_to_invoice` |
-| `"insufficient available balance"` | Investor's available balance is less than the requested amount. | `commit_to_invoice`, `withdraw` |
-| `"invoice not found"` | Invoice ID not found in pool records. | `repay_invoice` |
-| `"invoice not fully funded yet"` | Invoice is not fully funded (`funded_at == 0`). Cannot repay before the invoice is fully funded. | `repay_invoice` |
-| `"no position found"` | Investor has no position in this token. Must deposit before withdrawing. | `withdraw` |
-| `"yield cannot exceed 50%"` | Yield in basis points exceeds 5000 (50% APY). | `set_yield` |
-| `"invoice not funded"` (in estimate_repayment) | Invoice is not registered for co-funding. | `estimate_repayment` |
+> **Note:** Contracts currently use `panic!` strings rather than structured error enums.
+> The codes in the tables below are the canonical identifiers to use in the frontend
+> error-message map (`frontend/lib/contracts.ts`) and in any external tooling.
+> They map 1-to-1 to the panic strings shown.
+
+### Invoice Contract Errors (codes 100–199)
+
+| Code | Error Message | Meaning | Affected Methods |
+|---|------|---------|---------|
+| 100 | `"already initialized"` | Contract has been initialized before. Each contract can only be initialized once. | `initialize` |
+| 101 | `"not initialized"` | Contract has not been initialized yet. All methods (except `initialize`) require initialization first. | `mark_funded`, `mark_paid`, `mark_defaulted`, `get_invoice`, `get_metadata`, `set_pool` |
+| 102 | `"unauthorized"` | Caller is not authorized. For `mark_paid`: must be owner, pool, or admin. For `set_pool`: must be admin. | `mark_paid`, `set_pool` |
+| 103 | `"unauthorized pool"` | Pool address is not the authorized pool contract. | `mark_funded`, `mark_defaulted` |
+| 104 | `"amount must be positive"` | Amount parameter is ≤ 0. | `create_invoice` |
+| 105 | `"due date must be in the future"` | Due date is not strictly after the current ledger timestamp. | `create_invoice` |
+| 106 | `"invoice not found"` | Invoice ID does not exist in contract state. | `get_invoice`, `mark_funded`, `mark_paid`, `mark_defaulted` |
+| 107 | `"invoice is not pending"` | Invoice is not in `Pending` state; `mark_funded` requires `Pending`. | `mark_funded` |
+| 108 | `"invoice is not funded"` | Invoice is not in `Funded` state; `mark_paid` requires `Funded`. | `mark_paid` |
+| 109 | `"contract is paused"` | Contract is administratively paused. | all state-mutating methods |
+
+### Pool Contract Errors (codes 200–299)
+
+| Code | Error Message | Meaning | Affected Methods |
+|---|------|---------|---------|
+| 200 | `"already initialized"` | Contract has been initialized before. | `initialize` |
+| 201 | `"unauthorized"` | Caller is not the stored admin address. | `add_token`, `remove_token`, `fund_invoice`, `set_yield` |
+| 202 | `"amount must be positive"` | Amount parameter is ≤ 0. | `deposit`, `withdraw`, `repay_invoice` |
+| 203 | `"token not accepted"` | Token is not on the accepted-tokens whitelist. | `deposit`, `fund_invoice` |
+| 204 | `"token already accepted"` | Token is already on the whitelist. | `add_token` |
+| 205 | `"token not in whitelist"` | Token was never added. | `remove_token` |
+| 206 | `"token has non-zero pool balances"` | Token has active balances; cannot be removed. | `remove_token` |
+| 207 | `"principal must be positive"` | Principal is ≤ 0. | `fund_invoice` |
+| 208 | `"insufficient available liquidity"` | Pool has less available liquidity than the requested principal. | `fund_invoice` |
+| 209 | `"invoice already funded"` | Invoice was already funded by the pool. | `fund_invoice` |
+| 210 | `"invoice not found"` | Invoice ID not found in pool records. | `repay_invoice` |
+| 211 | `"invoice already fully repaid"` | Invoice has already been fully repaid. | `repay_invoice` |
+| 212 | `"payment exceeds total due"` | Payment amount would exceed the total owed. | `repay_invoice` |
+| 213 | `"shares must be positive"` | Share amount for withdrawal is ≤ 0. | `withdraw` |
+| 214 | `"insufficient shares"` | Investor's share balance is less than requested. | `withdraw` |
+| 215 | `"yield cannot exceed 50%"` | Yield in basis points exceeds 5000. | `set_yield` |
+| 216 | `"contract is paused"` | Contract is administratively paused. | all state-mutating methods |
 
 ---
 
