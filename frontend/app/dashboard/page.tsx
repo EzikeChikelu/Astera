@@ -5,6 +5,7 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
+import { useDebounce } from '@/lib/hooks';
 import InvoiceCard from '@/components/InvoiceCard';
 import { StatCardSkeleton, InvoiceCardSkeleton } from '@/components/Skeleton';
 import CreditScore from '@/components/CreditScore';
@@ -42,6 +43,9 @@ export default function DashboardPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
   const [sort, setSort] = useState<SortOption>('created-desc');
   const [hydrated, setHydrated] = useState(false);
+
+  /** Debounced search value (300ms) to avoid excessive filtering on every keystroke */
+  const debouncedSearch = useDebounce(search, 300);
 
   const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
@@ -89,13 +93,13 @@ export default function DashboardPage() {
     if (!hydrated) return;
 
     const params = new URLSearchParams();
-    if (search.trim()) params.set('q', search.trim());
+    if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
     if (statusFilter !== 'All') params.set('status', statusFilter);
     if (sort !== 'created-desc') params.set('sort', sort);
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [hydrated, pathname, router, search, sort, statusFilter]);
+  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilter]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -219,8 +223,8 @@ export default function DashboardPage() {
   const filtered = useMemo(() => {
     let result = [...invoices];
 
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
+    if (debouncedSearch.trim()) {
+      const q = debouncedSearch.trim().toLowerCase();
       result = result.filter(
         (row) =>
           row.metadata.debtor.toLowerCase().includes(q) ||
@@ -255,7 +259,7 @@ export default function DashboardPage() {
     }
 
     return result;
-  }, [invoices, search, statusFilter, sort]);
+  }, [invoices, debouncedSearch, statusFilter, sort]);
 
   const isFiltered = search.trim() !== '' || statusFilter !== 'All';
 
