@@ -22,6 +22,7 @@ const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
+const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -35,6 +36,13 @@ pub enum InvoiceStatus {
     Defaulted,
     Cancelled,
     Expired,
+}
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum DisputeResolution {
+    InFavorOfSME,
+    InFavorOfDebtor,
 }
 
 #[contracttype]
@@ -54,6 +62,7 @@ pub struct Invoice {
     pub verification_hash: String,
     pub oracle_verified: bool,
     pub dispute_reason: String,
+    pub disputed_at: u64,
 }
 
 /// Wallet / explorer–oriented view derived from [`Invoice`] (no extra storage).
@@ -102,6 +111,7 @@ pub enum DataKey {
     MaxInvoiceAmount,
     ExpirationDurationSecs,
     DailyInvoiceLimit,
+    DisputeResolutionWindow,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -257,6 +267,9 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
         bump_instance(&env);
     }
 
@@ -407,6 +420,7 @@ impl InvoiceContract {
             verification_hash,
             oracle_verified: false,
             dispute_reason: empty_str,
+            disputed_at: 0,
         };
 
         env.storage()
@@ -495,6 +509,7 @@ impl InvoiceContract {
         } else {
             invoice.status = InvoiceStatus::Disputed;
             invoice.dispute_reason = reason;
+            invoice.disputed_at = env.ledger().timestamp();
         }
 
         env.storage()
@@ -509,19 +524,10 @@ impl InvoiceContract {
         }
     }
 
-    pub fn resolve_dispute(env: Env, id: u64, admin: Address, approved: bool) {
-        admin.require_auth();
+    pub fn resolve_dispute(env: Env, id: u64, caller: Address, resolution: DisputeResolution) {
+        caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        if admin != stored_admin {
-            panic!("unauthorized");
-        }
 
         let mut invoice: Invoice = env
             .storage()
@@ -533,27 +539,84 @@ impl InvoiceContract {
             panic!("invoice is not disputed");
         }
 
-        if approved {
-            invoice.status = InvoiceStatus::Verified;
-            invoice.oracle_verified = true;
-            invoice.dispute_reason = String::from_str(&env, "");
-            env.events().publish((EVT, symbol_short!("resolved")), id);
-        } else {
-            invoice.status = InvoiceStatus::Defaulted;
-            let mut stats: StorageStats = env
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracle)
+            .expect("oracle not configured");
+
+        if caller == oracle {
+            // Oracle can always resolve
+        } else if caller == admin {
+            // Admin can resolve only after window
+            let window: u64 = env
                 .storage()
                 .instance()
-                .get(&DataKey::StorageStats)
-                .unwrap_or_default();
-            stats.active_invoices = stats.active_invoices.saturating_sub(1);
-            env.storage().instance().set(&DataKey::StorageStats, &stats);
-            set_invoice_ttl(&env, id, true);
-            env.events().publish((EVT, symbol_short!("rejected")), id);
+                .get(&DataKey::DisputeResolutionWindow)
+                .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
+            if env.ledger().timestamp() < invoice.disputed_at.saturating_add(window) {
+                panic!("dispute resolution window not yet passed for admin");
+            }
+        } else {
+            panic!("unauthorized");
+        }
+
+        match resolution {
+            DisputeResolution::InFavorOfSME => {
+                invoice.status = InvoiceStatus::Verified;
+                invoice.oracle_verified = true;
+                invoice.dispute_reason = String::from_str(&env, "");
+            }
+            DisputeResolution::InFavorOfDebtor => {
+                invoice.status = InvoiceStatus::Cancelled;
+                let mut stats: StorageStats = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::StorageStats)
+                    .unwrap_or_default();
+                stats.active_invoices = stats.active_invoices.saturating_sub(1);
+                env.storage().instance().set(&DataKey::StorageStats, &stats);
+                set_invoice_ttl(&env, id, true);
+            }
         }
 
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
+
+        env.events().publish(
+            (EVT, symbol_short!("resolved")),
+            (id, resolution, caller),
+        );
+    }
+
+    pub fn set_dispute_window(env: Env, admin: Address, window: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &window);
+        bump_instance(&env);
+    }
+
+    pub fn get_dispute_window(env: Env) -> u64 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeResolutionWindow)
+            .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
     }
 
     pub fn mark_funded(env: Env, id: u64, pool: Address) {
@@ -1048,6 +1111,21 @@ mod test {
             &u32::MAX,
         );
         (client, admin, pool, sme)
+    }
+
+    fn setup_with_oracle(
+        env: &Env,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
+        let (client, admin, pool, sme) = setup(env);
+        let oracle = Address::generate(env);
+        client.set_oracle(&admin, &oracle);
+        (client, admin, pool, sme, oracle)
     }
 
     #[test]
@@ -2278,5 +2356,101 @@ mod test {
         );
         client.pause(&admin);
         assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_resolve_dispute_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1000,
+            &(env.ledger().timestamp() + 10000),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Hash"),
+        );
+
+        // Dispute it via oracle
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &false,
+            &String::from_str(&env, "Price mismatch"),
+        );
+
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.status, InvoiceStatus::Disputed);
+        assert!(invoice.disputed_at > 0);
+
+        // Resolution 1: In favor of SME (back to Verified)
+        client.resolve_dispute(&id, &oracle, &DisputeResolution::InFavorOfSME);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Verified);
+
+        // Dispute it again for testing debtor favor
+        // To dispute it again, it must be AwaitingVerification
+        // Let's create a new one for clarity
+        let id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor 2"),
+            &2000,
+            &(env.ledger().timestamp() + 10000),
+            &String::from_str(&env, "Desc 2"),
+            &String::from_str(&env, "Hash 2"),
+        );
+        client.verify_invoice(&id2, &oracle, &false, &String::from_str(&env, "Fake"));
+
+        // Resolution 2: In favor of Debtor (to Cancelled)
+        client.resolve_dispute(&id2, &oracle, &DisputeResolution::InFavorOfDebtor);
+        assert_eq!(client.get_invoice(&id2).status, InvoiceStatus::Cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "dispute resolution window not yet passed for admin")]
+    fn test_admin_cannot_resolve_early() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1000,
+            &(env.ledger().timestamp() + 10000),
+            &String::from_str(&env, "D"),
+            &String::from_str(&env, "H"),
+        );
+        client.verify_invoice(&id, &oracle, &false, &String::from_str(&env, "X"));
+
+        // Admin tries to resolve immediately
+        client.resolve_dispute(&id, &admin, &DisputeResolution::InFavorOfSME);
+    }
+
+    #[test]
+    fn test_admin_can_resolve_after_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1000,
+            &(env.ledger().timestamp() + 10000),
+            &String::from_str(&env, "D"),
+            &String::from_str(&env, "H"),
+        );
+        client.verify_invoice(&id, &oracle, &false, &String::from_str(&env, "X"));
+
+        // Advance time
+        env.ledger().with_mut(|l| {
+            l.timestamp += DEFAULT_DISPUTE_RESOLUTION_WINDOW + 1;
+        });
+
+        // Admin resolves
+        client.resolve_dispute(&id, &admin, &DisputeResolution::InFavorOfSME);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Verified);
     }
 }

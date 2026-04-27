@@ -19,6 +19,8 @@ Astera is a real-world assets (RWA) platform on Stellar that enables SMEs to tok
 - [`get_invoice`](#get_invoice)
 - [`get_metadata`](#get_metadata)
 - [`get_invoice_count`](#get_invoice_count)
+- [`resolve_dispute`](#resolve_dispute)
+- [`set_dispute_window`](#set_dispute_window)
 - [`set_pool`](#set_pool)
 
 ### Pool Contract
@@ -70,6 +72,7 @@ The core record storing invoice metadata and lifecycle state.
 | `funded_at` | `u64` | Unix timestamp when invoice was funded (0 until funded) |
 | `paid_at` | `u64` | Unix timestamp when invoice was marked paid (0 until paid) |
 | `pool_contract` | `Address` | Address of the pool contract that funded this invoice |
+| `disputed_at` | `u64` | Unix timestamp when invoice was marked as disputed (0 if not disputed) |
 
 **Location in Source:** [contracts/invoice/src/lib.rs](../contracts/invoice/src/lib.rs)
 
@@ -81,6 +84,8 @@ Enum representing the state of an invoice.
 | `Pending` | Invoice created but not yet funded |
 | `Funded` | Invoice has been fully funded by the pool, funds disbursed to SME |
 | `Paid` | Invoice repaid in full |
+| `Disputed` | Invoice verification failed or was contested; awaiting resolution |
+| `Cancelled` | Invoice cancelled following a dispute resolution in favor of the debtor |
 | `Defaulted` | Invoice missed due date with no repayment |
 
 **Location in Source:** [contracts/invoice/src/lib.rs](../contracts/invoice/src/lib.rs)
@@ -716,6 +721,66 @@ stellar contract invoke \
 #### State Changes
 
 None — read-only operation.
+    
+---
+
+### `resolve_dispute`
+
+Resolves a disputed invoice. Can be called by the authorized oracle or the admin. If called by the admin, a resolution window must have passed since the dispute began.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `id` | `u64` | Yes | Invoice ID to resolve |
+| `caller` | `Address` | Yes | Address of the resolver (must be Admin or Oracle) |
+| `resolution` | `DisputeResolution` | Yes | Outcome: `InFavorOfSME` or `InFavorOfDebtor` |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"invoice not found"` | Invoice ID does not exist | `resolve_dispute` |
+| `"invoice is not disputed"` | Invoice is not in `Disputed` state | `resolve_dispute` |
+| `"unauthorized"` | Caller is not Admin or Oracle | `resolve_dispute` |
+| `"dispute resolution window not yet passed for admin"` | Admin attempted to resolve before the configured window passed | `resolve_dispute` |
+
+#### Access Control
+
+Requires `caller.require_auth()`. Oracle can resolve at any time. Admin can resolve only after the `DisputeResolutionWindow` has elapsed since `disputed_at`.
+
+#### Example Invocation
+
+```rust
+client.resolve_dispute(&id, &oracle, &DisputeResolution::InFavorOfSME);
+```
+
+#### State Changes
+
+- **InFavorOfSME**: Sets status to `Verified`, clears `dispute_reason`, sets `oracle_verified = true`.
+- **InFavorOfDebtor**: Sets status to `Cancelled`, decrements active invoices count, removes from persistent storage (via cleanup if applicable).
+- Publishes an `INVOICE.resolved` event with `(id, resolution, caller)`.
+
+---
+
+### `set_dispute_window`
+
+Updates the time window that must elapse before the admin can force-resolve a dispute. Admin-only.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `admin` | `Address` | Yes | Admin address; must sign |
+| `window` | `u64` | Yes | Window duration in seconds (default: 30 days) |
+
+---
 
 ---
 
