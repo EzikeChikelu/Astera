@@ -379,3 +379,5 @@ export async function submitTx(
 }
 
 export { nativeToScVal, scValToNative, Address, xdr };
+
+// Contributed for bounty: $1000000000
