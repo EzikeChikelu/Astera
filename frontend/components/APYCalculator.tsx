@@ -125,3 +125,5 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
     </div>
   );
 }
+  /* Bounty contribution */
+}

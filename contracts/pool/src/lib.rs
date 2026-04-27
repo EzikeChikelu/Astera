@@ -1,9 +1,41 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, IntoVal,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN,
+    Env, IntoVal, Symbol, Vec,
 };
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum PoolError {
+    NotInitialized = 1,
+    TokenNotAccepted = 2,
+    TokenAlreadyAccepted = 3,
+    TokenNotWhitelisted = 4,
+    InvoiceNotFound = 5,
+    AlreadyFullyRepaid = 6,
+    Overpayment = 7,
+    InvalidAmount = 8,
+    Unauthorized = 9,
+    StorageCorrupted = 10,
+    ShareTokenNotConfigured = 11,
+    ContractPaused = 12,
+    CollateralNotFound = 13,
+    CollateralAlreadySettled = 14,
+    // #235
+    DepositBelowMinimum = 15,
+    // #236
+    InsufficientRevenue = 16,
+    TreasuryNotConfigured = 17,
+    // #244
+    WithdrawalExceedsLimit = 18,
+    WithdrawalCooldownActive = 19,
+    // #247
+    InsufficientCoFundShare = 20,
+}
+
+type PoolResult<T> = Result<T, PoolError>;
 
 const DEFAULT_YIELD_BPS: u32 = 800;
 const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
@@ -15,6 +47,11 @@ const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
+// #235: minimum deposit — 0 = disabled
+const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 0;
+// #244: withdrawal rate limiting — 10_000 bps (100%) and 0s = disabled by default
+const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
+const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -34,6 +71,11 @@ pub struct PoolConfig {
     pub last_yield_change_at: u64,
     pub yield_change_cooldown_secs: u64,
     pub max_yield_change_bps: u32,
+    // #235: minimum deposit per transaction (0 = disabled)
+    pub min_deposit_amount: i128,
+    // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
+    pub max_single_withdrawal_bps: u32,
+    pub withdrawal_cooldown_secs: u64,
 }
 
 #[contracttype]
@@ -45,6 +87,8 @@ pub struct PoolTokenTotals {
     pub total_fee_revenue: i128,
     /// Cumulative interest earned per share unit, scaled by REWARD_PRECISION.
     pub reward_per_share: i128,
+    // #236: protocol fee revenue available for treasury withdrawal (separate from investor pool)
+    pub protocol_revenue: i128,
 }
 
 /// Scaling factor for reward_per_share to maintain precision with integer arithmetic.
@@ -153,13 +197,22 @@ pub enum DataKey {
     ReentrancyGuard,
     /// Stores each investor's reward_per_share snapshot at last claim: (investor, token) -> i128
     InvestorRewardSnapshot(Address, Address),
+    // #244: last withdrawal timestamp per (investor, token)
+    LastWithdrawalTime(Address, Address),
+    // #236: treasury address for protocol revenue withdrawals
+    Treasury,
+    // #247: co-fund share ownership per (invoice_id, investor): stores bps (0-10_000)
+    CoFundShare(u64, Address),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
 
 // Cache for config to reduce storage reads
-fn get_config_cached(env: &Env) -> PoolConfig {
-    env.storage().instance().get(&DataKey::Config).unwrap()
+fn get_config_cached(env: &Env) -> PoolResult<PoolConfig> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Config)
+        .ok_or(PoolError::NotInitialized)
 }
 
 // Optimized bump that only extends if needed
@@ -253,21 +306,24 @@ fn fund_invoice_request(
     accepted_tokens: &Vec<Address>,
     stats: &mut PoolStorageStats,
     request: &FundingRequest,
-) {
+) -> PoolResult<()> {
     if request.principal <= 0 {
-        panic!("principal must be positive");
+        return Err(PoolError::InvalidAmount);
     }
 
     // Verify the token is accepted.
     let mut token_ok = false;
     for i in 0..accepted_tokens.len() {
-        if accepted_tokens.get(i).unwrap() == request.token {
+        let accepted = accepted_tokens
+            .get(i)
+            .ok_or(PoolError::StorageCorrupted)?;
+        if accepted == request.token {
             token_ok = true;
             break;
         }
     }
     if !token_ok {
-        panic!("token not accepted");
+        return Err(PoolError::TokenNotAccepted);
     }
 
     // Ensure sufficient liquidity (cash = NAV - deployed).
@@ -279,7 +335,7 @@ fn fund_invoice_request(
         .unwrap_or_default();
     let available_liquidity = tt.pool_value - tt.total_deployed;
     if available_liquidity < request.principal {
-        panic!("insufficient available liquidity");
+        return Err(PoolError::InvalidAmount);
     }
 
     let now = env.ledger().timestamp();
@@ -324,6 +380,7 @@ fn fund_invoice_request(
             request.token.clone(),
         ),
     );
+    Ok(())
 }
 
 #[contract]
@@ -351,6 +408,9 @@ impl FundingPool {
             last_yield_change_at: env.ledger().timestamp(),
             yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
             max_yield_change_bps: DEFAULT_MAX_YIELD_CHANGE_BPS,
+            min_deposit_amount: DEFAULT_MIN_DEPOSIT_AMOUNT,
+            max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
+            withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -382,24 +442,26 @@ impl FundingPool {
         bump_instance(&env);
     }
 
-    pub fn pause(env: Env, admin: Address) {
+    pub fn pause(env: Env, admin: Address) -> PoolResult<()> {
         admin.require_auth();
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         // Pause policy: all user state-changing actions are blocked while paused,
         // including deposit, withdraw, funding, and repayment. Admin emergency
         // controls (set_yield, set_investor_kyc, unpause) remain available.
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
         env.events().publish((EVT, symbol_short!("paused")), admin);
+        Ok(())
     }
 
-    pub fn unpause(env: Env, admin: Address) {
+    pub fn unpause(env: Env, admin: Address) -> PoolResult<()> {
         admin.require_auth();
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("unpaused")), admin);
+        Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -410,21 +472,21 @@ impl FundingPool {
             .unwrap_or(false)
     }
 
-    pub fn add_token(env: Env, admin: Address, token: Address, share_token: Address) {
+    pub fn add_token(env: Env, admin: Address, token: Address, share_token: Address) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
 
         let mut tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized");
+            .ok_or(PoolError::NotInitialized)?;
 
         for i in 0..tokens.len() {
-            if tokens.get(i).unwrap() == token {
-                panic!("token already accepted");
+            if tokens.get(i).ok_or(PoolError::StorageCorrupted)? == token {
+                return Err(PoolError::TokenAlreadyAccepted);
             }
         }
         tokens.push_back(token.clone());
@@ -447,24 +509,25 @@ impl FundingPool {
                 .instance()
                 .set(&DataKey::ShareToken(token), &share_token);
         }
+        Ok(())
     }
 
-    pub fn remove_token(env: Env, admin: Address, token: Address) {
+    pub fn remove_token(env: Env, admin: Address, token: Address) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
 
         let tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized");
+            .ok_or(PoolError::NotInitialized)?;
 
         let mut new_tokens: Vec<Address> = Vec::new(&env);
         let mut found = false;
         for i in 0..tokens.len() {
-            let t = tokens.get(i).unwrap();
+            let t = tokens.get(i).ok_or(PoolError::StorageCorrupted)?;
             if t == token {
                 found = true;
             } else {
@@ -472,7 +535,7 @@ impl FundingPool {
             }
         }
         if !found {
-            panic!("token not in whitelist");
+            return Err(PoolError::TokenNotWhitelisted);
         }
 
         let tt: PoolTokenTotals = env
@@ -481,7 +544,7 @@ impl FundingPool {
             .get(&DataKey::TokenTotals(token.clone()))
             .unwrap_or_default();
         if tt.pool_value != 0 || tt.total_deployed != 0 {
-            panic!("token has non-zero pool balances");
+            return Err(PoolError::InvalidAmount);
         }
 
         env.storage()
@@ -489,16 +552,23 @@ impl FundingPool {
             .set(&DataKey::AcceptedTokens, &new_tokens);
         env.events()
             .publish((EVT, symbol_short!("rm_token")), (admin, token));
+        Ok(())
     }
 
-    pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
+    pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) -> PoolResult<()> {
         investor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
         if amount <= 0 {
-            panic!("amount must be positive");
+            return Err(PoolError::InvalidAmount);
         }
-        Self::assert_accepted_token(&env, &token);
+        Self::assert_accepted_token(&env, &token)?;
+
+        // #235: enforce minimum deposit amount
+        let config = get_config_cached(&env)?;
+        if config.min_deposit_amount > 0 && amount < config.min_deposit_amount {
+            return Err(PoolError::DepositBelowMinimum);
+        }
 
         // #109: enforce KYC check when required
         let kyc_required: bool = env
@@ -513,7 +583,7 @@ impl FundingPool {
                 .get(&DataKey::InvestorKyc(investor.clone()))
                 .unwrap_or(false);
             if !approved {
-                panic!("investor not KYC approved");
+                return Err(PoolError::Unauthorized);
             }
         }
 
@@ -531,7 +601,11 @@ impl FundingPool {
             .get(&token_totals_key)
             .unwrap_or_default();
 
-        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
 
         // Calculate shares (single external call)
         let total_shares: i128 = env.invoke_contract(
@@ -562,22 +636,42 @@ impl FundingPool {
             (EVT, symbol_short!("deposit")),
             (investor, amount, shares_to_mint),
         );
+        Ok(())
     }
 
-    pub fn withdraw(env: Env, investor: Address, token: Address, shares: i128) {
+    pub fn withdraw(env: Env, investor: Address, token: Address, shares: i128) -> PoolResult<()> {
         investor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
         if shares <= 0 {
-            panic!("shares must be positive");
+            return Err(PoolError::InvalidAmount);
         }
-        Self::assert_accepted_token(&env, &token);
+        Self::assert_accepted_token(&env, &token)?;
 
         Self::non_reentrant_start(&env); // <- ADD GUARD START
 
+        // #244: withdrawal rate limiting
+        let config = get_config_cached(&env)?;
+        let now = env.ledger().timestamp();
+        let is_admin = config.admin == investor;
+        if !is_admin && config.withdrawal_cooldown_secs > 0 {
+            let last: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LastWithdrawalTime(investor.clone(), token.clone()))
+                .unwrap_or(0);
+            if now < last.saturating_add(config.withdrawal_cooldown_secs) {
+                return Err(PoolError::WithdrawalCooldownActive);
+            }
+        }
+
         let share_token_key = DataKey::ShareToken(token.clone());
         let token_totals_key = DataKey::TokenTotals(token.clone());
-        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
@@ -589,7 +683,7 @@ impl FundingPool {
         let share_balance: i128 =
             env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), bal_args);
         if share_balance < shares {
-            panic!("insufficient shares");
+            return Err(PoolError::InvalidAmount);
         }
 
         let total_shares: i128 = env.invoke_contract(
@@ -601,7 +695,15 @@ impl FundingPool {
         let amount = (shares * tt.pool_value) / total_shares;
         let available_liquidity = tt.pool_value - tt.total_deployed;
         if available_liquidity < amount {
-            panic!("insufficient available liquidity");
+            return Err(PoolError::InvalidAmount);
+        }
+
+        // #244: single-withdrawal cap (skip for admin)
+        if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
+            let max_single = (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
+            if amount > max_single {
+                return Err(PoolError::WithdrawalExceedsLimit);
+            }
         }
 
         // Burn shares FIRST - effects
@@ -614,6 +716,14 @@ impl FundingPool {
         tt.pool_value -= amount;
         env.storage().instance().set(&token_totals_key, &tt);
 
+        // #244: record withdrawal timestamp
+        if config.withdrawal_cooldown_secs > 0 {
+            env.storage().persistent().set(
+                &DataKey::LastWithdrawalTime(investor.clone(), token.clone()),
+                &now,
+            );
+        }
+
         // Transfer LAST - interaction
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
@@ -622,6 +732,7 @@ impl FundingPool {
 
         env.events()
             .publish((EVT, symbol_short!("withdraw")), (investor, amount, shares));
+        Ok(())
     }
 
     /// Claim accrued yield for `investor` on `token`.
@@ -629,7 +740,7 @@ impl FundingPool {
     /// Uses a reward-per-share accumulator pattern: each fully-repaid invoice
     /// increments `reward_per_share`; investors claim the delta since their last
     /// snapshot proportional to their share balance.
-    pub fn claim_yield(env: Env, investor: Address, token: Address) {
+    pub fn claim_yield(env: Env, investor: Address, token: Address) -> PoolResult<()> {
         investor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -652,7 +763,7 @@ impl FundingPool {
             .storage()
             .instance()
             .get(&DataKey::ShareToken(token.clone()))
-            .unwrap();
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
 
         let investor_shares: i128 = env.invoke_contract(
             &share_token,
@@ -684,6 +795,7 @@ impl FundingPool {
             (EVT, symbol_short!("yld_claim")),
             (investor, token, claimable),
         );
+        Ok(())
     }
 
     pub fn fund_invoice(
@@ -694,24 +806,24 @@ impl FundingPool {
         sme: Address,
         due_date: u64,
         token: Address,
-    ) {
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
-        let config = get_config_cached(&env);
+        Self::require_admin(&env, &admin)?;
+        let config = get_config_cached(&env)?;
         if env
             .storage()
             .persistent()
             .has(&DataKey::FundedInvoice(invoice_id))
         {
-            panic!("invoice already funded");
+            return Err(PoolError::StorageCorrupted);
         }
         let accepted_tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized");
+            .ok_or(PoolError::NotInitialized)?;
 
         // Collateral check: high-value invoices must have collateral deposited first.
         let collateral_cfg: CollateralConfig = env
@@ -729,13 +841,13 @@ impl FundingPool {
                 .persistent()
                 .get(&DataKey::CollateralDeposit(invoice_id));
             match deposit {
-                None => panic!("collateral required for high-value invoice"),
+                None => return Err(PoolError::CollateralNotFound),
                 Some(d) => {
                     if d.settled {
-                        panic!("collateral already settled");
+                        return Err(PoolError::CollateralAlreadySettled);
                     }
                     if d.amount < req_collateral {
-                        panic!("insufficient collateral deposited");
+                        return Err(PoolError::InvalidAmount);
                     }
                 }
             }
@@ -753,25 +865,26 @@ impl FundingPool {
             due_date,
             token,
         };
-        fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
+        fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
+        Ok(())
     }
 
-    pub fn fund_multiple_invoices(env: Env, admin: Address, requests: Vec<FundingRequest>) {
+    pub fn fund_multiple_invoices(env: Env, admin: Address, requests: Vec<FundingRequest>) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         if requests.len() == 0 {
-            panic!("no invoices provided");
+            return Err(PoolError::InvalidAmount);
         }
 
-        let config = get_config_cached(&env);
+        let config = get_config_cached(&env)?;
         let accepted_tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized");
+            .ok_or(PoolError::NotInitialized)?;
         let mut stats: PoolStorageStats = env
             .storage()
             .instance()
@@ -779,31 +892,34 @@ impl FundingPool {
             .unwrap_or_default();
 
         for i in 0..requests.len() {
-            let request = requests.get(i).unwrap();
-            fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
+            let request = requests
+                .get(i)
+                .ok_or(PoolError::StorageCorrupted)?;
+            fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         }
 
         env.storage().instance().set(&DataKey::StorageStats, &stats);
+        Ok(())
     }
 
-    pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address, amount: i128) {
+    pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address, amount: i128) -> PoolResult<()> {
         payer.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
 
         if amount <= 0 {
-            panic!("payment amount must be positive");
+            return Err(PoolError::InvalidAmount);
         }
 
         Self::non_reentrant_start(&env); // <- ADD GUARD START
 
-        let config: PoolConfig = get_config_cached(&env);
+        let config: PoolConfig = get_config_cached(&env)?;
         let funded_invoice_key = DataKey::FundedInvoice(invoice_id);
         let mut record: FundedInvoice = env
             .storage()
             .persistent()
             .get(&funded_invoice_key)
-            .expect("invoice not found");
+            .ok_or(PoolError::InvoiceNotFound)?;
 
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
@@ -816,10 +932,10 @@ impl FundingPool {
         let total_due = record.principal + total_interest as i128 + record.factoring_fee;
 
         if record.repaid_amount >= total_due {
-            panic!("invoice already fully repaid");
+            return Err(PoolError::AlreadyFullyRepaid);
         }
         if record.repaid_amount + amount > total_due {
-            panic!("payment exceeds total due");
+            return Err(PoolError::Overpayment);
         }
 
         // Update state FIRST - effects
@@ -843,6 +959,7 @@ impl FundingPool {
             tt.total_deployed -= record.principal;
             tt.pool_value += total_interest as i128;
             tt.total_fee_revenue += record.factoring_fee;
+            tt.protocol_revenue += record.factoring_fee; // #236: track separately for treasury
             tt.total_paid_out += total_due;
             stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
@@ -851,7 +968,7 @@ impl FundingPool {
                 .storage()
                 .instance()
                 .get(&DataKey::ShareToken(record.token.clone()))
-                .unwrap();
+                .ok_or(PoolError::ShareTokenNotConfigured)?;
             let total_shares: i128 = env.invoke_contract(
                 &share_token,
                 &Symbol::new(&env, "total_supply"),
@@ -913,6 +1030,7 @@ impl FundingPool {
                 (invoice_id, amount, record.repaid_amount),
             );
         }
+        Ok(())
     }
 
     // ---- Collateral management ----
@@ -920,16 +1038,16 @@ impl FundingPool {
     /// Admin sets the collateral configuration.
     /// `threshold` — minimum principal (inclusive) that requires collateral.
     /// `collateral_bps` — required collateral as % of principal in basis points (max 10000 = 100%).
-    pub fn set_collateral_config(env: Env, admin: Address, threshold: i128, collateral_bps: u32) {
+    pub fn set_collateral_config(env: Env, admin: Address, threshold: i128, collateral_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         if threshold < 0 {
-            panic!("threshold must be non-negative");
+            return Err(PoolError::InvalidAmount);
         }
         if collateral_bps > BPS_DENOM {
-            panic!("collateral ratio cannot exceed 100%");
+            return Err(PoolError::InvalidAmount);
         }
         let cfg = CollateralConfig {
             threshold,
@@ -942,6 +1060,7 @@ impl FundingPool {
             (EVT, symbol_short!("col_cfg")),
             (admin, threshold, collateral_bps),
         );
+        Ok(())
     }
 
     /// Returns the current collateral configuration.
@@ -980,14 +1099,14 @@ impl FundingPool {
         depositor: Address,
         token: Address,
         amount: i128,
-    ) {
+    ) -> PoolResult<()> {
         depositor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::assert_accepted_token(&env, &token);
+        Self::assert_accepted_token(&env, &token)?;
 
         if amount <= 0 {
-            panic!("collateral amount must be positive");
+            return Err(PoolError::InvalidAmount);
         }
 
         // Prevent depositing collateral for an already-funded invoice.
@@ -996,7 +1115,7 @@ impl FundingPool {
             .persistent()
             .has(&DataKey::FundedInvoice(invoice_id))
         {
-            panic!("invoice already funded; collateral cannot be changed");
+            return Err(PoolError::StorageCorrupted);
         }
 
         // Prevent double-deposit.
@@ -1005,7 +1124,7 @@ impl FundingPool {
             .persistent()
             .has(&DataKey::CollateralDeposit(invoice_id))
         {
-            panic!("collateral already deposited for this invoice");
+            return Err(PoolError::StorageCorrupted);
         }
 
         // Transfer collateral from depositor to pool.
@@ -1033,6 +1152,7 @@ impl FundingPool {
             (EVT, symbol_short!("col_dep")),
             (invoice_id, depositor, token, amount),
         );
+        Ok(())
     }
 
     /// Returns the collateral deposit record for an invoice, if any.
@@ -1047,20 +1167,24 @@ impl FundingPool {
     /// to partially compensate investors for the loss.
     /// Can only be called after the invoice has been marked as defaulted (repaid == false
     /// and the invoice is past due + grace period).
-    pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) {
+    pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
 
         let record: FundedInvoice = env
             .storage()
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
-            .expect("funded invoice not found");
+            .ok_or(PoolError::InvoiceNotFound)?;
 
         // Calculate total due to check if fully repaid
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
         let total_interest = calculate_interest(
@@ -1072,17 +1196,17 @@ impl FundingPool {
         let total_due = record.principal + total_interest as i128 + record.factoring_fee;
 
         if record.repaid_amount >= total_due {
-            panic!("invoice already repaid; collateral was returned on repayment");
+            return Err(PoolError::AlreadyFullyRepaid);
         }
 
         let mut col: CollateralDeposit = env
             .storage()
             .persistent()
             .get(&DataKey::CollateralDeposit(invoice_id))
-            .expect("no collateral deposit found for this invoice");
+            .ok_or(PoolError::CollateralNotFound)?;
 
         if col.settled {
-            panic!("collateral already settled");
+            return Err(PoolError::CollateralAlreadySettled);
         }
 
         // Credit the seized collateral into the pool's token totals so investors benefit.
@@ -1113,16 +1237,21 @@ impl FundingPool {
             (EVT, symbol_short!("col_seiz")),
             (invoice_id, col.depositor, col.amount),
         );
+        Ok(())
     }
 
-    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {
+    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
-        Self::require_admin(&env, &admin);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        Self::require_admin(&env, &admin)?;
         if yield_bps > 5_000 {
-            panic!("yield cannot exceed 50%");
+            return Err(PoolError::InvalidAmount);
         }
 
         let now = env.ledger().timestamp();
@@ -1130,7 +1259,7 @@ impl FundingPool {
             .last_yield_change_at
             .saturating_add(config.yield_change_cooldown_secs);
         if now < next_allowed {
-            panic!("yield change cooldown active");
+            return Err(PoolError::InvalidAmount);
         }
 
         let current = config.yield_bps;
@@ -1140,7 +1269,7 @@ impl FundingPool {
             current - yield_bps
         };
         if delta > config.max_yield_change_bps {
-            panic!("yield change exceeds maximum step");
+            return Err(PoolError::InvalidAmount);
         }
 
         config.yield_bps = yield_bps;
@@ -1148,6 +1277,7 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("set_yield")), (admin, yield_bps));
+        Ok(())
     }
 
     pub fn set_yield_change_policy(
@@ -1155,17 +1285,21 @@ impl FundingPool {
         admin: Address,
         cooldown_secs: u64,
         max_change_bps: u32,
-    ) {
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
-        Self::require_admin(&env, &admin);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        Self::require_admin(&env, &admin)?;
         if cooldown_secs == 0 {
-            panic!("cooldown must be non-zero");
+            return Err(PoolError::InvalidAmount);
         }
         if max_change_bps == 0 {
-            panic!("max change must be non-zero");
+            return Err(PoolError::InvalidAmount);
         }
         config.yield_change_cooldown_secs = cooldown_secs;
         config.max_yield_change_bps = max_change_bps;
@@ -1174,9 +1308,10 @@ impl FundingPool {
             (EVT, symbol_short!("set_y_pol")),
             (admin, cooldown_secs, max_change_bps),
         );
+        Ok(())
     }
 
-    pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32) {
+    pub fn set_factoring_fee(env: Env, admin: Address, factoring_fee_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1184,38 +1319,256 @@ impl FundingPool {
             .storage()
             .instance()
             .get(&DataKey::Config)
-            .expect("not initialized");
-        Self::require_admin(&env, &admin);
+            .ok_or(PoolError::NotInitialized)?;
+        Self::require_admin(&env, &admin)?;
         if factoring_fee_bps > BPS_DENOM {
-            panic!("factoring fee cannot exceed 100%");
+            return Err(PoolError::InvalidAmount);
         }
         config.factoring_fee_bps = factoring_fee_bps;
         env.storage().instance().set(&DataKey::Config, &config);
+        Ok(())
     }
 
-    pub fn set_compound_interest(env: Env, admin: Address, compound: bool) {
+    pub fn set_compound_interest(env: Env, admin: Address, compound: bool) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
-        let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        Self::require_admin(&env, &admin)?;
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
         config.compound_interest = compound;
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("set_comp")), (admin, compound));
+        Ok(())
     }
 
-    pub fn get_config(env: Env) -> PoolConfig {
+    // ---- #235: minimum deposit ----
+
+    pub fn set_min_deposit(env: Env, admin: Address, min_amount: i128) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if min_amount < 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.min_deposit_amount = min_amount;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_min_d")), (admin, min_amount));
+        Ok(())
+    }
+
+    pub fn get_min_deposit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<DataKey, PoolConfig>(&DataKey::Config)
+            .map(|c| c.min_deposit_amount)
+            .unwrap_or(0)
+    }
+
+    // ---- #236: protocol revenue & treasury ----
+
+    pub fn set_treasury(env: Env, admin: Address, treasury: Address) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.events()
+            .publish((EVT, symbol_short!("set_treas")), (admin, treasury));
+        Ok(())
+    }
+
+    pub fn get_treasury(env: Env) -> PoolResult<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(PoolError::TreasuryNotConfigured)
+    }
+
+    pub fn get_protocol_revenue(env: Env, token: Address) -> i128 {
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token))
+            .unwrap_or_default();
+        tt.protocol_revenue
+    }
+
+    pub fn withdraw_revenue(
+        env: Env,
+        admin: Address,
+        token: Address,
+        amount: i128,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(PoolError::TreasuryNotConfigured)?;
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        if amount > tt.protocol_revenue {
+            return Err(PoolError::InsufficientRevenue);
+        }
+        tt.protocol_revenue -= amount;
+        env.storage().instance().set(&token_totals_key, &tt);
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &treasury, &amount);
+        env.events().publish(
+            (EVT, symbol_short!("rev_wdraw")),
+            (token, amount, treasury),
+        );
+        Ok(())
+    }
+
+    // ---- #244: withdrawal rate limiting ----
+
+    pub fn set_withdrawal_limits(
+        env: Env,
+        admin: Address,
+        max_bps: u32,
+        cooldown_secs: u64,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if max_bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.max_single_withdrawal_bps = max_bps;
+        config.withdrawal_cooldown_secs = cooldown_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("set_wdlim")),
+            (admin, max_bps, cooldown_secs),
+        );
+        Ok(())
+    }
+
+    // ---- #247: co-fund share transfer (secondary market) ----
+
+    /// Returns the co-fund share (in bps, 0-10_000) that `investor` holds in `invoice_id`.
+    pub fn get_co_fund_share(env: Env, invoice_id: u64, investor: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoFundShare(invoice_id, investor))
+            .unwrap_or(0)
+    }
+
+    /// Transfer `bps` basis points of the caller's co-fund share in `invoice_id` to `to`.
+    /// bps=10_000 transfers 100% of the caller's share.
+    /// Only allowed on invoices that are currently funded (not yet fully repaid).
+    /// If KYC is enabled on the pool, `to` must be KYC-approved.
+    pub fn transfer_co_fund_share(
+        env: Env,
+        from: Address,
+        invoice_id: u64,
+        token: Address,
+        to: Address,
+        bps: u32,
+    ) -> PoolResult<()> {
+        from.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        if bps == 0 || bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        // Invoice must exist and not be fully repaid
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .ok_or(PoolError::InvoiceNotFound)?;
+        if record.repaid_amount >= record.principal.saturating_add(record.factoring_fee) {
+            return Err(PoolError::AlreadyFullyRepaid);
+        }
+
+        // KYC check on recipient if pool requires it
+        let kyc_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycRequired)
+            .unwrap_or(false);
+        if kyc_required {
+            let approved: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::InvestorKyc(to.clone()))
+                .unwrap_or(false);
+            if !approved {
+                return Err(PoolError::Unauthorized);
+            }
+        }
+
+        let from_key = DataKey::CoFundShare(invoice_id, from.clone());
+        let to_key = DataKey::CoFundShare(invoice_id, to.clone());
+
+        let from_share: u32 = env
+            .storage()
+            .persistent()
+            .get(&from_key)
+            .unwrap_or(0);
+
+        // Calculate share amount to transfer
+        let transfer_amount = (from_share as u64 * bps as u64 / BPS_DENOM as u64) as u32;
+        if transfer_amount == 0 || transfer_amount > from_share {
+            return Err(PoolError::InsufficientCoFundShare);
+        }
+
+        let to_share: u32 = env
+            .storage()
+            .persistent()
+            .get(&to_key)
+            .unwrap_or(0);
+
+        let new_from_share = from_share - transfer_amount;
+        let new_to_share = to_share.saturating_add(transfer_amount);
+
+        if new_from_share == 0 {
+            env.storage().persistent().remove(&from_key);
+        } else {
+            env.storage().persistent().set(&from_key, &new_from_share);
+        }
+        env.storage().persistent().set(&to_key, &new_to_share);
+
+        env.events().publish(
+            (EVT, symbol_short!("shr_xfer")),
+            (invoice_id, from, to, bps, transfer_amount),
+        );
+        Ok(())
+    }
+
+    pub fn get_config(env: Env) -> PoolResult<PoolConfig> {
         env.storage()
             .instance()
             .get(&DataKey::Config)
-            .expect("not initialized")
+            .ok_or(PoolError::NotInitialized)
     }
-    pub fn accepted_tokens(env: Env) -> Vec<Address> {
+    pub fn accepted_tokens(env: Env) -> PoolResult<Vec<Address>> {
         env.storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized")
+            .ok_or(PoolError::NotInitialized)
     }
     pub fn get_token_totals(env: Env, token: Address) -> PoolTokenTotals {
         env.storage()
@@ -1243,19 +1596,23 @@ impl FundingPool {
             .unwrap_or_default()
     }
 
-    pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) {
+    pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         let record: FundedInvoice = env
             .storage()
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
-            .expect("funded invoice not found");
+            .ok_or(PoolError::InvoiceNotFound)?;
 
         // Calculate total due to check if fully repaid
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
         let total_interest = calculate_interest(
@@ -1267,7 +1624,7 @@ impl FundingPool {
         let total_due = record.principal + total_interest as i128 + record.factoring_fee;
 
         if record.repaid_amount < total_due {
-            panic!("can only cleanup fully repaid invoices");
+            return Err(PoolError::InvalidAmount);
         }
         env.storage()
             .persistent()
@@ -1282,18 +1639,23 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events()
             .publish((EVT, symbol_short!("cleanup")), invoice_id);
+        Ok(())
     }
 
-    pub fn estimate_repayment(env: Env, invoice_id: u64) -> i128 {
+    pub fn estimate_repayment(env: Env, invoice_id: u64) -> PoolResult<i128> {
         bump_instance(&env);
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
         let record: FundedInvoice = env
             .storage()
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
-            .expect("invoice not funded");
+            .ok_or(PoolError::InvoiceNotFound)?;
         if record.funded_at == 0 {
-            return record.principal;
+            return Ok(record.principal);
         }
 
         let now = env.ledger().timestamp();
@@ -1308,35 +1670,40 @@ impl FundingPool {
         // Return remaining amount due (total - already repaid)
         let remaining = total_due - record.repaid_amount;
         if remaining < 0 {
-            0
+            Ok(0)
         } else {
-            remaining
+            Ok(remaining)
         }
     }
 
-    fn require_admin(env: &Env, admin: &Address) {
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+    fn require_admin(env: &Env, admin: &Address) -> PoolResult<()> {
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
         if admin != &config.admin {
-            panic!("unauthorized");
+            return Err(PoolError::Unauthorized);
         }
+        Ok(())
     }
 
     fn require_not_paused(env: &Env) {
         require_not_paused(env);
     }
 
-    fn assert_accepted_token(env: &Env, token: &Address) {
+    fn assert_accepted_token(env: &Env, token: &Address) -> PoolResult<()> {
         let tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
-            .expect("not initialized");
+            .ok_or(PoolError::NotInitialized)?;
         for i in 0..tokens.len() {
-            if tokens.get(i).unwrap() == *token {
-                return;
+            if tokens.get(i).ok_or(PoolError::StorageCorrupted)? == *token {
+                return Ok(());
             }
         }
-        panic!("token not accepted");
+        Err(PoolError::TokenNotAccepted)
     }
 
     // ---- #111: Exchange rate methods ----
@@ -1345,16 +1712,16 @@ impl FundingPool {
     /// Used to normalise pool value across stablecoins for display/reporting.
     /// Oracle-backed validation is a planned follow-up; for now the admin must
     /// set explicit per-token bounds before changing a rate.
-    pub fn set_rate_bounds(env: Env, admin: Address, token: Address, min_bps: u32, max_bps: u32) {
+    pub fn set_rate_bounds(env: Env, admin: Address, token: Address, min_bps: u32, max_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
-        Self::assert_accepted_token(&env, &token);
+        Self::require_admin(&env, &admin)?;
+        Self::assert_accepted_token(&env, &token)?;
         if min_bps == 0 || max_bps == 0 {
-            panic!("rate bounds must be positive");
+            return Err(PoolError::InvalidAmount);
         }
         if min_bps > max_bps {
-            panic!("invalid rate bounds");
+            return Err(PoolError::InvalidAmount);
         }
 
         env.storage().instance().set(
@@ -1365,15 +1732,16 @@ impl FundingPool {
             (EVT, symbol_short!("bounds")),
             (admin, token, min_bps, max_bps),
         );
+        Ok(())
     }
 
-    pub fn set_exchange_rate(env: Env, admin: Address, token: Address, rate_bps: u32) {
+    pub fn set_exchange_rate(env: Env, admin: Address, token: Address, rate_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
-        Self::assert_accepted_token(&env, &token);
+        Self::require_admin(&env, &admin)?;
+        Self::assert_accepted_token(&env, &token)?;
         if rate_bps == 0 {
-            panic!("rate must be positive");
+            return Err(PoolError::InvalidAmount);
         }
         let bounds: ExchangeRateBounds = env
             .storage()
@@ -1384,13 +1752,14 @@ impl FundingPool {
                 max_bps: 10_000u32,
             });
         if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
-            panic!("rate out of bounds");
+            return Err(PoolError::InvalidAmount);
         }
         env.storage()
             .instance()
             .set(&DataKey::ExchangeRate(token.clone()), &rate_bps);
         env.events()
             .publish((EVT, symbol_short!("set_rate")), (admin, token, rate_bps));
+        Ok(())
     }
 
     /// Returns the USD exchange rate for `token` in bps (defaults to 10000 = 1:1).
@@ -1416,15 +1785,16 @@ impl FundingPool {
     // ---- #109: Investor KYC / whitelist methods ----
 
     /// Toggle whether KYC is required before depositing.
-    pub fn set_kyc_required(env: Env, admin: Address, required: bool) {
+    pub fn set_kyc_required(env: Env, admin: Address, required: bool) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
             .set(&DataKey::KycRequired, &required);
         env.events()
             .publish((EVT, symbol_short!("kyc_req")), (admin, required));
+        Ok(())
     }
 
     /// Returns whether KYC is currently required.
@@ -1437,15 +1807,16 @@ impl FundingPool {
     }
 
     /// Approve or revoke a specific investor's KYC status.
-    pub fn set_investor_kyc(env: Env, admin: Address, investor: Address, approved: bool) {
+    pub fn set_investor_kyc(env: Env, admin: Address, investor: Address, approved: bool) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         env.storage()
             .persistent()
             .set(&DataKey::InvestorKyc(investor.clone()), &approved);
         env.events()
             .publish((EVT, symbol_short!("kyc_set")), (admin, investor, approved));
+        Ok(())
     }
 
     /// Returns whether `investor` has been KYC-approved.
@@ -1457,10 +1828,10 @@ impl FundingPool {
             .unwrap_or(false)
     }
 
-    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
+    pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
@@ -1471,29 +1842,31 @@ impl FundingPool {
             (EVT, symbol_short!("upg_prop")),
             (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
         );
+        Ok(())
     }
 
-    pub fn execute_upgrade(env: Env, admin: Address) {
+    pub fn execute_upgrade(env: Env, admin: Address) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
-        Self::require_admin(&env, &admin);
+        Self::require_admin(&env, &admin)?;
         let scheduled_at: u64 = env
             .storage()
             .instance()
             .get(&DataKey::UpgradeScheduledAt)
-            .expect("no upgrade proposed");
+            .ok_or(PoolError::NotInitialized)?;
         let now = env.ledger().timestamp();
         if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
-            panic!("upgrade timelock not expired");
+            return Err(PoolError::InvalidAmount);
         }
         let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
             .get(&DataKey::ProposedWasmHash)
-            .expect("no wasm hash proposed");
+            .ok_or(PoolError::NotInitialized)?;
         env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
+        Ok(())
     }
 
     // ---- Internal utility methods ----
@@ -1699,38 +2072,37 @@ mod test {
     // ---- Issue #61: Edge-Case Tests ----
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_deposit_zero_amount_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
-        client.deposit(&investor, &usdc_id, &0i128);
+        let result = client.try_deposit(&investor, &usdc_id, &0i128);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_deposit_negative_amount_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
-        client.deposit(&investor, &usdc_id, &-100i128);
+        let result = client.try_deposit(&investor, &usdc_id, &-100i128);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "token not accepted")]
     fn test_deposit_non_whitelisted_token_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let unknown_token = Address::generate(&env);
-        client.deposit(&investor, &unknown_token, &1_000i128);
+        let result = client.try_deposit(&investor, &unknown_token, &1_000i128);
+        assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
     }
 
     #[test]
-    #[should_panic(expected = "shares must be positive")]
     fn test_withdraw_zero_shares_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1738,11 +2110,11 @@ mod test {
         let investor = Address::generate(&env);
         mint(&env, &usdc_id, &investor, 1_000);
         client.deposit(&investor, &usdc_id, &1_000);
-        client.withdraw(&investor, &usdc_id, &0i128);
+        let result = client.try_withdraw(&investor, &usdc_id, &0i128);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "insufficient shares")]
     fn test_withdraw_more_than_balance_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1751,17 +2123,17 @@ mod test {
         mint(&env, &usdc_id, &investor, 500);
         client.deposit(&investor, &usdc_id, &500);
         // Attempt to withdraw more shares than owned
-        client.withdraw(&investor, &usdc_id, &1_000i128);
+        let result = client.try_withdraw(&investor, &usdc_id, &1_000i128);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "principal must be positive")]
     fn test_fund_invoice_zero_principal_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
-        client.fund_invoice(
+        let result = client.try_fund_invoice(
             &admin,
             &1u64,
             &0i128,
@@ -1769,10 +2141,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "insufficient available liquidity")]
     fn test_fund_invoice_insufficient_liquidity_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1783,7 +2155,7 @@ mod test {
         mint(&env, &usdc_id, &investor, 500);
         client.deposit(&investor, &usdc_id, &500);
         // Try to fund more than available in pool
-        client.fund_invoice(
+        let result = client.try_fund_invoice(
             &admin,
             &1u64,
             &1_000i128,
@@ -1791,10 +2163,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "invoice already funded")]
     fn test_fund_invoice_duplicate_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1812,8 +2184,8 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        // Second fund on same invoice_id must panic
-        client.fund_invoice(
+        // Second fund on same invoice_id must return StorageCorrupted
+        let result = client.try_fund_invoice(
             &admin,
             &1u64,
             &500i128,
@@ -1821,10 +2193,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::StorageCorrupted)));
     }
 
     #[test]
-    #[should_panic(expected = "already repaid")]
     fn test_double_repay_invoice_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1845,19 +2217,19 @@ mod test {
         );
         let amount_due = client.estimate_repayment(&1u64);
         client.repay_invoice(&1u64, &sme, &amount_due);
-        // Second repay must panic
-        client.repay_invoice(&1u64, &sme, &amount_due);
+        // Second repay must return AlreadyFullyRepaid
+        let result = client.try_repay_invoice(&1u64, &sme, &amount_due);
+        assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_fund_invoice_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
         let attacker = Address::generate(&env);
-        client.fund_invoice(
+        let result = client.try_fund_invoice(
             &attacker,
             &1u64,
             &100i128,
@@ -1865,15 +2237,16 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "yield cannot exceed 50%")]
     fn test_set_yield_above_50_percent_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        client.set_yield(&admin, &5_001u32);
+        let result = client.try_set_yield(&admin, &5_001u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
@@ -1889,7 +2262,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "yield change cooldown active")]
     fn test_set_yield_cooldown_enforced() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1901,11 +2273,11 @@ mod test {
         client.set_yield(&admin, &900u32);
 
         // immediate second change should fail
-        client.set_yield(&admin, &950u32);
+        let result = client.try_set_yield(&admin, &950u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "yield change exceeds maximum step")]
     fn test_set_yield_max_step_enforced() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1914,7 +2286,8 @@ mod test {
         env.ledger()
             .with_mut(|l| l.timestamp += DEFAULT_YIELD_CHANGE_COOLDOWN_SECS);
         // DEFAULT_YIELD_BPS = 800, max step = 200 => delta 301 should fail
-        client.set_yield(&admin, &1_101u32);
+        let result = client.try_set_yield(&admin, &1_101u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
@@ -1936,7 +2309,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "token has non-zero pool balances")]
     fn test_remove_token_with_balance_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1944,8 +2316,9 @@ mod test {
         let investor = Address::generate(&env);
         mint(&env, &usdc_id, &investor, 1_000);
         client.deposit(&investor, &usdc_id, &1_000);
-        // pool has a non-zero balance — remove must panic
-        client.remove_token(&admin, &usdc_id);
+        // pool has a non-zero balance — remove must return InvalidAmount
+        let result = client.try_remove_token(&admin, &usdc_id);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     // ---- Collateral Tests ----
@@ -1973,12 +2346,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "collateral ratio cannot exceed 100%")]
     fn test_set_collateral_config_over_100_percent_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        client.set_collateral_config(&admin, &1_000i128, &10_001u32);
+        let result = client.try_set_collateral_config(&admin, &1_000i128, &10_001u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
@@ -2030,7 +2403,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "collateral required for high-value invoice")]
     fn test_high_value_invoice_requires_collateral() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2044,8 +2416,8 @@ mod test {
         mint(&env, &usdc_id, &investor, 10_000);
         client.deposit(&investor, &usdc_id, &10_000);
 
-        // Try to fund without depositing collateral first — must panic
-        client.fund_invoice(
+        // Try to fund without depositing collateral first — must return CollateralNotFound
+        let result = client.try_fund_invoice(
             &admin,
             &1u64,
             &5_000i128,
@@ -2053,6 +2425,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::CollateralNotFound)));
     }
 
     #[test]
@@ -2180,7 +2553,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "collateral already deposited for this invoice")]
     fn test_double_deposit_collateral_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2191,11 +2563,11 @@ mod test {
         mint(&env, &usdc_id, &sme, 5_000);
 
         client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
-        client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
+        let result = client.try_deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::StorageCorrupted)));
     }
 
     #[test]
-    #[should_panic(expected = "insufficient collateral deposited")]
     fn test_insufficient_collateral_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2214,7 +2586,7 @@ mod test {
         client.deposit(&investor, &usdc_id, &10_000);
         client.deposit_collateral(&1u64, &sme, &usdc_id, &500);
 
-        client.fund_invoice(
+        let result = client.try_fund_invoice(
             &admin,
             &1u64,
             &principal,
@@ -2222,10 +2594,10 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "invoice already repaid; collateral was returned on repayment")]
     fn test_seize_collateral_after_repayment_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2253,8 +2625,9 @@ mod test {
         let amount_due = client.estimate_repayment(&1u64);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
-        // Trying to seize after repayment must panic
-        client.seize_collateral(&admin, &1u64);
+        // Trying to seize after repayment must return AlreadyFullyRepaid
+        let result = client.try_seize_collateral(&admin, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
 
     // ---- Issue #105: Comprehensive Access Control Tests ----
@@ -2262,28 +2635,27 @@ mod test {
     // --- Admin-gated function guards ---
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_pause_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.pause(&attacker);
+        let result = client.try_pause(&attacker);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_unpause_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         client.pause(&admin);
         let attacker = Address::generate(&env);
-        client.unpause(&attacker);
+        let result = client.try_unpause(&attacker);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_add_token_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2292,11 +2664,11 @@ mod test {
         let ta = Address::generate(&env);
         let new_token = env.register_stellar_asset_contract_v2(ta).address();
         let new_share = env.register(DummyShare, ());
-        client.add_token(&attacker, &new_token, &new_share);
+        let result = client.try_add_token(&attacker, &new_token, &new_share);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_remove_token_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2306,58 +2678,59 @@ mod test {
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
         let attacker = Address::generate(&env);
-        client.remove_token(&attacker, &new_token);
+        let result = client.try_remove_token(&attacker, &new_token);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_yield_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.set_yield(&attacker, &500u32);
+        let result = client.try_set_yield(&attacker, &500u32);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_factoring_fee_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.set_factoring_fee(&attacker, &100u32);
+        let result = client.try_set_factoring_fee(&attacker, &100u32);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_compound_interest_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.set_compound_interest(&attacker, &true);
+        let result = client.try_set_compound_interest(&attacker, &true);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_collateral_config_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.set_collateral_config(&attacker, &1_000i128, &2_000u32);
+        let result = client.try_set_collateral_config(&attacker, &1_000i128, &2_000u32);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_exchange_rate_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
         client.set_rate_bounds(&admin, &usdc_id, &9_500u32, &10_500u32);
         let attacker = Address::generate(&env);
-        client.set_exchange_rate(&attacker, &usdc_id, &10_000u32);
+        let result = client.try_set_exchange_rate(&attacker, &usdc_id, &10_000u32);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
@@ -2376,24 +2749,24 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "rate out of bounds")]
     fn test_set_exchange_rate_outside_bounds_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
 
         client.set_rate_bounds(&admin, &usdc_id, &9_500u32, &10_500u32);
-        client.set_exchange_rate(&admin, &usdc_id, &10_600u32);
+        let result = client.try_set_exchange_rate(&admin, &usdc_id, &10_600u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
-    #[should_panic(expected = "invalid rate bounds")]
     fn test_set_rate_bounds_invalid_order_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
 
-        client.set_rate_bounds(&admin, &usdc_id, &10_500u32, &9_500u32);
+        let result = client.try_set_rate_bounds(&admin, &usdc_id, &10_500u32, &9_500u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
     #[test]
@@ -2415,39 +2788,38 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_kyc_required_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
-        client.set_kyc_required(&attacker, &true);
+        let result = client.try_set_kyc_required(&attacker, &true);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_investor_kyc_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
         let investor = Address::generate(&env);
-        client.set_investor_kyc(&attacker, &investor, &true);
+        let result = client.try_set_investor_kyc(&attacker, &investor, &true);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_propose_upgrade_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _usdc_id, _share_token) = setup(&env);
         let attacker = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[0u8; 32]);
-        client.propose_upgrade(&attacker, &hash);
+        let result = client.try_propose_upgrade(&attacker, &hash);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_fund_multiple_invoices_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2466,11 +2838,11 @@ mod test {
             token: usdc_id,
         });
         let attacker = Address::generate(&env);
-        client.fund_multiple_invoices(&attacker, &requests);
+        let result = client.try_fund_multiple_invoices(&attacker, &requests);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_seize_collateral_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2494,11 +2866,11 @@ mod test {
             &usdc_id,
         );
         let attacker = Address::generate(&env);
-        client.seize_collateral(&attacker, &1u64);
+        let result = client.try_seize_collateral(&attacker, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_cleanup_funded_invoice_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2520,7 +2892,8 @@ mod test {
         let amount_due = client.estimate_repayment(&1u64);
         client.repay_invoice(&1u64, &sme, &amount_due);
         let attacker = Address::generate(&env);
-        client.cleanup_funded_invoice(&attacker, &1u64);
+        let result = client.try_cleanup_funded_invoice(&attacker, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     // --- Pause mechanism tests ---
@@ -2665,7 +3038,6 @@ mod test {
     // --- KYC gate tests ---
 
     #[test]
-    #[should_panic(expected = "investor not KYC approved")]
     fn test_deposit_when_kyc_required_unapproved_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2674,7 +3046,8 @@ mod test {
 
         client.set_kyc_required(&admin, &true);
         mint(&env, &usdc_id, &investor, 1_000);
-        client.deposit(&investor, &usdc_id, &1_000);
+        let result = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
@@ -2694,7 +3067,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "investor not KYC approved")]
     fn test_kyc_revocation_blocks_deposit() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2708,7 +3080,8 @@ mod test {
 
         // Revoke KYC — subsequent deposit must be blocked
         client.set_investor_kyc(&admin, &investor, &false);
-        client.deposit(&investor, &usdc_id, &1_000);
+        let result = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
 
     #[test]
@@ -2765,5 +3138,146 @@ mod test {
 
         client.unpause(&admin);
         assert!(!client.is_paused());
+    }
+
+    // ---- Issue #138: Partial Repayment Tests ----
+
+    #[test]
+    fn test_partial_repayment_two_installments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &5_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 10_000);
+        let total_due = client.estimate_repayment(&1u64);
+        let half = total_due / 2;
+
+        // First partial payment
+        client.repay_invoice(&1u64, &sme, &half);
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert_eq!(fi.repaid_amount, half);
+
+        // Invoice still active — total_deployed unchanged
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.total_deployed, 5_000i128);
+
+        // Second payment clears the rest
+        let remaining = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &remaining);
+
+        let fi2 = client.get_funded_invoice(&1u64).unwrap();
+        assert!(fi2.repaid_amount >= total_due);
+
+        let tt2 = client.get_token_totals(&usdc_id);
+        assert_eq!(tt2.total_deployed, 0);
+        assert!(tt2.pool_value > 10_000);
+    }
+
+    #[test]
+    fn test_partial_repayment_does_not_transition_prematurely() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 5_000);
+
+        client.deposit(&investor, &usdc_id, &5_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &3_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64);
+
+        // Partial payment — less than total
+        client.repay_invoice(&1u64, &sme, &(total_due / 3));
+
+        // Invoice record still exists; pool still shows it as deployed
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert!(fi.repaid_amount < total_due);
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.total_deployed, 3_000i128);
+    }
+
+    #[test]
+    fn test_overpayment_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+
+        client.deposit(&investor, &usdc_id, &5_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &2_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64);
+
+        // Attempt to pay more than due
+        let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
+        assert_eq!(result, Err(Ok(PoolError::Overpayment)));
+    }
+
+    #[test]
+    fn test_double_full_repayment_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+
+        client.deposit(&investor, &usdc_id, &5_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &2_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        // Second full repayment must be rejected
+        let result = client.try_repay_invoice(&1u64, &sme, &total_due);
+        assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
 }

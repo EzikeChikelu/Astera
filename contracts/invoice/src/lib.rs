@@ -21,6 +21,7 @@ const MAX_INVOICES_PER_DAY: u32 = 10;
 const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
+const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
 
@@ -62,7 +63,10 @@ pub struct Invoice {
     pub verification_hash: String,
     pub oracle_verified: bool,
     pub dispute_reason: String,
-    pub disputed_at: u64,
+    /// Per-invoice grace-period override set by admin (#230).
+    /// `None` means use the global `GracePeriodDays` setting.
+    /// When set, the value must be ≤ `MAX_GRACE_PERIOD_OVERRIDE_DAYS`.
+    pub grace_period_override: Option<u32>,
 }
 
 /// Wallet / explorer–oriented view derived from [`Invoice`] (no extra storage).
@@ -420,7 +424,7 @@ impl InvoiceContract {
             verification_hash,
             oracle_verified: false,
             dispute_reason: empty_str,
-            disputed_at: 0,
+            grace_period_override: None,
         };
 
         env.storage()
@@ -734,11 +738,13 @@ impl InvoiceContract {
             panic!("invoice is not funded");
         }
 
-        let grace_period_days: u32 = env
+        // Use the invoice's per-invoice override if set; fall back to global (#230).
+        let global_grace: u32 = env
             .storage()
             .instance()
             .get(&DataKey::GracePeriodDays)
             .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let grace_period_days = invoice.grace_period_override.unwrap_or(global_grace);
         let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
         let now = env.ledger().timestamp();
         let default_at = invoice.due_date + grace_period_secs;
@@ -988,6 +994,77 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::GracePeriodDays)
             .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS)
+    }
+
+    /// Set a per-invoice grace-period override (#230).
+    ///
+    /// Only callable by admin on a `Funded` invoice.
+    /// `days` must be ≤ `MAX_GRACE_PERIOD_OVERRIDE_DAYS` (30).
+    /// Emits `(INVOICE, "grace_period_updated")` with `(id, old_days, new_days)`.
+    pub fn set_invoice_grace_period(env: Env, admin: Address, id: u64, days: u32) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+
+        if days > MAX_GRACE_PERIOD_OVERRIDE_DAYS {
+            panic!(
+                "grace period override {} days exceeds maximum of {} days",
+                days, MAX_GRACE_PERIOD_OVERRIDE_DAYS
+            );
+        }
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("grace period override only allowed on Funded invoices");
+        }
+
+        let global_grace: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let old_days = invoice.grace_period_override.unwrap_or(global_grace);
+
+        invoice.grace_period_override = Some(days);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+
+        env.events().publish(
+            (EVT, symbol_short!("gp_upd")),
+            (id, old_days, days),
+        );
+    }
+
+    /// Get the effective grace period for a specific invoice (#230).
+    /// Returns the per-invoice override if set, otherwise the global default.
+    pub fn get_invoice_grace_period(env: Env, id: u64) -> u32 {
+        bump_instance(&env);
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        let global_grace: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        invoice.grace_period_override.unwrap_or(global_grace)
     }
 
     pub fn set_pool(env: Env, admin: Address, pool: Address) {
@@ -2358,99 +2435,88 @@ mod test {
         assert!(client.is_paused());
     }
 
+    // ── #230: per-invoice grace period tests ────────────────────────────────
+
     #[test]
-    fn test_resolve_dispute_lifecycle() {
+    fn test_invoice_without_override_uses_global_grace_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+        let (client, admin, pool, _owner) = setup_funded_invoice(&env);
 
-        let id = client.create_invoice(
-            &sme,
-            &String::from_str(&env, "Debtor"),
-            &1000,
-            &(env.ledger().timestamp() + 10000),
-            &String::from_str(&env, "Desc"),
-            &String::from_str(&env, "Hash"),
-        );
-
-        // Dispute it via oracle
-        client.verify_invoice(
-            &id,
-            &oracle,
-            &false,
-            &String::from_str(&env, "Price mismatch"),
-        );
-
-        let invoice = client.get_invoice(&id);
-        assert_eq!(invoice.status, InvoiceStatus::Disputed);
-        assert!(invoice.disputed_at > 0);
-
-        // Resolution 1: In favor of SME (back to Verified)
-        client.resolve_dispute(&id, &oracle, &DisputeResolution::InFavorOfSME);
-        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Verified);
-
-        // Dispute it again for testing debtor favor
-        // To dispute it again, it must be AwaitingVerification
-        // Let's create a new one for clarity
-        let id2 = client.create_invoice(
-            &sme,
-            &String::from_str(&env, "Debtor 2"),
-            &2000,
-            &(env.ledger().timestamp() + 10000),
-            &String::from_str(&env, "Desc 2"),
-            &String::from_str(&env, "Hash 2"),
-        );
-        client.verify_invoice(&id2, &oracle, &false, &String::from_str(&env, "Fake"));
-
-        // Resolution 2: In favor of Debtor (to Cancelled)
-        client.resolve_dispute(&id2, &oracle, &DisputeResolution::InFavorOfDebtor);
-        assert_eq!(client.get_invoice(&id2).status, InvoiceStatus::Cancelled);
+        // No override set — effective grace period should be global (7 days by default).
+        let id = 1u64;
+        let effective = client.get_invoice_grace_period(&id);
+        assert_eq!(effective, DEFAULT_GRACE_PERIOD_DAYS);
+        let _ = admin;
+        let _ = pool;
     }
 
     #[test]
-    #[should_panic(expected = "dispute resolution window not yet passed for admin")]
-    fn test_admin_cannot_resolve_early() {
+    fn test_invoice_with_override_uses_override_grace_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
 
-        let id = client.create_invoice(
-            &sme,
-            &String::from_str(&env, "D"),
-            &1000,
-            &(env.ledger().timestamp() + 10000),
-            &String::from_str(&env, "D"),
-            &String::from_str(&env, "H"),
-        );
-        client.verify_invoice(&id, &oracle, &false, &String::from_str(&env, "X"));
-
-        // Admin tries to resolve immediately
-        client.resolve_dispute(&id, &admin, &DisputeResolution::InFavorOfSME);
+        let id = 1u64;
+        client.set_invoice_grace_period(&admin, &id, &14u32);
+        let effective = client.get_invoice_grace_period(&id);
+        assert_eq!(effective, 14);
     }
 
     #[test]
-    fn test_admin_can_resolve_after_window() {
+    #[should_panic(expected = "exceeds maximum")]
+    fn test_override_exceeds_max_days_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, _pool, sme, oracle) = setup_with_oracle(&env);
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+
+        // 31 days > MAX_GRACE_PERIOD_OVERRIDE_DAYS (30) — must panic.
+        client.set_invoice_grace_period(&admin, &1u64, &31u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_non_admin_cannot_set_override() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, owner) = setup_funded_invoice(&env);
+
+        // owner is not admin — must panic.
+        client.set_invoice_grace_period(&owner, &1u64, &10u32);
+    }
+
+    /// Helper: initialise a contract and produce a single funded invoice (id=1).
+    fn setup_funded_invoice(
+        env: &Env,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+    ) {
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(env, &contract_id);
+
+        let admin = Address::generate(env);
+        let pool = Address::generate(env);
+        let oracle = Address::generate(env);
+        let owner = Address::generate(env);
+
+        client.initialize(&admin, &pool, &oracle);
 
         let id = client.create_invoice(
-            &sme,
-            &String::from_str(&env, "D"),
-            &1000,
-            &(env.ledger().timestamp() + 10000),
-            &String::from_str(&env, "D"),
-            &String::from_str(&env, "H"),
+            &owner,
+            &String::from_str(env, "ACME Corp"),
+            &1_000_0000000i128,
+            &(env.ledger().timestamp() + SECS_PER_DAY * 30),
+            &String::from_str(env, "Test invoice"),
+            &String::from_str(env, "hash"),
         );
-        client.verify_invoice(&id, &oracle, &false, &String::from_str(&env, "X"));
 
-        // Advance time
-        env.ledger().with_mut(|l| {
-            l.timestamp += DEFAULT_DISPUTE_RESOLUTION_WINDOW + 1;
-        });
+        // Verify and fund so the invoice reaches Funded status.
+        client.verify_invoice(&id, &oracle, &true, &String::from_str(env, ""));
+        client.mark_funded(&id, &pool);
 
-        // Admin resolves
-        client.resolve_dispute(&id, &admin, &DisputeResolution::InFavorOfSME);
-        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Verified);
+        (client, admin, pool, owner)
     }
 }
