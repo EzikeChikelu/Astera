@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx } from '@/lib/contracts';
@@ -69,6 +70,9 @@ export default function NewInvoicePage() {
           <p className="text-brand-muted">
             Mint your unpaid invoice as a Soroban RWA token to access instant liquidity.
           </p>
+          <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline mt-2 inline-block">
+            Import multiple invoices via CSV
+          </Link>
         </div>
 
         {!wallet.connected ? (
