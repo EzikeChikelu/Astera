@@ -6,12 +6,14 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getInvoice,
   getInvoiceMetadata,
   getPoolConfig,
   getFundedInvoice,
   buildRepayTx,
+  buildDisputeTx,
   submitTx,
 } from '@/lib/contracts';
 import {
@@ -153,6 +155,8 @@ export default function InvoiceDetailPage() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [repayAmount, setRepayAmount] = useState<string>('');
+  const [disputeModalOpen, setDisputeModalOpen] = useState(false);
+  const [disputeReason, setDisputeReason] = useState('');
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -317,6 +321,43 @@ export default function InvoiceDetailPage() {
     }
   }
 
+  async function handleDispute() {
+    if (!wallet.address || !invoice || !disputeReason.trim()) return;
+
+    setActionLoading(true);
+
+    try {
+      const xdr = await buildDisputeTx({
+        disputer: wallet.address,
+        invoiceId: invoice.id,
+        reason: disputeReason,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success('Dispute raised successfully. Your invoice is now under review.');
+      setDisputeModalOpen(false);
+      setDisputeReason('');
+      await loadInvoice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to raise dispute.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  function exportInvoicePDF() {
+    window.print();
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen pt-24 px-6">
@@ -350,6 +391,12 @@ export default function InvoiceDetailPage() {
         >
           ← Back to Dashboard
         </Link>
+        <button
+          onClick={exportInvoicePDF}
+          className="print:hidden text-sm text-brand-muted hover:text-white ml-4"
+        >
+          Export PDF
+        </button>
 
         <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
           {metadata.image ? (
@@ -613,6 +660,62 @@ export default function InvoiceDetailPage() {
               Your invoice is pending review. Once approved, the pool will fund it and USDC will be
               sent to your wallet.
             </div>
+          )}
+
+          {metadata.status === 'Disputed' && (
+            <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl">
+              <div className="flex items-center gap-2 text-red-400 font-medium mb-2">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                This invoice is under dispute review
+              </div>
+              <p className="text-sm text-brand-muted">
+                Our team will review your dispute within 3-5 business days. You will be notified once the issue is resolved.
+              </p>
+            </div>
+          )}
+
+          {isOwner && (metadata.status === 'Verified' || metadata.status === 'Funded' || metadata.status === 'AwaitingVerification') && (
+            <button
+              onClick={() => setDisputeModalOpen(true)}
+              className="w-full px-5 py-3 border border-red-700/50 text-red-400 font-semibold rounded-xl hover:bg-red-900/20 transition-colors"
+            >
+              Raise Dispute
+            </button>
+          )}
+
+          {disputeModalOpen && (
+            <ConfirmActionModal
+              title={`Raise Dispute for Invoice #${invoice?.id}`}
+              description="Disputing an invoice will flag it for manual review. This action cannot be undone. Please provide a clear reason for the dispute."
+              confirmLabel="Confirm Dispute"
+              onConfirm={() => void handleDispute()}
+              onCancel={() => {
+                setDisputeModalOpen(false);
+                setDisputeReason('');
+              }}
+              variant="destructive"
+              isOpen={disputeModalOpen}
+            >
+              <div className="px-6 pt-4">
+                <label htmlFor="dispute-reason" className="block text-xs font-medium text-brand-muted mb-2">
+                  Dispute Reason
+                </label>
+                <textarea
+                  id="dispute-reason"
+                  value={disputeReason}
+                  onChange={(e) => setDisputeReason(e.target.value)}
+                  placeholder="Describe why you are disputing this invoice..."
+                  rows={4}
+                  className="w-full px-4 py-2.5 rounded-xl border border-brand-border bg-brand-dark text-white placeholder-brand-muted/50 focus:border-brand-gold focus:outline-none focus:ring-2 focus:ring-brand-gold/40 resize-none"
+                  disabled={actionLoading}
+                />
+                <p className="mt-1.5 text-xs text-brand-muted">
+                  Provide a clear explanation to help the review team understand your dispute.
+                </p>
+              </div>
+            </ConfirmActionModal>
           )}
         </div>
       </div>

@@ -481,6 +481,39 @@ export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Pr
   return prepared.toXDR();
 }
 
+export async function buildDisputeTx(params: {
+  disputer: string;
+  invoiceId: number;
+  reason: string;
+}): Promise<string> {
+  const account = await rpc.getAccount(params.disputer);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'verify_invoice',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.disputer).toScVal(),
+        nativeToScVal(false, { type: 'bool' }),
+        nativeToScVal(params.reason, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
 // ---- #109: KYC / investor whitelist ----
 
 export async function getKycRequired(): Promise<boolean> {

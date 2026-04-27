@@ -1,5 +1,8 @@
+'use client';
+
 import { useTranslations, useLocale } from 'next-intl';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { setStoredLocale } from '@/lib/i18n';
 
 function LanguageSelector() {
