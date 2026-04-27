@@ -414,3 +414,5 @@ export default function HistoryPage() {
     </div>
   );
 }
+  /* Added by bounty-bot */
+}
