@@ -23,6 +23,16 @@ pub enum PoolError {
     ContractPaused = 12,
     CollateralNotFound = 13,
     CollateralAlreadySettled = 14,
+    // #235
+    DepositBelowMinimum = 15,
+    // #236
+    InsufficientRevenue = 16,
+    TreasuryNotConfigured = 17,
+    // #244
+    WithdrawalExceedsLimit = 18,
+    WithdrawalCooldownActive = 19,
+    // #247
+    InsufficientCoFundShare = 20,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -37,6 +47,11 @@ const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
+// #235: minimum deposit — 0 = disabled
+const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 0;
+// #244: withdrawal rate limiting — 10_000 bps (100%) and 0s = disabled by default
+const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
+const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -56,6 +71,11 @@ pub struct PoolConfig {
     pub last_yield_change_at: u64,
     pub yield_change_cooldown_secs: u64,
     pub max_yield_change_bps: u32,
+    // #235: minimum deposit per transaction (0 = disabled)
+    pub min_deposit_amount: i128,
+    // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
+    pub max_single_withdrawal_bps: u32,
+    pub withdrawal_cooldown_secs: u64,
 }
 
 #[contracttype]
@@ -67,6 +87,8 @@ pub struct PoolTokenTotals {
     pub total_fee_revenue: i128,
     /// Cumulative interest earned per share unit, scaled by REWARD_PRECISION.
     pub reward_per_share: i128,
+    // #236: protocol fee revenue available for treasury withdrawal (separate from investor pool)
+    pub protocol_revenue: i128,
 }
 
 /// Scaling factor for reward_per_share to maintain precision with integer arithmetic.
@@ -175,6 +197,12 @@ pub enum DataKey {
     ReentrancyGuard,
     /// Stores each investor's reward_per_share snapshot at last claim: (investor, token) -> i128
     InvestorRewardSnapshot(Address, Address),
+    // #244: last withdrawal timestamp per (investor, token)
+    LastWithdrawalTime(Address, Address),
+    // #236: treasury address for protocol revenue withdrawals
+    Treasury,
+    // #247: co-fund share ownership per (invoice_id, investor): stores bps (0-10_000)
+    CoFundShare(u64, Address),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -380,6 +408,9 @@ impl FundingPool {
             last_yield_change_at: env.ledger().timestamp(),
             yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
             max_yield_change_bps: DEFAULT_MAX_YIELD_CHANGE_BPS,
+            min_deposit_amount: DEFAULT_MIN_DEPOSIT_AMOUNT,
+            max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
+            withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -533,6 +564,12 @@ impl FundingPool {
         }
         Self::assert_accepted_token(&env, &token)?;
 
+        // #235: enforce minimum deposit amount
+        let config = get_config_cached(&env)?;
+        if config.min_deposit_amount > 0 && amount < config.min_deposit_amount {
+            return Err(PoolError::DepositBelowMinimum);
+        }
+
         // #109: enforce KYC check when required
         let kyc_required: bool = env
             .storage()
@@ -613,6 +650,21 @@ impl FundingPool {
 
         Self::non_reentrant_start(&env); // <- ADD GUARD START
 
+        // #244: withdrawal rate limiting
+        let config = get_config_cached(&env)?;
+        let now = env.ledger().timestamp();
+        let is_admin = config.admin == investor;
+        if !is_admin && config.withdrawal_cooldown_secs > 0 {
+            let last: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LastWithdrawalTime(investor.clone(), token.clone()))
+                .unwrap_or(0);
+            if now < last.saturating_add(config.withdrawal_cooldown_secs) {
+                return Err(PoolError::WithdrawalCooldownActive);
+            }
+        }
+
         let share_token_key = DataKey::ShareToken(token.clone());
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token: Address = env
@@ -646,6 +698,14 @@ impl FundingPool {
             return Err(PoolError::InvalidAmount);
         }
 
+        // #244: single-withdrawal cap (skip for admin)
+        if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
+            let max_single = (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
+            if amount > max_single {
+                return Err(PoolError::WithdrawalExceedsLimit);
+            }
+        }
+
         // Burn shares FIRST - effects
         let mut burn_args = Vec::new(&env);
         burn_args.push_back(investor.clone().into_val(&env));
@@ -655,6 +715,14 @@ impl FundingPool {
         // Update state SECOND - effects
         tt.pool_value -= amount;
         env.storage().instance().set(&token_totals_key, &tt);
+
+        // #244: record withdrawal timestamp
+        if config.withdrawal_cooldown_secs > 0 {
+            env.storage().persistent().set(
+                &DataKey::LastWithdrawalTime(investor.clone(), token.clone()),
+                &now,
+            );
+        }
 
         // Transfer LAST - interaction
         let token_client = token::Client::new(&env, &token);
@@ -891,6 +959,7 @@ impl FundingPool {
             tt.total_deployed -= record.principal;
             tt.pool_value += total_interest as i128;
             tt.total_fee_revenue += record.factoring_fee;
+            tt.protocol_revenue += record.factoring_fee; // #236: track separately for treasury
             tt.total_paid_out += total_due;
             stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
@@ -1274,6 +1343,218 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("set_comp")), (admin, compound));
+        Ok(())
+    }
+
+    // ---- #235: minimum deposit ----
+
+    pub fn set_min_deposit(env: Env, admin: Address, min_amount: i128) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if min_amount < 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.min_deposit_amount = min_amount;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_min_d")), (admin, min_amount));
+        Ok(())
+    }
+
+    pub fn get_min_deposit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<DataKey, PoolConfig>(&DataKey::Config)
+            .map(|c| c.min_deposit_amount)
+            .unwrap_or(0)
+    }
+
+    // ---- #236: protocol revenue & treasury ----
+
+    pub fn set_treasury(env: Env, admin: Address, treasury: Address) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.events()
+            .publish((EVT, symbol_short!("set_treas")), (admin, treasury));
+        Ok(())
+    }
+
+    pub fn get_treasury(env: Env) -> PoolResult<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(PoolError::TreasuryNotConfigured)
+    }
+
+    pub fn get_protocol_revenue(env: Env, token: Address) -> i128 {
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token))
+            .unwrap_or_default();
+        tt.protocol_revenue
+    }
+
+    pub fn withdraw_revenue(
+        env: Env,
+        admin: Address,
+        token: Address,
+        amount: i128,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(PoolError::TreasuryNotConfigured)?;
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        if amount > tt.protocol_revenue {
+            return Err(PoolError::InsufficientRevenue);
+        }
+        tt.protocol_revenue -= amount;
+        env.storage().instance().set(&token_totals_key, &tt);
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &treasury, &amount);
+        env.events().publish(
+            (EVT, symbol_short!("rev_wdraw")),
+            (token, amount, treasury),
+        );
+        Ok(())
+    }
+
+    // ---- #244: withdrawal rate limiting ----
+
+    pub fn set_withdrawal_limits(
+        env: Env,
+        admin: Address,
+        max_bps: u32,
+        cooldown_secs: u64,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if max_bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.max_single_withdrawal_bps = max_bps;
+        config.withdrawal_cooldown_secs = cooldown_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("set_wdlim")),
+            (admin, max_bps, cooldown_secs),
+        );
+        Ok(())
+    }
+
+    // ---- #247: co-fund share transfer (secondary market) ----
+
+    /// Returns the co-fund share (in bps, 0-10_000) that `investor` holds in `invoice_id`.
+    pub fn get_co_fund_share(env: Env, invoice_id: u64, investor: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoFundShare(invoice_id, investor))
+            .unwrap_or(0)
+    }
+
+    /// Transfer `bps` basis points of the caller's co-fund share in `invoice_id` to `to`.
+    /// bps=10_000 transfers 100% of the caller's share.
+    /// Only allowed on invoices that are currently funded (not yet fully repaid).
+    /// If KYC is enabled on the pool, `to` must be KYC-approved.
+    pub fn transfer_co_fund_share(
+        env: Env,
+        from: Address,
+        invoice_id: u64,
+        token: Address,
+        to: Address,
+        bps: u32,
+    ) -> PoolResult<()> {
+        from.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        if bps == 0 || bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        // Invoice must exist and not be fully repaid
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .ok_or(PoolError::InvoiceNotFound)?;
+        if record.repaid_amount >= record.principal.saturating_add(record.factoring_fee) {
+            return Err(PoolError::AlreadyFullyRepaid);
+        }
+
+        // KYC check on recipient if pool requires it
+        let kyc_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycRequired)
+            .unwrap_or(false);
+        if kyc_required {
+            let approved: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::InvestorKyc(to.clone()))
+                .unwrap_or(false);
+            if !approved {
+                return Err(PoolError::Unauthorized);
+            }
+        }
+
+        let from_key = DataKey::CoFundShare(invoice_id, from.clone());
+        let to_key = DataKey::CoFundShare(invoice_id, to.clone());
+
+        let from_share: u32 = env
+            .storage()
+            .persistent()
+            .get(&from_key)
+            .unwrap_or(0);
+
+        // Calculate share amount to transfer
+        let transfer_amount = (from_share as u64 * bps as u64 / BPS_DENOM as u64) as u32;
+        if transfer_amount == 0 || transfer_amount > from_share {
+            return Err(PoolError::InsufficientCoFundShare);
+        }
+
+        let to_share: u32 = env
+            .storage()
+            .persistent()
+            .get(&to_key)
+            .unwrap_or(0);
+
+        let new_from_share = from_share - transfer_amount;
+        let new_to_share = to_share.saturating_add(transfer_amount);
+
+        if new_from_share == 0 {
+            env.storage().persistent().remove(&from_key);
+        } else {
+            env.storage().persistent().set(&from_key, &new_from_share);
+        }
+        env.storage().persistent().set(&to_key, &new_to_share);
+
+        env.events().publish(
+            (EVT, symbol_short!("shr_xfer")),
+            (invoice_id, from, to, bps, transfer_amount),
+        );
         Ok(())
     }
 
