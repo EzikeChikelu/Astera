@@ -23,6 +23,7 @@ const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
 const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
+const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -36,6 +37,13 @@ pub enum InvoiceStatus {
     Defaulted,
     Cancelled,
     Expired,
+}
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum DisputeResolution {
+    InFavorOfSME,
+    InFavorOfDebtor,
 }
 
 #[contracttype]
@@ -107,6 +115,7 @@ pub enum DataKey {
     MaxInvoiceAmount,
     ExpirationDurationSecs,
     DailyInvoiceLimit,
+    DisputeResolutionWindow,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -262,6 +271,9 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
         bump_instance(&env);
     }
 
@@ -501,6 +513,7 @@ impl InvoiceContract {
         } else {
             invoice.status = InvoiceStatus::Disputed;
             invoice.dispute_reason = reason;
+            invoice.disputed_at = env.ledger().timestamp();
         }
 
         env.storage()
@@ -515,19 +528,10 @@ impl InvoiceContract {
         }
     }
 
-    pub fn resolve_dispute(env: Env, id: u64, admin: Address, approved: bool) {
-        admin.require_auth();
+    pub fn resolve_dispute(env: Env, id: u64, caller: Address, resolution: DisputeResolution) {
+        caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        if admin != stored_admin {
-            panic!("unauthorized");
-        }
 
         let mut invoice: Invoice = env
             .storage()
@@ -539,27 +543,84 @@ impl InvoiceContract {
             panic!("invoice is not disputed");
         }
 
-        if approved {
-            invoice.status = InvoiceStatus::Verified;
-            invoice.oracle_verified = true;
-            invoice.dispute_reason = String::from_str(&env, "");
-            env.events().publish((EVT, symbol_short!("resolved")), id);
-        } else {
-            invoice.status = InvoiceStatus::Defaulted;
-            let mut stats: StorageStats = env
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracle)
+            .expect("oracle not configured");
+
+        if caller == oracle {
+            // Oracle can always resolve
+        } else if caller == admin {
+            // Admin can resolve only after window
+            let window: u64 = env
                 .storage()
                 .instance()
-                .get(&DataKey::StorageStats)
-                .unwrap_or_default();
-            stats.active_invoices = stats.active_invoices.saturating_sub(1);
-            env.storage().instance().set(&DataKey::StorageStats, &stats);
-            set_invoice_ttl(&env, id, true);
-            env.events().publish((EVT, symbol_short!("rejected")), id);
+                .get(&DataKey::DisputeResolutionWindow)
+                .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
+            if env.ledger().timestamp() < invoice.disputed_at.saturating_add(window) {
+                panic!("dispute resolution window not yet passed for admin");
+            }
+        } else {
+            panic!("unauthorized");
+        }
+
+        match resolution {
+            DisputeResolution::InFavorOfSME => {
+                invoice.status = InvoiceStatus::Verified;
+                invoice.oracle_verified = true;
+                invoice.dispute_reason = String::from_str(&env, "");
+            }
+            DisputeResolution::InFavorOfDebtor => {
+                invoice.status = InvoiceStatus::Cancelled;
+                let mut stats: StorageStats = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::StorageStats)
+                    .unwrap_or_default();
+                stats.active_invoices = stats.active_invoices.saturating_sub(1);
+                env.storage().instance().set(&DataKey::StorageStats, &stats);
+                set_invoice_ttl(&env, id, true);
+            }
         }
 
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
+
+        env.events().publish(
+            (EVT, symbol_short!("resolved")),
+            (id, resolution, caller),
+        );
+    }
+
+    pub fn set_dispute_window(env: Env, admin: Address, window: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &window);
+        bump_instance(&env);
+    }
+
+    pub fn get_dispute_window(env: Env) -> u64 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeResolutionWindow)
+            .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
     }
 
     pub fn mark_funded(env: Env, id: u64, pool: Address) {
@@ -1127,6 +1188,21 @@ mod test {
             &u32::MAX,
         );
         (client, admin, pool, sme)
+    }
+
+    fn setup_with_oracle(
+        env: &Env,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
+        let (client, admin, pool, sme) = setup(env);
+        let oracle = Address::generate(env);
+        client.set_oracle(&admin, &oracle);
+        (client, admin, pool, sme, oracle)
     }
 
     #[test]
