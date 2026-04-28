@@ -1180,6 +1180,70 @@ impl InvoiceContract {
             .unwrap_or_default()
     }
 
+    /// Check if a pending invoice has expired and transition it to `Expired` status.
+    /// Returns `true` if the invoice was expired, `false` otherwise.
+    /// Emits `(INVOICE, "expired")` event if expired.
+    pub fn check_expiration(env: Env, id: u64) -> bool {
+        bump_instance(&env);
+        let inv = load_invoice(&env, id);
+
+        if inv.status != InvoiceStatus::Pending {
+            return false;
+        }
+
+        let expiration_duration_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExpirationDurationSecs)
+            .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
+
+        let now = env.ledger().timestamp();
+        if now <= inv.created_at.saturating_add(expiration_duration_secs) {
+            return false;
+        }
+
+        let mut expired_inv = inv;
+        expired_inv.status = InvoiceStatus::Expired;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &expired_inv);
+        set_invoice_ttl(&env, id, true);
+
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_invoices = stats.active_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+        env.events()
+            .publish((EVT, symbol_short!("expired")), id);
+
+        true
+    }
+
+    /// Batch check expiration for multiple invoices (up to 20 per call for safety).
+    /// Returns the count of newly expired invoices.
+    pub fn batch_check_expiration(env: Env, ids: Vec<u64>) -> u32 {
+        bump_instance(&env);
+
+        let batch_size = ids.len();
+        if batch_size > 20 {
+            panic!("batch_check_expiration: max 20 IDs per call");
+        }
+
+        let mut expired_count = 0u32;
+        for i in 0..batch_size {
+            let id = ids.get(i).unwrap();
+            if Self::check_expiration(env.clone(), id) {
+                expired_count += 1;
+            }
+        }
+
+        expired_count
+    }
+
     pub fn set_grace_period(env: Env, admin: Address, days: u32) {
         admin.require_auth();
         bump_instance(&env);
