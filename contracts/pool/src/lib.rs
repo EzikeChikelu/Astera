@@ -5,6 +5,28 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, Vec,
 };
 
+/// Semantic version of this pool contract (#237).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolContractVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+fn parse_pool_version() -> PoolContractVersion {
+    let v = env!("CARGO_PKG_VERSION");
+    let mut parts = v.splitn(3, '.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    PoolContractVersion { major, minor, patch }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -203,6 +225,10 @@ pub enum DataKey {
     Treasury,
     // #247: co-fund share ownership per (invoice_id, investor): stores bps (0-10_000)
     CoFundShare(u64, Address),
+    /// Semantic version stored during initialize() (#237).
+    ContractVersion,
+    /// Migration level, incremented per migration run (#237).
+    MigrationVersion,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -439,7 +465,22 @@ impl FundingPool {
                 collateral_bps: DEFAULT_COLLATERAL_BPS,
             },
         );
+        // Store compile-time version (#237)
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &parse_pool_version());
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &0u32);
         bump_instance(&env);
+    }
+
+    /// Returns the semantic version of this deployed pool contract (#237).
+    pub fn version(env: Env) -> PoolContractVersion {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(parse_pool_version)
     }
 
     pub fn pause(env: Env, admin: Address) -> PoolResult<()> {

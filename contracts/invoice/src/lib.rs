@@ -63,6 +63,8 @@ pub struct Invoice {
     pub verification_hash: String,
     pub oracle_verified: bool,
     pub dispute_reason: String,
+    /// Timestamp when the invoice entered `Disputed` status, or 0 if never disputed.
+    pub disputed_at: u64,
     /// Per-invoice grace-period override set by admin (#230).
     /// `None` means use the global `GracePeriodDays` setting.
     /// When set, the value must be ≤ `MAX_GRACE_PERIOD_OVERRIDE_DAYS`.
@@ -97,6 +99,52 @@ pub struct StorageStats {
     pub cleaned_invoices: u64,
 }
 
+// ── Version tracking (#237) ───────────────────────────────────────────────────
+
+/// Semantic version of the deployed contract, embedded at compile time from
+/// `Cargo.toml` via `CARGO_PKG_VERSION`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+/// Parse the `major.minor.patch` version string baked in by Cargo.
+fn parse_version() -> ContractVersion {
+    let v = env!("CARGO_PKG_VERSION");
+    let mut parts = v.splitn(3, '.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|s| s.split('-').next()) // strip pre-release suffix
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    ContractVersion { major, minor, patch }
+}
+
+/// Current migration level — bump when a schema migration runs.
+const CURRENT_MIGRATION_VERSION: u32 = 1;
+
+// ── Debtor registry (#241) ────────────────────────────────────────────────────
+
+/// On-chain record for a verified debtor.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DebtorRecord {
+    /// Unique identifier (e.g. company registration number).
+    pub debtor_id: String,
+    /// Human-readable display name.
+    pub debtor_name: String,
+    /// Maximum total outstanding invoices permitted for this debtor (in stroops).
+    pub max_exposure: i128,
+    /// Sum of amounts for all currently-funded invoices to this debtor.
+    pub current_exposure: i128,
+    pub is_active: bool,
+}
+
 #[contracttype]
 pub enum DataKey {
     Invoice(u64),
@@ -116,6 +164,16 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
+    /// Stores the [`ContractVersion`] set during `initialize()` (#237).
+    ContractVersion,
+    /// Incremented each time a migration runs (#237).
+    MigrationVersion,
+    /// Whether only registered debtors may be invoiced (#241).
+    RequireRegisteredDebtor,
+    /// Per-debtor record keyed by debtor_id string (#241).
+    DebtorRecord(String),
+    /// List of all registered debtor IDs (#241).
+    DebtorIds,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -233,6 +291,20 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
+    /// Initialize the invoice contract (#245).
+    ///
+    /// Must be called exactly once after deployment. Subsequent calls panic with
+    /// `"already initialized"`.
+    ///
+    /// # Arguments
+    /// * `admin` — Address with administrative control over the contract.
+    /// * `pool` — Pool contract address authorized to call `mark_funded`, `mark_paid`,
+    ///   and `mark_defaulted`.
+    /// * `grace_period_days` — Global default grace period (in days) before a funded
+    ///   invoice transitions to `Defaulted`.
+    /// * `max_invoice_amount` — Maximum allowed invoice amount in stroops.
+    /// * `expiration_duration_secs` — Seconds after creation before a `Pending` invoice
+    ///   is auto-expired.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -274,7 +346,165 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
+        // Store compile-time version (#237)
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &parse_version());
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &0u32);
+        // Debtor registry defaults (#241)
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireRegisteredDebtor, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::DebtorIds, &Vec::<String>::new(&env));
         bump_instance(&env);
+    }
+
+    /// Returns the semantic version of this deployed contract (#237).
+    pub fn version(env: Env) -> ContractVersion {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(parse_version)
+    }
+
+    /// Returns the current migration version (#237).
+    pub fn migration_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0)
+    }
+
+    /// Run pending migrations up to `CURRENT_MIGRATION_VERSION` (#237).
+    /// Idempotent — safe to call multiple times.
+    pub fn run_migration(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0);
+        if current >= CURRENT_MIGRATION_VERSION {
+            return;
+        }
+        // Future migration steps go here, guarded by version checks.
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &CURRENT_MIGRATION_VERSION);
+    }
+
+    // ── Debtor registry (#241) ────────────────────────────────────────────────
+
+    /// Register a debtor in the on-chain whitelist.
+    ///
+    /// Only the admin may call this. `max_exposure` is the maximum total
+    /// outstanding funded-invoice amount permitted for this debtor (in stroops).
+    pub fn register_debtor(
+        env: Env,
+        admin: Address,
+        debtor_id: String,
+        debtor_name: String,
+        max_exposure: i128,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if max_exposure <= 0 {
+            panic!("max_exposure must be positive");
+        }
+        let record = DebtorRecord {
+            debtor_id: debtor_id.clone(),
+            debtor_name,
+            max_exposure,
+            current_exposure: 0,
+            is_active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id.clone()), &record);
+        // Append to ID list if not already present
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !ids.contains(&debtor_id) {
+            ids.push_back(debtor_id);
+            env.storage().instance().set(&DataKey::DebtorIds, &ids);
+        }
+    }
+
+    /// Deactivate a registered debtor. Existing invoices are unaffected.
+    pub fn deactivate_debtor(env: Env, admin: Address, debtor_id: String) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let mut record: DebtorRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id.clone()))
+            .expect("debtor not found");
+        record.is_active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id), &record);
+    }
+
+    /// Fetch a debtor record by ID. Panics if not registered.
+    pub fn get_debtor(env: Env, debtor_id: String) -> DebtorRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id))
+            .expect("debtor not found")
+    }
+
+    /// Return all registered debtor IDs.
+    pub fn list_debtors(env: Env) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Toggle the require-registered-debtor flag.
+    /// When `true`, `create_invoice` rejects invoices for unregistered debtors.
+    pub fn set_require_registered_debtor(env: Env, admin: Address, required: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireRegisteredDebtor, &required);
     }
 
     pub fn pause(env: Env, admin: Address) {
@@ -333,6 +563,24 @@ impl InvoiceContract {
             .publish((EVT, symbol_short!("set_orc")), (admin, oracle));
     }
 
+    /// Create a new invoice on behalf of the calling SME (#245).
+    ///
+    /// # Arguments
+    /// * `owner` — SME address that owns the invoice; must sign the call.
+    /// * `debtor` — Debtor identifier string (or registered `debtor_id` when
+    ///   `require_registered_debtor` is `true`).
+    /// * `amount` — Invoice value in token stroops (must be ≤ `max_invoice_amount`).
+    /// * `due_date` — Unix timestamp by which repayment is expected (must be future).
+    /// * `description` — Human-readable invoice description.
+    /// * `verification_hash` — Off-chain document hash for oracle verification.
+    ///
+    /// # Returns
+    /// The newly assigned invoice ID (monotonically increasing from 1).
+    ///
+    /// # Errors
+    /// Panics if the contract is paused, amount is non-positive, amount exceeds
+    /// the configured maximum, due date is not in the future, the daily rate limit
+    /// is exceeded, or the debtor fails registry validation (when enabled).
     pub fn create_invoice(
         env: Env,
         owner: Address,
@@ -359,6 +607,30 @@ impl InvoiceContract {
         }
         if due_date <= env.ledger().timestamp() {
             panic!("due date must be in the future");
+        }
+
+        // Debtor registry validation (#241)
+        let require_registered: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireRegisteredDebtor)
+            .unwrap_or(false);
+        if require_registered {
+            let mut record: DebtorRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::DebtorRecord(debtor.clone()))
+                .expect("debtor not registered");
+            if !record.is_active {
+                panic!("debtor is not active");
+            }
+            if record.current_exposure + amount > record.max_exposure {
+                panic!("invoice would exceed debtor exposure limit");
+            }
+            record.current_exposure += amount;
+            env.storage()
+                .persistent()
+                .set(&DataKey::DebtorRecord(debtor.clone()), &record);
         }
 
         // Rate limiting: use the configured daily limit when present, otherwise
@@ -424,6 +696,7 @@ impl InvoiceContract {
             verification_hash,
             oracle_verified: false,
             dispute_reason: empty_str,
+            disputed_at: 0,
             grace_period_override: None,
         };
 
