@@ -76,3 +76,16 @@ export type WalletState = {
   connected: boolean;
   network: string;
 };
+
+export interface CollateralConfig {
+  threshold: bigint;
+  collateralBps: number;
+}
+
+export interface CollateralDeposit {
+  invoiceId: number;
+  depositor: string;
+  token: string;
+  amount: bigint;
+  settled: boolean;
+}

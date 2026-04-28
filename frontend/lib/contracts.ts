@@ -18,6 +18,8 @@ import type {
   PoolConfig,
   PoolTokenTotals,
   FundedInvoice,
+  CollateralConfig,
+  CollateralDeposit,
 } from './types';
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -691,7 +693,7 @@ const CONTRACT_ERROR_MESSAGES: Record<string, string> = {
   // Invoice contract errors
   'already initialized': 'This contract has already been set up.',
   'not initialized': 'The contract is not yet configured. Please contact support.',
-  'unauthorized': 'You are not authorised to perform this action.',
+  unauthorized: 'You are not authorised to perform this action.',
   'unauthorized pool': 'The pool contract is not authorised for this invoice.',
   'amount must be positive': 'Amount must be greater than zero.',
   'due date must be in the future': 'The due date must be a future date.',
@@ -722,6 +724,75 @@ export function getContractErrorMessage(raw: string): string {
     if (lower.includes(key)) return friendly;
   }
   return raw;
+}
+
+// ---- Collateral ----
+
+export async function getCollateralConfig(): Promise<CollateralConfig> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_collateral_config',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    threshold: BigInt(String(raw.threshold)),
+    collateralBps: Number(raw.collateral_bps),
+  };
+}
+
+export async function getCollateralDeposit(invoiceId: number): Promise<CollateralDeposit | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_collateral_deposit',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    invoiceId: Number(r.invoice_id),
+    depositor: r.depositor as string,
+    token: r.token as string,
+    amount: BigInt(String(r.amount)),
+    settled: Boolean(r.settled),
+  };
+}
+
+export async function buildDepositCollateralTx(params: {
+  invoiceId: number;
+  depositor: string;
+  token: string;
+  amount: bigint;
+}): Promise<string> {
+  const account = await rpc.getAccount(params.depositor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'deposit_collateral',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.depositor).toScVal(),
+        new Address(params.token).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
 export { submitTx };
