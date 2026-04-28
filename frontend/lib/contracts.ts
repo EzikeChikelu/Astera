@@ -502,9 +502,11 @@ export async function buildDisputeTx(params: {
   disputer: string;
   invoiceId: number;
   reason: string;
+  oracleHash?: string;
 }): Promise<string> {
   const account = await rpc.getAccount(params.disputer);
   const contract = new Contract(INVOICE_CONTRACT_ID);
+  const oracleHash = params.oracleHash ?? '';
 
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
@@ -517,6 +519,7 @@ export async function buildDisputeTx(params: {
         new Address(params.disputer).toScVal(),
         nativeToScVal(false, { type: 'bool' }),
         nativeToScVal(params.reason, { type: 'string' }),
+        nativeToScVal(oracleHash, { type: 'string' }),
       ),
     )
     .setTimeout(30)
