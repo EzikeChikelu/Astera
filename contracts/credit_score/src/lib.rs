@@ -4,9 +4,9 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 
-const MIN_SCORE: u32 = 200;
-const MAX_SCORE: u32 = 850;
-const BASE_SCORE: u32 = 500;
+pub const MIN_SCORE: u32 = 200;
+pub const MAX_SCORE: u32 = 850;
+pub const BASE_SCORE: u32 = 500;
 
 const PTS_PAID_ON_TIME: u32 = 30;
 const PTS_PAID_LATE: u32 = 15;
