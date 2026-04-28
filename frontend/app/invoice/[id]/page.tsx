@@ -14,6 +14,9 @@ import {
   getFundedInvoice,
   buildRepayTx,
   buildDisputeTx,
+  getCollateralConfig,
+  getCollateralDeposit,
+  buildDepositCollateralTx,
   submitTx,
 } from '@/lib/contracts';
 import {
@@ -24,11 +27,19 @@ import {
   rpc,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
+  USDC_TOKEN_ID,
   scValToNative,
   xdr,
 } from '@/lib/stellar';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
-import type { FundedInvoice, Invoice, InvoiceMetadata, PoolConfig } from '@/lib/types';
+import type {
+  FundedInvoice,
+  Invoice,
+  InvoiceMetadata,
+  PoolConfig,
+  CollateralConfig,
+  CollateralDeposit,
+} from '@/lib/types';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
 
@@ -157,6 +168,10 @@ export default function InvoiceDetailPage() {
   const [repayAmount, setRepayAmount] = useState<string>('');
   const [disputeModalOpen, setDisputeModalOpen] = useState(false);
   const [disputeReason, setDisputeReason] = useState('');
+  const [collateralConfig, setCollateralConfig] = useState<CollateralConfig | null>(null);
+  const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
+  const [collateralAmount, setCollateralAmount] = useState<string>('');
+  const [collateralLoading, setCollateralLoading] = useState(false);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -207,13 +222,22 @@ export default function InvoiceDetailPage() {
       setInvoice(inv);
       setMetadata(meta);
 
-      const [poolResult, fundedResult] = await Promise.allSettled([
-        getPoolConfig(),
-        getFundedInvoice(numId),
-      ]);
+      const [poolResult, fundedResult, collateralConfigResult, collateralDepositResult] =
+        await Promise.allSettled([
+          getPoolConfig(),
+          getFundedInvoice(numId),
+          getCollateralConfig(),
+          getCollateralDeposit(numId),
+        ]);
 
       setPoolConfig(poolResult.status === 'fulfilled' ? poolResult.value : null);
       setFundedInvoice(fundedResult.status === 'fulfilled' ? fundedResult.value : null);
+      setCollateralConfig(
+        collateralConfigResult.status === 'fulfilled' ? collateralConfigResult.value : null,
+      );
+      const deposit =
+        collateralDepositResult.status === 'fulfilled' ? collateralDepositResult.value : null;
+      setCollateralDeposit(deposit);
 
       void loadHistory(numId);
     } catch (e) {
@@ -277,9 +301,13 @@ export default function InvoiceDetailPage() {
       : 0;
 
   // Calculate remaining amount due for partial repayments
-  const remainingDue = fundedInvoice && poolConfig
-    ? fundedInvoice.principal + projectedInterest + fundedInvoice.factoringFee - fundedInvoice.repaidAmount
-    : 0n;
+  const remainingDue =
+    fundedInvoice && poolConfig
+      ? fundedInvoice.principal +
+        projectedInterest +
+        fundedInvoice.factoringFee -
+        fundedInvoice.repaidAmount
+      : 0n;
   const fullyRepaid = remainingDue <= 0n;
 
   async function handleRepay() {
@@ -308,7 +336,10 @@ export default function InvoiceDetailPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      const msg = amount === remainingDue ? 'Invoice repaid successfully!' : 'Partial payment recorded successfully!';
+      const msg =
+        amount === remainingDue
+          ? 'Invoice repaid successfully!'
+          : 'Partial payment recorded successfully!';
       toast.success(msg);
       setRepayAmount('');
       await loadInvoice();
@@ -318,6 +349,51 @@ export default function InvoiceDetailPage() {
       console.error(e);
     } finally {
       setActionLoading(false);
+    }
+  }
+
+  async function handleDepositCollateral() {
+    if (!wallet.address || !invoice || !collateralConfig) return;
+
+    const requiredAmount = (metadata!.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
+    const amount = collateralAmount ? BigInt(collateralAmount) : requiredAmount;
+    if (amount <= 0n) {
+      toast.error('Please enter a valid collateral amount.');
+      return;
+    }
+
+    const token = USDC_TOKEN_ID;
+    if (!token) {
+      toast.error('No accepted token configured. Check NEXT_PUBLIC_USDC_TOKEN_ID.');
+      return;
+    }
+
+    setCollateralLoading(true);
+    try {
+      const txXdr = await buildDepositCollateralTx({
+        invoiceId: invoice.id,
+        depositor: wallet.address,
+        token,
+        amount,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(txXdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success('Collateral posted successfully!');
+      setCollateralAmount('');
+      await loadInvoice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to post collateral.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setCollateralLoading(false);
     }
   }
 
@@ -360,7 +436,7 @@ export default function InvoiceDetailPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen pt-24 px-6">
+      <div className="min-h-screen pt-24 px-4 sm:px-6">
         <div className="max-w-2xl mx-auto space-y-4">
           <Skeleton className="h-10 w-48 rounded-lg" />
           <Skeleton className="h-24 rounded-2xl" />
@@ -373,7 +449,7 @@ export default function InvoiceDetailPage() {
 
   if (error || !invoice || !metadata) {
     return (
-      <div className="min-h-screen pt-24 px-6 flex flex-col items-center justify-center text-center">
+      <div className="min-h-screen pt-24 px-4 sm:px-6 flex flex-col items-center justify-center text-center">
         <p className="text-red-400 mb-4">{error ?? 'Invoice not found.'}</p>
         <Link href="/dashboard" className="text-brand-gold hover:underline text-sm">
           Back to Dashboard
@@ -383,7 +459,7 @@ export default function InvoiceDetailPage() {
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-6">
+    <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-2xl mx-auto">
         <Link
           href="/dashboard"
@@ -534,12 +610,16 @@ export default function InvoiceDetailPage() {
               <div className="flex items-center justify-between">
                 <span className="text-brand-muted">Estimated total due</span>
                 <span className="font-semibold">
-                  {formatUSDC(fundedInvoice.principal + projectedInterest + fundedInvoice.factoringFee)}
+                  {formatUSDC(
+                    fundedInvoice.principal + projectedInterest + fundedInvoice.factoringFee,
+                  )}
                 </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-brand-muted">Already repaid</span>
-                <span className="font-medium text-green-400">{formatUSDC(fundedInvoice.repaidAmount)}</span>
+                <span className="font-medium text-green-400">
+                  {formatUSDC(fundedInvoice.repaidAmount)}
+                </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-brand-muted font-semibold">Remaining due</span>
@@ -557,6 +637,107 @@ export default function InvoiceDetailPage() {
             </div>
           </div>
         )}
+
+        {collateralConfig &&
+          metadata &&
+          (metadata.amount >= collateralConfig.threshold || collateralDeposit) && (
+            <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
+              <h2 className="text-lg font-semibold mb-4">Collateral</h2>
+
+              {(() => {
+                const requiredAmount =
+                  (metadata.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
+                const pct = (collateralConfig.collateralBps / 100).toFixed(0);
+
+                if (collateralDeposit && collateralDeposit.settled) {
+                  if (metadata.status === 'Defaulted') {
+                    return (
+                      <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-sm">
+                        <p className="font-semibold text-red-400 mb-1">Collateral Seized</p>
+                        <p className="text-brand-muted">
+                          Your collateral of {formatUSDC(collateralDeposit.amount)} was seized
+                          because this invoice was not repaid. The funds were redistributed to pool
+                          investors to offset the default loss.
+                        </p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="p-4 bg-green-900/20 border border-green-800/50 rounded-xl text-sm text-green-400">
+                      Collateral of {formatUSDC(collateralDeposit.amount)} was returned to your
+                      wallet after full repayment. ✓
+                    </div>
+                  );
+                }
+
+                if (collateralDeposit && !collateralDeposit.settled) {
+                  return (
+                    <div className="space-y-3 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="font-medium">{formatUSDC(requiredAmount)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-brand-muted">Posted</span>
+                        <span className="font-medium text-brand-gold">
+                          {formatUSDC(collateralDeposit.amount)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted">
+                        Collateral is locked until the invoice is fully repaid, at which point it
+                        will be automatically returned to your wallet.
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (!isOwner || metadata.status === 'Paid' || metadata.status === 'Defaulted') {
+                  return (
+                    <div className="space-y-3 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="font-medium">{formatUSDC(requiredAmount)}</span>
+                      </div>
+                      <p className="text-brand-muted">No collateral has been posted.</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-4">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-brand-muted">Required ({pct}% of invoice)</span>
+                      <span className="font-medium">{formatUSDC(requiredAmount)}</span>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-brand-muted mb-1">
+                        Collateral Amount (USDC)
+                      </label>
+                      <input
+                        type="text"
+                        value={collateralAmount}
+                        onChange={(e) => setCollateralAmount(e.target.value)}
+                        placeholder={`Required: ${formatUSDC(requiredAmount)}`}
+                        disabled={collateralLoading}
+                        className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
+                      />
+                    </div>
+                    <p className="text-xs text-yellow-400">
+                      Warning: Collateral will be locked until this invoice is fully repaid or
+                      resolved.
+                    </p>
+                    <button
+                      onClick={() => void handleDepositCollateral()}
+                      disabled={collateralLoading}
+                      className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
+                    >
+                      {collateralLoading ? 'Posting collateral...' : 'Post Collateral'}
+                    </button>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
 
         {historyLoading ? (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
@@ -619,9 +800,7 @@ export default function InvoiceDetailPage() {
         <div className="space-y-3">
           {isOwner && metadata.status === 'Funded' && fundedInvoice && !fullyRepaid && (
             <div className="p-4 bg-brand-card border border-brand-border rounded-2xl space-y-3">
-              <label className="block text-sm text-brand-muted mb-1">
-                Repayment Amount (USDC)
-              </label>
+              <label className="block text-sm text-brand-muted mb-1">Repayment Amount (USDC)</label>
               <input
                 type="text"
                 value={repayAmount}
@@ -635,7 +814,11 @@ export default function InvoiceDetailPage() {
                 disabled={actionLoading || !repayAmount}
                 className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
               >
-                {actionLoading ? 'Processing payment...' : repayAmount ? `Pay ${formatUSDC(BigInt(repayAmount))}` : 'Pay full amount'}
+                {actionLoading
+                  ? 'Processing payment...'
+                  : repayAmount
+                    ? `Pay ${formatUSDC(BigInt(repayAmount))}`
+                    : 'Pay full amount'}
               </button>
             </div>
           )}
@@ -665,25 +848,39 @@ export default function InvoiceDetailPage() {
           {metadata.status === 'Disputed' && (
             <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl">
               <div className="flex items-center gap-2 text-red-400 font-medium mb-2">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                  />
                 </svg>
                 This invoice is under dispute review
               </div>
               <p className="text-sm text-brand-muted">
-                Our team will review your dispute within 3-5 business days. You will be notified once the issue is resolved.
+                Our team will review your dispute within 3-5 business days. You will be notified
+                once the issue is resolved.
               </p>
             </div>
           )}
 
-          {isOwner && (metadata.status === 'Verified' || metadata.status === 'Funded' || metadata.status === 'AwaitingVerification') && (
-            <button
-              onClick={() => setDisputeModalOpen(true)}
-              className="w-full px-5 py-3 border border-red-700/50 text-red-400 font-semibold rounded-xl hover:bg-red-900/20 transition-colors"
-            >
-              Raise Dispute
-            </button>
-          )}
+          {isOwner &&
+            (metadata.status === 'Verified' ||
+              metadata.status === 'Funded' ||
+              metadata.status === 'AwaitingVerification') && (
+              <button
+                onClick={() => setDisputeModalOpen(true)}
+                className="w-full px-5 py-3 border border-red-700/50 text-red-400 font-semibold rounded-xl hover:bg-red-900/20 transition-colors"
+              >
+                Raise Dispute
+              </button>
+            )}
 
           {disputeModalOpen && (
             <ConfirmActionModal
@@ -699,7 +896,10 @@ export default function InvoiceDetailPage() {
               isOpen={disputeModalOpen}
             >
               <div className="px-6 pt-4">
-                <label htmlFor="dispute-reason" className="block text-xs font-medium text-brand-muted mb-2">
+                <label
+                  htmlFor="dispute-reason"
+                  className="block text-xs font-medium text-brand-muted mb-2"
+                >
                   Dispute Reason
                 </label>
                 <textarea
