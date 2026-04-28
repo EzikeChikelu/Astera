@@ -36,6 +36,119 @@ For more about Waves and how they work, visit the official docs: https://docs.dr
 
 ---
 
+## 🎯 Your First Contribution
+
+New to open source or Astera? Follow this step-by-step walkthrough to make your first meaningful contribution.
+
+### Step 1: Find a good first issue
+
+Look for issues tagged with `good first issue` or `help wanted`. These are scoped to be achievable in a few hours.
+
+Example: You find issue #223: "Add CONTRIBUTING.md first-time contributor guide"
+
+### Step 2: Claim the issue
+
+Comment on the issue:
+```text
+I'd like to work on this
+```
+
+A maintainer will confirm assignment. This prevents duplicate effort.
+
+### Step 3: Fork and clone
+
+```bash
+# Fork via GitHub UI, then clone your fork
+git clone https://github.com/YOUR_USERNAME/Astera.git
+cd Astera
+
+# Add upstream for easy syncing
+git remote add upstream https://github.com/astera-hq/Astera.git
+
+# Create a feature branch
+git checkout -b feat/your-feature-name
+```
+
+### Step 4: Set up your environment
+
+Follow the **Development Environment Setup** section below to install Rust, Node.js, and other tools.
+
+### Step 5: Make your change
+
+**Example: Adding a unit test to the share token contract**
+
+Open `contracts/share/src/lib.rs` and add:
+
+```rust
+#[test]
+fn test_mint_increases_balance() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ShareToken);
+    let client = ShareTokenClient::new(&env, &contract_id);
+    
+    let user = Address::generate(&env);
+    client.mock_all_auths().mint(&user, &100);
+    
+    assert_eq!(client.balance(&user), 100);
+}
+```
+
+Or if you're updating frontend documentation:
+
+Open `CONTRIBUTING.md` and add your walkthrough section (like this one).
+
+### Step 6: Run tests and linting
+
+```bash
+# For contracts
+cd contracts
+cargo fmt
+cargo clippy
+cargo test
+
+# For frontend
+cd ../frontend
+npm run lint
+npm run build
+```
+
+Ensure all checks pass before proceeding.
+
+### Step 7: Commit your changes
+
+```bash
+# Stage your changes
+git add contracts/share/src/lib.rs
+
+# Commit with a clear, conventional message
+git commit -m "test(share): add unit tests for token mint operation"
+```
+
+### Step 8: Push and open a pull request
+
+```bash
+# Push your branch
+git push origin feat/your-feature-name
+```
+
+Then:
+1. Go to https://github.com/astera-hq/Astera
+2. Click **"Compare & pull request"** for your branch
+3. Fill in the PR template with:
+   - A clear summary of what you changed and why
+   - Link the issue: `Closes #123`
+   - Describe how you tested it
+4. Click **"Create pull request"**
+
+### Step 9: Respond to review feedback
+
+A maintainer will review your PR within 1–3 business days. They may request changes. That's normal and part of learning!
+
+- **Request Changes**: Fix the issue and push new commits to the same branch
+- **Approved**: Your PR will be merged soon
+
+---
+
 ## 🛠 Development Environment Setup
 
 Before contributing, set up your environment as follows. If you are using Windows, please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
