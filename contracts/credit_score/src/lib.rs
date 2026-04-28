@@ -4,6 +4,28 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 
+/// Semantic version of this credit-score contract (#237).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreditScoreVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+fn parse_credit_score_version() -> CreditScoreVersion {
+    let v = env!("CARGO_PKG_VERSION");
+    let mut parts = v.splitn(3, '.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    CreditScoreVersion { major, minor, patch }
+}
+
 pub const MIN_SCORE: u32 = 200;
 pub const MAX_SCORE: u32 = 850;
 pub const BASE_SCORE: u32 = 500;
@@ -65,6 +87,8 @@ pub enum DataKey {
     Paused,
     ProposedWasmHash,
     UpgradeScheduledAt,
+    /// Semantic version stored during initialize() (#237).
+    ContractVersion,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -162,6 +186,18 @@ impl CreditScoreContract {
         env.storage().instance().set(&DataKey::ScoreVersion, &1u32);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        // Store compile-time version (#237)
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &parse_credit_score_version());
+    }
+
+    /// Returns the semantic version of this deployed credit-score contract (#237).
+    pub fn version(env: Env) -> CreditScoreVersion {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(parse_credit_score_version)
     }
 
     pub fn pause(env: Env, admin: Address) {
