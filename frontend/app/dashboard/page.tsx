@@ -537,6 +537,23 @@ export default function DashboardPage() {
                 funded={stats.funded}
                 defaulted={stats.defaulted}
                 totalVolume={stats.totalVolume}
+                paymentHistory={invoices
+                  .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
+                  .map((row) => ({
+                    invoiceId: row.invoice.id,
+                    amount: row.invoice.amount,
+                    dueDate: row.metadata.dueDate,
+                    paidDate: row.metadata.paidDate ?? null,
+                    status: row.metadata.paidDate
+                      ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
+                      : row.invoice.status === 'Defaulted'
+                        ? 'Defaulted'
+                        : 'OnTime',
+                    daysLate:
+                      row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
+                        ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
+                        : undefined,
+                  }))}
               />
             </div>
           </div>
