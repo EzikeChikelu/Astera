@@ -636,43 +636,20 @@ Implement anomaly detection for:
 
 ### Security Incident Response
 
-Create an incident response runbook:
+Use the dedicated [Disaster Recovery Runbook](./disaster-recovery.md) for:
 
-```markdown
-# Security Incident Response Runbook
+- suspected contract exploits
+- admin key compromise
+- RPC outages
+- accidental bad state transitions
+- elevated default-rate events
 
-## Severity Levels
+Before mainnet launch, confirm the runbook has:
 
-- **P0 (Critical):** Active exploit, funds at risk
-- **P1 (High):** Potential vulnerability discovered
-- **P2 (Medium):** Suspicious activity detected
-- **P3 (Low):** Minor security concern
-
-## P0 Response Procedure
-
-1. Immediately notify all team members
-2. Assess the situation and confirm the threat
-3. Execute emergency pause if implemented
-4. Engage security audit firm
-5. Prepare public communication
-6. Document all actions taken
-
-## Contact List
-
-- Security Lead: [phone/email]
-- CTO: [phone/email]
-- Legal Counsel: [phone/email]
-- Audit Firm: [phone/email]
-- PR Contact: [phone/email]
-
-## Emergency Pause Procedure
-
-[Document steps to pause contracts if implemented]
-
-## Communication Templates
-
-[Pre-approved templates for security disclosures]
-```
+- current contract addresses
+- current emergency contact roles
+- tested pause and unpause commands
+- communication templates reviewed by the communications owner
 
 ---
 

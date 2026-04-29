@@ -32,6 +32,7 @@ Closes #
 
 - [ ] Tests added or updated (`cargo test` / `npm test` passes)
 - [ ] Documentation updated (README, inline docs, API reference)
+- [ ] For security or incident-response changes, at least one core team approval is noted in this PR
 - [ ] `cargo fmt` and `cargo clippy -- -D warnings` pass (if contracts changed)
 - [ ] `npm run lint` and `npm run build` pass (if frontend changed)
 - [ ] No secrets, private keys, or production contract IDs in code
