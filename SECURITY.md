@@ -4,6 +4,11 @@
 
 Astera takes security seriously. This document outlines our security practices, how to report vulnerabilities, and how security auditing is integrated into our development process.
 
+Operational incident handling procedures live in the
+[Disaster Recovery Runbook](docs/disaster-recovery.md). Use that runbook for
+contract exploits, admin key incidents, RPC outages, and other production
+recovery scenarios.
+
 ## Supported Versions
 
 | Version | Supported          |
@@ -105,6 +110,7 @@ Security audits are scheduled:
 
 ## Security Resources
 
+- [Disaster Recovery Runbook](docs/disaster-recovery.md)
 - [RustSec Advisory Database](https://rustsec.org/)
 - [Soroban Security Best Practices](https://soroban.stellar.org/docs/)
 - [Stellar Security Guidelines](https://developers.stellar.org/docs/)
