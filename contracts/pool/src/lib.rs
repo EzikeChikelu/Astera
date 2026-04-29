@@ -85,6 +85,8 @@ pub enum PoolError {
     WithdrawalRequestNotFound = 21,
     AlreadyQueuedForWithdrawal = 22,
     InvalidRequestId = 23,
+    // #287: upgrade exit window
+    UpgradeExitWindowActive = 26,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -115,6 +117,8 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+// #287: fee-free withdrawal window after protocol upgrades
+const DEFAULT_UPGRADE_EXIT_WINDOW_SECS: u64 = 259_200; // 72 hours
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +152,8 @@ pub struct PoolConfig {
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
+    // #287: upgrade exit window
+    pub upgrade_exit_window_secs: u64,
 }
 
 #[contracttype]
@@ -280,6 +286,7 @@ pub enum DataKey {
     Paused,
     ProposedWasmHash,
     UpgradeScheduledAt,
+    UpgradeExitWindowEnd,
     // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
     ExchangeRate(Address),
     ExchangeRateBounds(Address),
@@ -572,9 +579,10 @@ impl FundingPool {
             // #233: maximum single-investor concentration (2000 = 20%)
             max_single_investor_bps: DEFAULT_MAX_SINGLE_INVESTOR_BPS,
             // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
-            max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
-            withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
-        };
+    max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
+    withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+    upgrade_exit_window_secs: DEFAULT_UPGRADE_EXIT_WINDOW_SECS,
+};
 
         let mut tokens: Vec<Address> = Vec::new(&env);
         tokens.push_back(initial_token.clone());
@@ -902,7 +910,8 @@ impl FundingPool {
         let config = get_config_cached(&env)?;
         let now = env.ledger().timestamp();
         let is_admin = config.admin == investor;
-        if !is_admin && config.withdrawal_cooldown_secs > 0 {
+        let in_upgrade_window = Self::is_in_upgrade_exit_window(env.clone());
+        if !is_admin && !in_upgrade_window && config.withdrawal_cooldown_secs > 0 {
             let last: u64 = env
                 .storage()
                 .persistent()
@@ -947,7 +956,7 @@ impl FundingPool {
         }
 
         // #244: single-withdrawal cap (skip for admin)
-        if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
+        if !is_admin && !in_upgrade_window && config.max_single_withdrawal_bps < BPS_DENOM {
             let max_single = (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
             if amount > max_single {
                 return Err(PoolError::WithdrawalExceedsLimit);
@@ -1061,7 +1070,7 @@ impl FundingPool {
             env.storage().persistent().set(&request_key, &request);
             
             env.events()
-                .publish((EVT, symbol_short!("withdrawal_queued")), (investor, shares, request_id));
+                .publish((EVT, Symbol::new(&env, "withdrawal_queued")), (investor, shares, request_id));
         }
 
         Self::non_reentrant_end(&env);
@@ -1100,7 +1109,7 @@ impl FundingPool {
         env.storage().persistent().remove(&request_key);
         
         env.events()
-            .publish((EVT, symbol_short!("withdrawal_cancelled")), (investor, request_id));
+            .publish((EVT, Symbol::new(&env, "withdrawal_cancelled")), (investor, request_id));
         Ok(())
     }
 
@@ -1140,7 +1149,7 @@ impl FundingPool {
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
         env.events()
-            .publish((EVT, symbol_short!("withdrawal_fulfilled")), (investor, amount, shares));
+            .publish((EVT, Symbol::new(env, "withdrawal_fulfilled")), (investor, amount, shares));
         Ok(())
     }
 
@@ -1208,7 +1217,7 @@ impl FundingPool {
                 env.storage().persistent().remove(&request_key);
 
                 env.events()
-                    .publish((EVT, symbol_short!("withdrawal_fulfilled")), 
+                    .publish((EVT, Symbol::new(env, "withdrawal_fulfilled")), 
                              (request.investor, request_amount, request.shares));
             } else {
                 // Can't process this request, keep it in queue
@@ -1302,6 +1311,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+        if Self::is_in_upgrade_exit_window(env.clone()) {
+            return Err(PoolError::UpgradeExitWindowActive);
+        }
         let config = get_config_cached(&env)?;
         if env
             .storage()
@@ -1366,6 +1378,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+        if Self::is_in_upgrade_exit_window(env.clone()) {
+            return Err(PoolError::UpgradeExitWindowActive);
+        }
         if requests.len() == 0 {
             return Err(PoolError::InvalidAmount);
         }
@@ -1774,7 +1789,7 @@ impl FundingPool {
 
         let effective_at = now + config.yield_timelock_secs;
         env.events().publish(
-            (EVT, symbol_short!("yield_prop")),
+            (EVT, Symbol::new(&env, "yield_prop")),
             (admin, current, new_yield_bps, effective_at),
         );
         Ok(())
@@ -1829,7 +1844,7 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
 
         env.events()
-            .publish((EVT, symbol_short!("yield_cncl")), admin);
+            .publish((EVT, Symbol::new(&env, "yield_cncl")), admin);
         Ok(())
     }
 
@@ -2574,9 +2589,42 @@ impl FundingPool {
             .get(&DataKey::ProposedWasmHash)
             .ok_or(PoolError::NotInitialized)?;
         env.deployer().update_current_contract_wasm(wasm_hash);
+        
+        // #287: Set the upgrade exit window end time
+        let config = get_config_cached(&env)?;
+        let exit_window_end = now + config.upgrade_exit_window_secs;
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeExitWindowEnd, &exit_window_end);
+
         env.events()
-            .publish((EVT, symbol_short!("upgraded")), (admin, now));
+            .publish((EVT, symbol_short!("upgraded")), (admin.clone(), now));
+        env.events()
+            .publish((EVT, Symbol::new(&env, "upgrade_exit_window_started")), exit_window_end);
         Ok(())
+    }
+
+    pub fn set_upgrade_exit_window_secs(env: Env, admin: Address, secs: u64) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.upgrade_exit_window_secs = secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_upg_w")), (admin, secs));
+        Ok(())
+    }
+
+    pub fn is_in_upgrade_exit_window(env: Env) -> bool {
+        bump_instance(&env);
+        let end: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeExitWindowEnd)
+            .unwrap_or(0);
+        env.ledger().timestamp() < end
     }
 
     // ---- Internal utility methods ----
