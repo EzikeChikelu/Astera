@@ -24,8 +24,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN,
-    Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
+    IntoVal, Symbol, Vec,
 };
 
 /// Semantic version of this pool contract (#237).
@@ -47,7 +47,11 @@ fn parse_pool_version() -> PoolContractVersion {
         .and_then(|s| s.split('-').next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    PoolContractVersion { major, minor, patch }
+    PoolContractVersion {
+        major,
+        minor,
+        patch,
+    }
 }
 
 #[contracterror]
@@ -86,7 +90,8 @@ pub enum PoolError {
     AlreadyQueuedForWithdrawal = 22,
     InvalidRequestId = 23,
     // #287: upgrade exit window
-    UpgradeExitWindowActive = 26,
+    UpgradeExitWindowActive = 25,
+    TokenDepositCapReached = 26,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -101,9 +106,9 @@ const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
-// #227: yield timelock — 48 hours default delay for two-step yield change
+                                               // #227: yield timelock — 48 hours default delay for two-step yield change
 const DEFAULT_YIELD_TIMELOCK_SECS: u64 = 172_800; // 48 hours
-// #235: minimum deposit — 0 = disabled
+                                                  // #235: minimum deposit — 0 = disabled
 const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 0;
 // #233: max single-investor concentration — 2_000 bps = 20% (0 = disabled, 10_000 = 100%)
 const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
@@ -281,6 +286,7 @@ pub enum DataKey {
     FundedInvoice(u64),
     AcceptedTokens,
     TokenTotals(Address),
+    TokenDepositCap(Address),
     Initialized,
     StorageStats,
     Paused,
@@ -419,9 +425,7 @@ fn get_credit_score_contract(env: &Env) -> Option<Address> {
 }
 
 fn fee_tier_matches(tier: &FeeTier, principal: i128, score: u32) -> bool {
-    principal >= tier.min_amount
-        && principal <= tier.max_amount
-        && score >= tier.min_credit_score
+    principal >= tier.min_amount && principal <= tier.max_amount && score >= tier.min_credit_score
 }
 
 fn resolve_factoring_fee(
@@ -455,6 +459,13 @@ fn resolve_factoring_fee(
     Ok(calculate_factoring_fee(principal, fee_bps))
 }
 
+fn token_deposit_cap(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::TokenDepositCap(token.clone()))
+        .unwrap_or(0)
+}
+
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
     if principal < config.threshold {
         return 0;
@@ -476,9 +487,7 @@ fn fund_invoice_request(
     // Verify the token is accepted.
     let mut token_ok = false;
     for i in 0..accepted_tokens.len() {
-        let accepted = accepted_tokens
-            .get(i)
-            .ok_or(PoolError::StorageCorrupted)?;
+        let accepted = accepted_tokens.get(i).ok_or(PoolError::StorageCorrupted)?;
         if accepted == request.token {
             token_ok = true;
             break;
@@ -658,7 +667,12 @@ impl FundingPool {
             .unwrap_or(false)
     }
 
-    pub fn add_token(env: Env, admin: Address, token: Address, share_token: Address) -> PoolResult<()> {
+    pub fn add_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        share_token: Address,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -770,6 +784,9 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
+        env.storage()
+            .instance()
+            .remove(&DataKey::TokenDepositCap(token.clone()));
         env.events()
             .publish((EVT, symbol_short!("rm_token")), (admin, token));
         Ok(())
@@ -804,6 +821,18 @@ impl FundingPool {
                 .unwrap_or(false);
             if !approved {
                 return Err(PoolError::Unauthorized);
+            }
+        }
+
+        let token_cap = token_deposit_cap(&env, &token);
+        if token_cap > 0 {
+            let tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenTotals(token.clone()))
+                .unwrap_or_default();
+            if tt.pool_value.saturating_add(amount) > token_cap {
+                return Err(PoolError::TokenDepositCapReached);
             }
         }
 
@@ -845,7 +874,11 @@ impl FundingPool {
                 if investor_share_bps > config.max_single_investor_bps {
                     env.events().publish(
                         (EVT, symbol_short!("conc_excd")),
-                        (investor.clone(), investor_share_bps, config.max_single_investor_bps),
+                        (
+                            investor.clone(),
+                            investor_share_bps,
+                            config.max_single_investor_bps,
+                        ),
                     );
                     return Err(PoolError::ConcentrationLimitExceeded);
                 }
@@ -886,7 +919,9 @@ impl FundingPool {
         // #233: update investor position for concentration tracking
         investor_position.deposited += amount;
         investor_position.deposit_count += 1;
-        env.storage().persistent().set(&investor_pos_key, &investor_position);
+        env.storage()
+            .persistent()
+            .set(&investor_pos_key, &investor_position);
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
@@ -915,7 +950,10 @@ impl FundingPool {
             let last: u64 = env
                 .storage()
                 .persistent()
-                .get(&DataKey::LastWithdrawalTime(investor.clone(), token.clone()))
+                .get(&DataKey::LastWithdrawalTime(
+                    investor.clone(),
+                    token.clone(),
+                ))
                 .unwrap_or(0);
             if now < last.saturating_add(config.withdrawal_cooldown_secs) {
                 return Err(PoolError::WithdrawalCooldownActive);
@@ -957,7 +995,8 @@ impl FundingPool {
 
         // #244: single-withdrawal cap (skip for admin)
         if !is_admin && !in_upgrade_window && config.max_single_withdrawal_bps < BPS_DENOM {
-            let max_single = (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
+            let max_single =
+                (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
             if amount > max_single {
                 return Err(PoolError::WithdrawalExceedsLimit);
             }
@@ -993,10 +1032,15 @@ impl FundingPool {
     }
 
     /// Request a withdrawal when liquidity is insufficient (#217)
-    /// 
+    ///
     /// If liquidity is available, processes immediately like withdraw()
     /// If not, queues the request for FIFO processing when funds become available
-    pub fn request_withdrawal(env: Env, investor: Address, token: Address, shares: i128) -> PoolResult<u64> {
+    pub fn request_withdrawal(
+        env: Env,
+        investor: Address,
+        token: Address,
+        shares: i128,
+    ) -> PoolResult<u64> {
         investor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1012,7 +1056,7 @@ impl FundingPool {
             .persistent()
             .get(&queue_key)
             .unwrap_or_default();
-        
+
         for request in queue.iter() {
             if request.investor == investor {
                 return Err(PoolError::AlreadyQueuedForWithdrawal);
@@ -1047,10 +1091,18 @@ impl FundingPool {
         let available_liquidity = tt.pool_value - tt.total_deployed;
 
         let now = env.ledger().timestamp();
-        
+
         if available_liquidity >= amount {
             // Sufficient liquidity - process immediately
-            Self::process_immediate_withdrawal(&env, investor, token, shares, amount, tt, share_token)?;
+            Self::process_immediate_withdrawal(
+                &env,
+                investor,
+                token,
+                shares,
+                amount,
+                tt,
+                share_token,
+            )?;
         } else {
             // Insufficient liquidity - queue the request
             let request_id = Self::generate_request_id(&env, &token);
@@ -1061,16 +1113,17 @@ impl FundingPool {
                 requested_at: now,
                 request_id,
             };
-            
+
             queue.push_back(request);
             env.storage().persistent().set(&queue_key, &queue);
-            
+
             // Store individual request for lookup
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().set(&request_key, &request);
-            
-            env.events()
-                .publish((EVT, Symbol::new(&env, "withdrawal_queued")), (investor, shares, request_id));
+            env.events().publish(
+                (EVT, symbol_short!("withdrawal_queued")),
+                (investor, shares, request_id),
+            );
         }
 
         Self::non_reentrant_end(&env);
@@ -1078,17 +1131,21 @@ impl FundingPool {
     }
 
     /// Cancel a pending withdrawal request
-    pub fn cancel_withdrawal_request(env: Env, investor: Address, request_id: u64) -> PoolResult<()> {
+    pub fn cancel_withdrawal_request(
+        env: Env,
+        investor: Address,
+        request_id: u64,
+    ) -> PoolResult<()> {
         investor.require_auth();
         bump_instance(&env);
-        
+
         let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
         let request: WithdrawalRequest = env
             .storage()
             .persistent()
             .get(&request_key)
             .ok_or(PoolError::WithdrawalRequestNotFound)?;
-        
+
         // Remove from queue
         let queue_key = DataKey::WithdrawalQueue(request.token.clone());
         let mut queue: Vec<WithdrawalRequest> = env
@@ -1096,7 +1153,7 @@ impl FundingPool {
             .persistent()
             .get(&queue_key)
             .unwrap_or_default();
-        
+
         let mut new_queue = Vec::new(&env);
         for req in queue.iter() {
             if !(req.investor == investor && req.request_id == request_id) {
@@ -1104,12 +1161,13 @@ impl FundingPool {
             }
         }
         env.storage().persistent().set(&queue_key, &new_queue);
-        
+
         // Remove individual request
         env.storage().persistent().remove(&request_key);
-        
-        env.events()
-            .publish((EVT, Symbol::new(&env, "withdrawal_cancelled")), (investor, request_id));
+        env.events().publish(
+            (EVT, symbol_short!("withdrawal_cancelled")),
+            (investor, request_id),
+        );
         Ok(())
     }
 
@@ -1148,33 +1206,35 @@ impl FundingPool {
         let token_client = token::Client::new(env, &token);
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
-        env.events()
-            .publish((EVT, Symbol::new(env, "withdrawal_fulfilled")), (investor, amount, shares));
+        env.events().publish(
+            (EVT, symbol_short!("withdrawal_fulfilled")),
+            (investor, amount, shares),
+        );
         Ok(())
     }
 
     /// Generate unique request ID for withdrawal requests
     fn generate_request_id(env: &Env, token: &Address) -> u64 {
         let counter_key = DataKey::WithdrawalQueue(token.clone());
-        let current_count: u64 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0);
+        let current_count: u64 = env.storage().persistent().get(&counter_key).unwrap_or(0);
         let new_id = current_count + 1;
         env.storage().persistent().set(&counter_key, &new_id);
         new_id
     }
 
     /// Process withdrawal queue after repayments (call from repay_invoice)
-    fn process_withdrawal_queue(env: &Env, token: Address, available_amount: i128) -> PoolResult<()> {
+    fn process_withdrawal_queue(
+        env: &Env,
+        token: Address,
+        available_amount: i128,
+    ) -> PoolResult<()> {
         let queue_key = DataKey::WithdrawalQueue(token.clone());
         let mut queue: Vec<WithdrawalRequest> = env
             .storage()
             .persistent()
             .get(&queue_key)
             .unwrap_or_default();
-        
+
         if queue.is_empty() {
             return Ok(());
         }
@@ -1197,7 +1257,7 @@ impl FundingPool {
                     .instance()
                     .get(&share_token_key)
                     .ok_or(PoolError::ShareTokenNotConfigured)?;
-                
+
                 // Burn shares
                 let mut burn_args = Vec::new(env);
                 burn_args.push_back(request.investor.clone().into_val(env));
@@ -1210,15 +1270,21 @@ impl FundingPool {
 
                 // Transfer tokens
                 let token_client = token::Client::new(env, &token);
-                token_client.transfer(&env.current_contract_address(), &request.investor, &request_amount);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &request.investor,
+                    &request_amount,
+                );
 
                 // Remove individual request
-                let request_key = DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
+                let request_key =
+                    DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
                 env.storage().persistent().remove(&request_key);
 
-                env.events()
-                    .publish((EVT, Symbol::new(env, "withdrawal_fulfilled")), 
-                             (request.investor, request_amount, request.shares));
+                env.events().publish(
+                    (EVT, symbol_short!("withdrawal_fulfilled")),
+                    (request.investor, request_amount, request.shares),
+                );
             } else {
                 // Can't process this request, keep it in queue
                 processed.push_back(request);
@@ -1227,11 +1293,11 @@ impl FundingPool {
 
         // Update queue with remaining unprocessed requests
         env.storage().persistent().set(&queue_key, &processed);
-        
+
         // Update token totals
         let token_totals_key = DataKey::TokenTotals(token);
         env.storage().instance().set(&token_totals_key, &tt);
-        
+
         Ok(())
     }
 
@@ -1253,11 +1319,7 @@ impl FundingPool {
             .unwrap_or_default();
 
         let snapshot_key = DataKey::InvestorRewardSnapshot(investor.clone(), token.clone());
-        let last_rps: i128 = env
-            .storage()
-            .persistent()
-            .get(&snapshot_key)
-            .unwrap_or(0);
+        let last_rps: i128 = env.storage().persistent().get(&snapshot_key).unwrap_or(0);
 
         let share_token: Address = env
             .storage()
@@ -1265,15 +1327,12 @@ impl FundingPool {
             .get(&DataKey::ShareToken(token.clone()))
             .ok_or(PoolError::ShareTokenNotConfigured)?;
 
-        let investor_shares: i128 = env.invoke_contract(
-            &share_token,
-            &Symbol::new(&env, "balance"),
-            {
+        let investor_shares: i128 =
+            env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), {
                 let mut args = Vec::new(&env);
                 args.push_back(investor.clone().into_val(&env));
                 args
-            },
-        );
+            });
 
         let claimable = if investor_shares > 0 && tt.reward_per_share > last_rps {
             ((tt.reward_per_share - last_rps) * investor_shares) / REWARD_PRECISION
@@ -1373,7 +1432,11 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn fund_multiple_invoices(env: Env, admin: Address, requests: Vec<FundingRequest>) -> PoolResult<()> {
+    pub fn fund_multiple_invoices(
+        env: Env,
+        admin: Address,
+        requests: Vec<FundingRequest>,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1398,9 +1461,7 @@ impl FundingPool {
             .unwrap_or_default();
 
         for i in 0..requests.len() {
-            let request = requests
-                .get(i)
-                .ok_or(PoolError::StorageCorrupted)?;
+            let request = requests.get(i).ok_or(PoolError::StorageCorrupted)?;
             fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         }
 
@@ -1408,7 +1469,12 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address, amount: i128) -> PoolResult<()> {
+    pub fn repay_invoice(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+        amount: i128,
+    ) -> PoolResult<()> {
         payer.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1528,9 +1594,12 @@ impl FundingPool {
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
             let available_amount = total_interest as i128 + record.factoring_fee;
-            if let Err(e) = Self::process_withdrawal_queue(&env, record.token.clone(), available_amount) {
+            if let Err(e) =
+                Self::process_withdrawal_queue(&env, record.token.clone(), available_amount)
+            {
                 // Log error but don't fail the repayment
-                env.logs().add(&format!("Failed to process withdrawal queue: {:?}", e));
+                env.logs()
+                    .add(&format!("Failed to process withdrawal queue: {:?}", e));
             }
 
             env.events().publish(
@@ -1551,7 +1620,12 @@ impl FundingPool {
     /// Admin sets the collateral configuration.
     /// `threshold` — minimum principal (inclusive) that requires collateral.
     /// `collateral_bps` — required collateral as % of principal in basis points (max 10000 = 100%).
-    pub fn set_collateral_config(env: Env, admin: Address, threshold: i128, collateral_bps: u32) -> PoolResult<()> {
+    pub fn set_collateral_config(
+        env: Env,
+        admin: Address,
+        threshold: i128,
+        collateral_bps: u32,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1962,9 +2036,7 @@ impl FundingPool {
         if !removed {
             return Err(PoolError::FeeTierNotFound);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::FeeTierIds, &new_ids);
+        env.storage().instance().set(&DataKey::FeeTierIds, &new_ids);
         env.storage().instance().remove(&DataKey::FeeTier(tier_id));
         Ok(())
     }
@@ -2053,9 +2125,42 @@ impl FundingPool {
             .unwrap_or(0)
     }
 
+    pub fn set_token_deposit_cap(
+        env: Env,
+        admin: Address,
+        token: Address,
+        max_deposit: i128,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if max_deposit < 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        Self::assert_accepted_token(&env, &token)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenDepositCap(token.clone()), &max_deposit);
+        env.events().publish(
+            (EVT, symbol_short!("set_tcap")),
+            (admin, token, max_deposit),
+        );
+        Ok(())
+    }
+
+    pub fn get_token_deposit_cap(env: Env, token: Address) -> i128 {
+        bump_instance(&env);
+        token_deposit_cap(&env, &token)
+    }
+
     // ---- #233: maximum single-investor concentration limit ----
 
-    pub fn set_max_investor_concentration(env: Env, admin: Address, max_bps: u32) -> PoolResult<()> {
+    pub fn set_max_investor_concentration(
+        env: Env,
+        admin: Address,
+        max_bps: u32,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -2070,7 +2175,11 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn get_investor_concentration(env: Env, investor: Address, token: Address) -> PoolResult<u32> {
+    pub fn get_investor_concentration(
+        env: Env,
+        investor: Address,
+        token: Address,
+    ) -> PoolResult<u32> {
         let tt: PoolTokenTotals = env
             .storage()
             .instance()
@@ -2080,19 +2189,18 @@ impl FundingPool {
             return Ok(0);
         }
         let pos_key = DataKey::InvestorPosition(investor.clone(), token);
-        let position: InvestorPosition = env
-            .storage()
-            .persistent()
-            .get(&pos_key)
-            .unwrap_or(InvestorPosition {
-                deposited: 0,
-                available: 0,
-                deployed: 0,
-                earned: 0,
-                deposit_count: 0,
-            });
-        let share_bps =
-            ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        let position: InvestorPosition =
+            env.storage()
+                .persistent()
+                .get(&pos_key)
+                .unwrap_or(InvestorPosition {
+                    deposited: 0,
+                    available: 0,
+                    deployed: 0,
+                    earned: 0,
+                    deposit_count: 0,
+                });
+        let share_bps = ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         Ok(share_bps)
     }
 
@@ -2155,10 +2263,8 @@ impl FundingPool {
         env.storage().instance().set(&token_totals_key, &tt);
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &treasury, &amount);
-        env.events().publish(
-            (EVT, symbol_short!("rev_wdraw")),
-            (token, amount, treasury),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("rev_wdraw")), (token, amount, treasury));
         Ok(())
     }
 
@@ -2248,11 +2354,7 @@ impl FundingPool {
         let from_key = DataKey::CoFundShare(invoice_id, from.clone());
         let to_key = DataKey::CoFundShare(invoice_id, to.clone());
 
-        let from_share: u32 = env
-            .storage()
-            .persistent()
-            .get(&from_key)
-            .unwrap_or(0);
+        let from_share: u32 = env.storage().persistent().get(&from_key).unwrap_or(0);
 
         // Calculate share amount to transfer
         let transfer_amount = (from_share as u64 * bps as u64 / BPS_DENOM as u64) as u32;
@@ -2260,11 +2362,7 @@ impl FundingPool {
             return Err(PoolError::InsufficientCoFundShare);
         }
 
-        let to_share: u32 = env
-            .storage()
-            .persistent()
-            .get(&to_key)
-            .unwrap_or(0);
+        let to_share: u32 = env.storage().persistent().get(&to_key).unwrap_or(0);
 
         let new_from_share = from_share - transfer_amount;
         let new_to_share = to_share.saturating_add(transfer_amount);
@@ -2466,7 +2564,13 @@ impl FundingPool {
     /// Used to normalise pool value across stablecoins for display/reporting.
     /// Oracle-backed validation is a planned follow-up; for now the admin must
     /// set explicit per-token bounds before changing a rate.
-    pub fn set_rate_bounds(env: Env, admin: Address, token: Address, min_bps: u32, max_bps: u32) -> PoolResult<()> {
+    pub fn set_rate_bounds(
+        env: Env,
+        admin: Address,
+        token: Address,
+        min_bps: u32,
+        max_bps: u32,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -2489,7 +2593,12 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn set_exchange_rate(env: Env, admin: Address, token: Address, rate_bps: u32) -> PoolResult<()> {
+    pub fn set_exchange_rate(
+        env: Env,
+        admin: Address,
+        token: Address,
+        rate_bps: u32,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -2561,7 +2670,12 @@ impl FundingPool {
     }
 
     /// Approve or revoke a specific investor's KYC status.
-    pub fn set_investor_kyc(env: Env, admin: Address, investor: Address, approved: bool) -> PoolResult<()> {
+    pub fn set_investor_kyc(
+        env: Env,
+        admin: Address,
+        investor: Address,
+        approved: bool,
+    ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -2927,7 +3041,10 @@ mod test {
         );
 
         let funded = client.get_funded_invoice(&1u64).unwrap();
-        assert_eq!(funded.factoring_fee, 500_000_000i128 * 100 / BPS_DENOM as i128);
+        assert_eq!(
+            funded.factoring_fee,
+            500_000_000i128 * 100 / BPS_DENOM as i128
+        );
     }
 
     #[test]
@@ -3213,7 +3330,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        
+
         // Add a second token to test removal
         let token_admin2 = Address::generate(&env);
         let new_token = env
@@ -3221,19 +3338,19 @@ mod test {
             .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
-        
+
         // Verify token was added
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 2);
-        
+
         // Remove token with zero balances should succeed
         let result = client.remove_token(&admin, &new_token);
         assert!(result.is_ok());
-        
+
         // Verify token was removed
         let tokens_after = client.accepted_tokens();
         assert_eq!(tokens_after.len(), 1);
-        
+
         // Verify the removed token is not in the list
         let mut found = false;
         for i in 0..tokens_after.len() {
@@ -3250,7 +3367,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        
+
         // Add a second token
         let token_admin2 = Address::generate(&env);
         let new_token = env
@@ -3258,16 +3375,16 @@ mod test {
             .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
-        
+
         // Deposit into the new token to create non-zero balance
         let investor = Address::generate(&env);
         mint(&env, &new_token, &investor, 1_000);
         client.deposit(&investor, &new_token, &1_000);
-        
+
         // Attempt to remove token with deposited balance should fail
         let result = client.try_remove_token(&admin, &new_token);
         assert_eq!(result, Err(Ok(PoolError::TokenHasActiveBalances)));
-        
+
         // Verify token is still in accepted list
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 2);
@@ -3278,7 +3395,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        
+
         // Add a second token
         let token_admin2 = Address::generate(&env);
         let new_token = env
@@ -3286,13 +3403,13 @@ mod test {
             .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
-        
+
         // Setup: deposit, fund invoice (deployed > 0), then withdraw all shares to make pool_value = 0
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
         mint(&env, &new_token, &investor, 2_000);
         mint(&env, &new_token, &sme, 1_000);
-        
+
         client.deposit(&investor, &new_token, &2_000);
         client.fund_invoice(
             &admin,
@@ -3302,7 +3419,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &new_token,
         );
-        
+
         // Withdraw all shares to make pool_value = 0, but total_deployed > 0
         let shares: i128 = env.invoke_contract(
             &new_share,
@@ -3310,16 +3427,16 @@ mod test {
             soroban_sdk::vec![&env, investor.clone().into_val(&env)],
         );
         client.withdraw(&investor, &new_token, &shares);
-        
+
         // Verify state: pool_value = 0, total_deployed > 0
         let tt = client.get_token_totals(&new_token);
         assert_eq!(tt.pool_value, 0);
         assert!(tt.total_deployed > 0);
-        
+
         // Attempt to remove token with deployed capital should fail
         let result = client.try_remove_token(&admin, &new_token);
         assert_eq!(result, Err(Ok(PoolError::TokenHasDeployedCapital)));
-        
+
         // Verify token is still in accepted list
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 2);
@@ -3330,7 +3447,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        
+
         // Add a second token
         let token_admin2 = Address::generate(&env);
         let new_token = env
@@ -3338,12 +3455,12 @@ mod test {
             .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
-        
+
         // Non-admin attempts to remove token
         let attacker = Address::generate(&env);
         let result = client.try_remove_token(&attacker, &new_token);
         assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
-        
+
         // Verify token is still in accepted list
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 2);
