@@ -1,3 +1,5 @@
+// Astera/frontend/components/APYCalculator.tsx
+
 'use client';
 
 import { useMemo, useState } from 'react';

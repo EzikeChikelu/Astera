@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { PoolStatsSkeleton } from '@/components/PoolStats';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
+import { ScenarioModeler } from '@/components/ScenarioModeler';
 import {
   getPoolConfig,
   getInvestorPosition,
@@ -193,6 +194,7 @@ export default function InvestPage() {
           <p className="text-brand-muted">{t('description')}</p>
         </div>
 
+        {/* ── Top grid: Pool stats + deposit form ── */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-6">
             {loading ? (
@@ -208,6 +210,9 @@ export default function InvestPage() {
                 {t('poolNotDeployed')}
               </div>
             )}
+
+            {/* Earnings calculator */}
+            <APYCalculator yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
 
             {wallet.connected && position && selectedToken && (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
@@ -242,6 +247,7 @@ export default function InvestPage() {
             )}
           </div>
 
+          {/* ── Deposit / Withdraw form ── */}
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl h-fit">
             {!wallet.connected ? (
               <div className="text-center py-12">
@@ -265,9 +271,7 @@ export default function InvestPage() {
                   {(['deposit', 'withdraw'] as const).map((m) => (
                     <button
                       key={m}
-                      onClick={() => {
-                        setMode(m);
-                      }}
+                      onClick={() => setMode(m)}
                       className={`flex-1 py-2.5 text-sm font-medium capitalize transition-colors ${
                         mode === m
                           ? 'bg-brand-gold text-brand-dark'
@@ -284,18 +288,16 @@ export default function InvestPage() {
                     <label className="block text-sm text-brand-muted mb-2">{t('stablecoin')}</label>
                     <select
                       value={selectedToken}
-                      onChange={(e) => {
-                        setSelectedToken(e.target.value);
-                      }}
+                      onChange={(e) => setSelectedToken(e.target.value)}
                       disabled={acceptedTokens.length === 0}
                       className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold"
                     >
                       {acceptedTokens.length === 0 ? (
                         <option value="">{t('noTokens')}</option>
                       ) : (
-                        acceptedTokens.map((t) => (
-                          <option key={t} value={t}>
-                            {stablecoinLabel(t)}
+                        acceptedTokens.map((tok) => (
+                          <option key={tok} value={tok}>
+                            {stablecoinLabel(tok)}
                           </option>
                         ))
                       )}
@@ -371,11 +373,13 @@ export default function InvestPage() {
                       ? t('processing')
                       : `${t(`modes.${mode}`)} ${stablecoinLabel(selectedToken)}`}
                   </button>
+
                   {depositAtCapacity && mode === 'deposit' && (
                     <p className="text-xs text-red-300">
                       This token is at its configured deposit cap.
                     </p>
                   )}
+
                   {txStatus === 'failed' && (
                     <button
                       type="button"
@@ -411,6 +415,18 @@ export default function InvestPage() {
             )}
           </div>
         </div>
+
+        {/* ── Scenario Modeler — full-width below the deposit grid (#289) ── */}
+        <section className="mt-10">
+          <div className="mb-4">
+            <h2 className="text-xl font-bold text-white">Scenario Modeler</h2>
+            <p className="text-sm text-brand-muted mt-0.5">
+              Model best, base, and worst-case returns across varying utilization and default
+              assumptions before you invest.
+            </p>
+          </div>
+          <ScenarioModeler yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
+        </section>
       </div>
     </div>
   );
