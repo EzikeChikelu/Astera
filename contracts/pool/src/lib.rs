@@ -645,14 +645,6 @@ fn fund_invoice_request(
         repaid_amount: 0i128,
     };
 
-    // Transfer principal to SME; NAV is unchanged because the funded invoice becomes an asset.
-    let token_client = token::Client::new(env, &request.token);
-    token_client.transfer(
-        &env.current_contract_address(),
-        &request.sme,
-        &request.principal,
-    );
-
     // Persist invoice record and update totals/stats.
     env.storage()
         .persistent()
@@ -694,6 +686,15 @@ fn fund_invoice_request(
         .active_funded_invoices
         .checked_add(1)
         .ok_or(PoolError::AmountOverflow)?;
+
+    // Transfer principal to SME LAST - interaction
+    // NAV is unchanged because the funded invoice becomes an asset.
+    let token_client = token::Client::new(env, &request.token);
+    token_client.transfer(
+        &env.current_contract_address(),
+        &request.sme,
+        &request.principal,
+    );
 
     env.events().publish(
         (EVT, symbol_short!("funded")),
@@ -993,6 +994,8 @@ impl FundingPool {
         }
         Self::assert_accepted_token(&env, &token)?;
 
+        Self::non_reentrant_start(&env);
+
         // #235: enforce minimum deposit amount
         let config = get_config_cached(&env)?;
         if config.min_deposit_amount > 0 && amount < config.min_deposit_amount {
@@ -1112,6 +1115,12 @@ impl FundingPool {
         env.storage()
             .persistent()
             .set(&investor_pos_key, &investor_position);
+
+        // Transfer tokens LAST - interaction
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&investor, &env.current_contract_address(), &amount);
+
+        Self::non_reentrant_end(&env);
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
@@ -1583,6 +1592,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+
+        Self::non_reentrant_start(&env);
+
         let config = get_config_cached(&env)?;
         if env
             .storage()
@@ -1639,6 +1651,8 @@ impl FundingPool {
         };
         fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
+        
+        Self::non_reentrant_end(&env);
         Ok(())
     }
 
@@ -1651,6 +1665,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+        
+        Self::non_reentrant_start(&env);
+        
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
         }
@@ -1676,6 +1693,7 @@ impl FundingPool {
         }
 
         env.storage().instance().set(&DataKey::StorageStats, &stats);
+        Self::non_reentrant_end(&env);
         Ok(())
     }
 
