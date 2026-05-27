@@ -1,4 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
+import { assertRealContractIds } from './e2e/contract-ids';
+
+// #395: in CI, refuse to run against placeholder contract IDs. Locally this is
+// allowed so mock-based specs can run without a deployment.
+if (process.env.CI) {
+  assertRealContractIds();
+}
 
 const defaultBaseURL = 'http://localhost:3000';
 const parsedBaseURL = new URL(process.env.PLAYWRIGHT_BASE_URL ?? defaultBaseURL);

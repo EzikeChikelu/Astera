@@ -88,6 +88,15 @@ pub enum InvoiceError {
     DateOverflow = 9,
     // #406: metadata URL validation
     InvalidMetadata = 10,
+    // Per-field length validation (used by validate_invoice_strings)
+    DescriptionTooLong = 11,
+    DebtorNameTooLong = 12,
+    VerificationHashTooLong = 13,
+    // Due-date extension flow (request_extension / approve_extension)
+    ExtensionAlreadyPending = 14,
+    InvalidDueDateExtension = 15,
+    ExtensionTooLarge = 16,
+    NoPendingExtension = 17,
 }
 
 #[contracttype]
@@ -1920,14 +1929,19 @@ mod test {
                 new_due_date: u64,
             ) {
                 invoice_contract.require_auth();
-                env.storage().instance().set(&symbol_short!("upd_id"), &invoice_id);
+                env.storage()
+                    .instance()
+                    .set(&symbol_short!("upd_id"), &invoice_id);
                 env.storage()
                     .instance()
                     .set(&symbol_short!("upd_due"), &new_due_date);
             }
 
             pub fn last_updated_invoice_id(env: Env) -> u64 {
-                env.storage().instance().get(&symbol_short!("upd_id")).unwrap_or(0)
+                env.storage()
+                    .instance()
+                    .get(&symbol_short!("upd_id"))
+                    .unwrap_or(0)
             }
 
             pub fn last_updated_due_date(env: Env) -> u64 {
@@ -2727,10 +2741,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        let long_desc = String::from_bytes(
-            &env,
-            &[b'a'; (MAX_DESCRIPTION_LEN as usize) + 1],
-        );
+        let long_desc = String::from_bytes(&env, &[b'a'; (MAX_DESCRIPTION_LEN as usize) + 1]);
         let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "Debtor Corp"),
@@ -2815,8 +2826,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        let long_hash =
-            String::from_bytes(&env, &[b'h'; (MAX_VERIFICATION_HASH_LEN as usize) + 1]);
+        let long_hash = String::from_bytes(&env, &[b'h'; (MAX_VERIFICATION_HASH_LEN as usize) + 1]);
         let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "Debtor Corp"),
