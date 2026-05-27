@@ -111,7 +111,9 @@ pub enum PoolError {
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
-    UnsupportedTokenDecimals = 34,
+    UnsupportedTokenDecimals = 36,
+    // CEI: transfer amount mismatch
+    TransferMismatch = 37,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -567,11 +569,10 @@ fn resolve_factoring_fee(
     // #367: Normalize principal to stroops for fee calculation
     let token_config = get_token_config(env, token)?;
     let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
-    let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps);
+    let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps)?;
     // Denormalize fee back to token units
     let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
     Ok(fee)
-    calculate_factoring_fee(principal, fee_bps)
 }
 
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
@@ -1012,9 +1013,19 @@ impl FundingPool {
             }
         }
 
-        // Transfer tokens first
+        // Record balance before transfer (CEI: check-effects-interactions)
         let token_client = token::Client::new(&env, &token);
+        let balance_before = token_client.balance(&env.current_contract_address());
+
+        // Transfer tokens
         token_client.transfer(&investor, &env.current_contract_address(), &amount);
+
+        // Verify exact amount received (handles fee-on-transfer tokens)
+        let balance_after = token_client.balance(&env.current_contract_address());
+        let received = balance_after.wrapping_sub(balance_before);
+        if received != amount {
+            return Err(PoolError::TransferMismatch);
+        }
 
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
@@ -1042,8 +1053,8 @@ impl FundingPool {
         // #233: enforce maximum single-investor concentration limit
         let config = get_config_cached(&env)?;
         if config.max_single_investor_bps < 10_000 {
-            let new_investor_total = investor_position.deposited + amount;
-            let new_pool_total = tt.pool_value + amount;
+            let new_investor_total = investor_position.deposited + received;
+            let new_pool_total = tt.pool_value + received;
             if new_pool_total > 0 {
                 let investor_share_bps =
                     ((new_investor_total as u128 * 10_000u128) / new_pool_total as u128) as u32;
@@ -1075,13 +1086,13 @@ impl FundingPool {
         );
 
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
-            amount
+            received
         } else {
-            (amount * total_shares) / tt.pool_value
+            (received * total_shares) / tt.pool_value
         };
 
-        // Update pool value
-        tt.pool_value += amount;
+        // Update pool value with received amount
+        tt.pool_value += received;
 
         // Batch write: update token totals
         env.storage().instance().set(&token_totals_key, &tt);
@@ -1093,7 +1104,7 @@ impl FundingPool {
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "mint"), mint_args);
 
         // #233: update investor position for concentration tracking
-        investor_position.deposited += amount;
+        investor_position.deposited += received;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -1101,7 +1112,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
-            (investor, amount, shares_to_mint, env.ledger().timestamp()),
+            (investor, received, shares_to_mint, env.ledger().timestamp()),
         );
         Ok(())
     }

@@ -281,7 +281,7 @@ impl CreditScoreContract {
         };
 
         let days_late: i64 = if paid_at > due_date {
-            (paid_at - due_date) as i64 / (24 * 60 * 60)
+            ((paid_at - due_date - 1) as i64 / (24 * 60 * 60)) + 1
         } else {
             -((due_date - paid_at) as i64 / (24 * 60 * 60))
         };
@@ -396,7 +396,7 @@ impl CreditScoreContract {
 
         let defaulted_at = env.ledger().timestamp();
         let days_late = if defaulted_at > due_date {
-            (defaulted_at - due_date) as i64 / (24 * 60 * 60)
+            ((defaulted_at - due_date - 1) as i64 / (24 * 60 * 60)) + 1
         } else {
             0
         };
@@ -560,7 +560,7 @@ impl CreditScoreContract {
     pub fn set_late_threshold(env: Env, admin: Address, days: i64) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
-        if days < 1 || days > 365 {
+        if !(1..=365).contains(&days) {
             panic!("threshold must be between 1 and 365 days");
         }
         env.storage()
@@ -1585,6 +1585,85 @@ mod test {
             data_before.average_payment_days, data_after.average_payment_days,
             "default must not affect average_payment_days"
         );
+    }
+
+    // ---- days_late ceiling division tests ----
+
+    #[test]
+    fn test_days_late_ceil_one_hour() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let due_date = 200_000u64;
+        let paid_at = 200_000u64 + 3600; // 1 hour late
+
+        client.record_payment(&pool, &1, &sme, &1_000_000_000i128, &due_date, &paid_at);
+
+        let record = client.get_payment_record(&sme, &0).unwrap();
+        assert_eq!(record.days_late, 1, "1 hour late should be 1 day late (ceiling)");
+    }
+
+    #[test]
+    fn test_days_late_ceil_twenty_five_hours() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let due_date = 200_000u64;
+        let paid_at = 200_000u64 + 90_000; // 25 hours = 90000 seconds
+
+        client.record_payment(&pool, &1, &sme, &1_000_000_000i128, &due_date, &paid_at);
+
+        let record = client.get_payment_record(&sme, &0).unwrap();
+        assert_eq!(record.days_late, 2, "25 hours late should be 2 days late (ceiling)");
+    }
+
+    #[test]
+    fn test_days_late_on_time_is_zero_or_negative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let due_date = 200_000u64;
+
+        // Exact on-time
+        client.record_payment(&pool, &1, &sme, &1_000_000_000i128, &due_date, &due_date);
+        let r1 = client.get_payment_record(&sme, &0).unwrap();
+        assert!(r1.days_late <= 0, "on-time payment must have days_late <= 0, got {}", r1.days_late);
+
+        // Early
+        client.record_payment(&pool, &2, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+        let r2 = client.get_payment_record(&sme, &1).unwrap();
+        assert!(r2.days_late <= 0, "early payment must have days_late <= 0, got {}", r2.days_late);
+    }
+
+    #[test]
+    fn test_default_days_late_uses_ceiling() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 300_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let due_date = 100_000u64;
+
+        // Default at 1 hour past due
+        env.ledger().with_mut(|l| l.timestamp = due_date + 3600);
+        client.record_default(&pool, &1, &sme, &1_000_000_000i128, &due_date);
+
+        let record = client.get_payment_record(&sme, &0).unwrap();
+        assert_eq!(record.days_late, 1, "default 1 hour late should be 1 day (ceiling)");
     }
 
     #[test]
