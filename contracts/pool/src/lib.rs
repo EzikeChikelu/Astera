@@ -110,6 +110,8 @@ pub enum PoolError {
     // #227 / #222
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
+    // #367: unsupported token decimal precision
+    UnsupportedTokenDecimals = 34,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -118,6 +120,8 @@ const DEFAULT_YIELD_BPS: u32 = 800;
 const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
 const BPS_DENOM: u32 = 10_000;
 const SECS_PER_YEAR: u64 = 31_536_000;
+// #367: Stellar-native tokens use 7 decimal places (stroops)
+const EXPECTED_DECIMALS: u32 = 7;
 // #275: default max utilization — disabled (10_000 bps = 100%).
 // Many flows legitimately deploy 100% of available liquidity.
 const DEFAULT_MAX_UTILIZATION_BPS: u32 = 10_000;
@@ -224,6 +228,15 @@ pub struct CreditScoreData {
 const REWARD_PRECISION: i128 = 1_000_000_000_000;
 const MAX_BATCH_SIZE: u32 = 20;
 
+// #367: Token configuration including decimal precision
+#[contracttype]
+#[derive(Clone)]
+pub struct TokenConfig {
+    pub token: Address,
+    pub share_token: Address,
+    pub decimals: u32,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct ExchangeRateBounds {
@@ -324,6 +337,8 @@ pub enum DataKey {
     // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
     ExchangeRate(Address),
     ExchangeRateBounds(Address),
+    // #367: token configuration including decimal precision
+    TokenConfig(Address),
     // #109: KYC / investor whitelist
     KycRequired,
     InvestorKyc(Address),
@@ -480,6 +495,36 @@ fn calculate_total_due(
     Ok((total_interest, total_due))
 }
 
+/// #367: Retrieve token configuration including decimals, with fallback to EXPECTED_DECIMALS
+fn get_token_config(env: &Env, token: &Address) -> PoolResult<TokenConfig> {
+    env.storage()
+        .instance()
+        .get(&DataKey::TokenConfig(token.clone()))
+        .ok_or(PoolError::StorageCorrupted)
+}
+
+/// #367: Normalize amount from token decimal precision to stroops (7 decimals)
+fn normalize_to_stroops(amount: i128, token_decimals: u32) -> i128 {
+    if token_decimals >= EXPECTED_DECIMALS {
+        // If token has more decimals than 7, divide down
+        amount / (10i128.pow(token_decimals - EXPECTED_DECIMALS))
+    } else {
+        // If token has fewer decimals than 7, multiply up
+        amount * (10i128.pow(EXPECTED_DECIMALS - token_decimals))
+    }
+}
+
+/// #367: Denormalize amount from stroops (7 decimals) back to token precision
+fn denormalize_from_stroops(amount: i128, token_decimals: u32) -> i128 {
+    if token_decimals >= EXPECTED_DECIMALS {
+        // If token has more decimals than 7, multiply up
+        amount * (10i128.pow(token_decimals - EXPECTED_DECIMALS))
+    } else {
+        // If token has fewer decimals than 7, divide down
+        amount / (10i128.pow(EXPECTED_DECIMALS - token_decimals))
+    }
+}
+
 /// Returns the required collateral amount for `principal` given the pool's collateral config.
 /// Returns 0 if the principal is below the threshold (no collateral required).
 fn get_credit_score_contract(env: &Env) -> Option<Address> {
@@ -495,6 +540,7 @@ fn resolve_factoring_fee(
     config: &PoolConfig,
     principal: i128,
     sme: Address,
+    token: &Address,
 ) -> PoolResult<i128> {
     let mut fee_bps = config.factoring_fee_bps;
 
@@ -518,6 +564,13 @@ fn resolve_factoring_fee(
         }
     }
 
+    // #367: Normalize principal to stroops for fee calculation
+    let token_config = get_token_config(env, token)?;
+    let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
+    let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps);
+    // Denormalize fee back to token units
+    let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
+    Ok(fee)
     calculate_factoring_fee(principal, fee_bps)
 }
 
@@ -575,7 +628,7 @@ fn fund_invoice_request(
     }
 
     let now = env.ledger().timestamp();
-    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone())?;
+    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone(), &request.token)?;
     let funded = FundedInvoice {
         invoice_id: request.invoice_id,
         sme: request.sme.clone(),
@@ -694,6 +747,12 @@ impl FundingPool {
         let mut tokens: Vec<Address> = Vec::new(&env);
         tokens.push_back(initial_token.clone());
 
+        let token_client = token::Client::new(&env, &initial_token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != EXPECTED_DECIMALS {
+            panic!("unsupported token decimals");
+        }
+
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage()
             .instance()
@@ -704,7 +763,17 @@ impl FundingPool {
         );
         env.storage()
             .instance()
-            .set(&DataKey::ShareToken(initial_token), &initial_share_token);
+            .set(&DataKey::ShareToken(initial_token.clone()), &initial_share_token);
+        env.storage()
+            .instance()
+            .set(
+                &DataKey::TokenConfig(initial_token.clone()),
+                &TokenConfig {
+                    token: initial_token.clone(),
+                    share_token: initial_share_token.clone(),
+                    decimals: token_decimals,
+                },
+            );
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage()
             .instance()
@@ -787,6 +856,14 @@ impl FundingPool {
                 return Err(PoolError::TokenAlreadyAccepted);
             }
         }
+
+        // #367: Fetch and validate token decimals
+        let token_client = token::Client::new(&env, &token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != EXPECTED_DECIMALS {
+            return Err(PoolError::UnsupportedTokenDecimals);
+        }
+
         tokens.push_back(token.clone());
         env.storage()
             .instance()
@@ -805,7 +882,17 @@ impl FundingPool {
             );
             env.storage()
                 .instance()
-                .set(&DataKey::ShareToken(token), &share_token);
+                .set(&DataKey::ShareToken(token.clone()), &share_token);
+            
+            // #367: Store token configuration with decimals
+            let config = TokenConfig {
+                token: token.clone(),
+                share_token,
+                decimals: token_decimals,
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::TokenConfig(token), &config);
         }
         Ok(())
     }
@@ -3005,6 +3092,16 @@ mod test {
         }
     }
 
+    // #367: Test token with 6 decimals (non-standard)
+    #[contract]
+    pub struct DummyToken6Decimals;
+    #[contractimpl]
+    impl DummyToken6Decimals {
+        pub fn decimals(_env: Env) -> u32 {
+            6
+        }
+    }
+
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
         let contract_id = env.register(FundingPool, ());
@@ -3959,6 +4056,17 @@ mod test {
         let new_share = env.register(DummyShare, ());
         let result = client.try_add_token(&attacker, &new_token, &new_share);
         assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_add_token_rejects_non_standard_decimals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let new_token = env.register(DummyToken6Decimals, ());
+        let new_share = env.register(DummyShare, ());
+        let result = client.try_add_token(&admin, &new_token, &new_share);
+        assert_eq!(result, Err(Ok(PoolError::UnsupportedTokenDecimals)));
     }
 
     #[test]

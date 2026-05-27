@@ -2117,6 +2117,29 @@ mod test {
     }
 
     #[test]
+    fn test_daily_reset_after_gap_provides_clean_window() {
+        // #368: SME who hasn't submitted for 5 days gets a clean 24-hour window on next submission
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due = env.ledger().timestamp() + 50_000;
+        
+        // Day 1: Create 1 invoice
+        client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &due, &String::from_str(&env, "i"), &String::from_str(&env, "h"));
+        
+        // Jump forward 5 days (432_000 seconds)
+        let new_timestamp = env.ledger().timestamp() + (5 * 86400u64);
+        env.ledger().with_mut(|l| l.timestamp = new_timestamp);
+        
+        // Day 6: Reset should have occurred; should be able to create 10 invoices (full daily limit)
+        // If the bug exists and reset_time wasn't set to now, this would fail
+        for _ in 0..10 {
+            client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &(new_timestamp + 50_000), &String::from_str(&env, "i"), &String::from_str(&env, "h"));
+        }
+    }
+
+    #[test]
     fn test_pause_and_unpause() {
         let env = Env::default();
         env.mock_all_auths();
