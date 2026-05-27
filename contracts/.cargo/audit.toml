@@ -1,10 +1,13 @@
 [advisories]
-# Add known-safe advisory IDs here as needed, e.g.:
-# ignore = ["RUSTSEC-2023-XXXX"]
+# Add advisory IDs to ignore only with a documented reason, e.g.:
+# ignore = [
+#   # RUSTSEC-2023-XXXX: Not applicable because we don't use the affected feature
+#   "RUSTSEC-2023-XXXX",
+# ]
 ignore = []
 
 [output]
-# Valid deny values: "warnings", "unmaintained", "unsound", "yanked"
-# ("vulnerability" was removed in cargo-audit 0.18 — vulnerabilities always fail.)
+# "vulnerability" always causes failure (built-in, cannot be overridden).
+# Additionally deny unmaintained and unsound crates.
 deny = ["unmaintained", "unsound"]
 quiet = false

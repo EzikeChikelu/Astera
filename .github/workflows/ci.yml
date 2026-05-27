@@ -20,14 +20,32 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo-audit binary
+        id: cache-cargo-audit
+        uses: actions/cache@v4
         with:
-          targets: wasm32-unknown-unknown
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-0.21.0
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.21.0 --locked
 
       - name: Run cargo-audit
-        run: cargo audit
+        working-directory: ./contracts
+        run: cargo audit --config .cargo/audit.toml
+
+      - name: Setup Node.js for npm audit
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Run npm audit
+        working-directory: ./frontend
+        run: npm audit --audit-level=high
 
   # ---- Rust Contracts ----
   rust-contracts:
@@ -160,6 +178,15 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+        env:
+          NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.NEXT_PUBLIC_SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+
+      - name: Upload Sentry source maps
+        if: github.ref == 'refs/heads/main' && env.SENTRY_AUTH_TOKEN != ''
+        run: npx @sentry/nextjs upload-sourcemaps .next --auth-token ${{ secrets.SENTRY_AUTH_TOKEN }} --org ${{ secrets.SENTRY_ORG }} --project ${{ secrets.SENTRY_PROJECT }} || true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
   # ---- Dependency Scanning ----
   dependency-scan:

@@ -98,6 +98,8 @@ pub enum DataKey {
     UpgradeScheduledAt,
     /// Semantic version stored during initialize() (#237).
     ContractVersion,
+    /// Configurable late-payment threshold in days (#430).
+    LateThreshold,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -116,7 +118,15 @@ fn require_not_paused(env: &Env) {
 #[contract]
 pub struct CreditScoreContract;
 
+fn get_late_threshold(env: &Env) -> i64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LateThreshold)
+        .unwrap_or(30)
+}
+
 fn calculate_score(
+    env: &Env,
     total_invoices: u32,
     paid_on_time: u32,
     paid_late: u32,
@@ -144,13 +154,15 @@ fn calculate_score(
         score += PTS_NEW_INVOICE as i64;
     }
 
+    let late_threshold = get_late_threshold(env);
+
     if average_payment_days < 0 {
         score += 20;
     } else if average_payment_days < 3 {
         score += 15;
     } else if average_payment_days < 7 {
         score += 10;
-    } else if average_payment_days > 30 {
+    } else if average_payment_days > late_threshold {
         score -= 15;
     }
 
@@ -325,6 +337,7 @@ impl CreditScoreContract {
             credit_data.average_payment_days * prev_paid + days_late,
         );
         credit_data.score = calculate_score(
+            &env,
             credit_data.total_invoices,
             credit_data.paid_on_time,
             credit_data.paid_late,
@@ -419,6 +432,7 @@ impl CreditScoreContract {
         credit_data.total_volume += amount;
         // Defaults do not affect average_payment_days — only paid invoices contribute.
         credit_data.score = calculate_score(
+            &env,
             credit_data.total_invoices,
             credit_data.paid_on_time,
             credit_data.paid_late,
@@ -539,6 +553,31 @@ impl CreditScoreContract {
             .set(&DataKey::PoolContract, &pool_contract);
         env.events()
             .publish((EVT, symbol_short!("set_pc")), (admin, pool_contract));
+    }
+
+    /// Set the late-payment threshold (in days) used in score calculation.
+    /// Default is 30 days. Valid range: 1–365.
+    pub fn set_late_threshold(env: Env, admin: Address, days: i64) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if days < 1 || days > 365 {
+            panic!("threshold must be between 1 and 365 days");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::LateThreshold, &days);
+        env.events().publish(
+            (EVT, symbol_short!("lt_upd")),
+            days,
+        );
+    }
+
+    /// Returns the current late-payment threshold in days (default 30).
+    pub fn get_late_threshold(env: Env) -> i64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LateThreshold)
+            .unwrap_or(30)
     }
 
     fn get_or_create_credit_data(env: &Env, sme: &Address) -> CreditScoreData {
@@ -888,6 +927,7 @@ mod test {
     fn test_prop_score_bounds_invariant() {
         // For any combination of inputs, score must always be in [MIN_SCORE, MAX_SCORE].
         // Uses a simple LCG to generate 100 varied input combinations.
+        let env = Env::default();
         let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -906,6 +946,7 @@ mod test {
             let avg_days = (lcg(&mut seed) % 60) as i64 - 10; // -10 to +49
 
             let score = calculate_score(
+                &env,
                 total_invoices,
                 paid_on_time,
                 paid_late,
@@ -927,6 +968,7 @@ mod test {
     fn test_prop_scoring_formula_monotonicity() {
         // For any fixed base, adding an on-time payment scores >= adding a late payment
         // which scores >= adding a default.
+        let env = Env::default();
         let mut seed: u64 = 0xCAFE_BABE_0000_0001;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -945,6 +987,7 @@ mod test {
             let avg = (lcg(&mut seed) % 20) as i64;
 
             let score_on_time = calculate_score(
+                &env,
                 base_invoices + 1,
                 base_on_time + 1,
                 base_late,
@@ -953,6 +996,7 @@ mod test {
                 avg,
             );
             let score_late = calculate_score(
+                &env,
                 base_invoices + 1,
                 base_on_time,
                 base_late + 1,
@@ -961,6 +1005,7 @@ mod test {
                 avg,
             );
             let score_default = calculate_score(
+                &env,
                 base_invoices + 1,
                 base_on_time,
                 base_late,
@@ -989,6 +1034,7 @@ mod test {
     #[test]
     fn test_prop_defaults_dominate() {
         // When defaulted > paid_on_time and paid_late == 0, score must be < BASE_SCORE.
+        let env = Env::default();
         let mut seed: u64 = 0xF00D_CAFE_ABCD_EF01;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -1004,7 +1050,7 @@ mod test {
             let vol = (lcg(&mut seed) % 5_000_000_000) as i128;
             let avg = (lcg(&mut seed) % 15) as i64;
 
-            let score = calculate_score(total, on_time, 0, defaulted, vol, avg);
+            let score = calculate_score(&env, total, on_time, 0, defaulted, vol, avg);
             assert!(
                 score < BASE_SCORE,
                 "score {} >= BASE_SCORE {} when defaulted({}) > on_time({}) with no late payments",
@@ -1551,5 +1597,85 @@ mod test {
         let sme = Address::generate(&env);
         let attacker = Address::generate(&env);
         client.record_payment(&attacker, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+    }
+
+    // ---- Issue #430: Configurable late-payment threshold ----
+
+    #[test]
+    fn test_late_threshold_default_is_30() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _inv, _pool) = setup(&env);
+        assert_eq!(client.get_late_threshold(), 30);
+    }
+
+    #[test]
+    fn test_set_late_threshold_updates_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _inv, _pool) = setup(&env);
+        client.set_late_threshold(&admin, &60);
+        assert_eq!(client.get_late_threshold(), 60);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must be between 1 and 365 days")]
+    fn test_set_late_threshold_rejects_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _inv, _pool) = setup(&env);
+        client.set_late_threshold(&admin, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must be between 1 and 365 days")]
+    fn test_set_late_threshold_rejects_over_365() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _inv, _pool) = setup(&env);
+        client.set_late_threshold(&admin, &366);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_late_threshold_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _inv, _pool) = setup(&env);
+        let intruder = Address::generate(&env);
+        client.set_late_threshold(&intruder, &45);
+    }
+
+    #[test]
+    fn test_late_threshold_affects_score() {
+        // With threshold=1, avg_payment_days=5 should trigger the penalty.
+        // With threshold=60, avg_payment_days=5 should NOT trigger the penalty.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, admin, _inv, pool) = setup(&env);
+        let sme1 = Address::generate(&env);
+        let sme2 = Address::generate(&env);
+
+        // sme1: threshold=1 (5 days late > 1 → penalty)
+        client.set_late_threshold(&admin, &1);
+        // pay 5 days late
+        let due = 200_000u64;
+        let paid_late = due + 5 * 86_400;
+        client.record_payment(&pool, &1, &sme1, &1_000_000_000i128, &due, &paid_late);
+        let score_strict = client.get_credit_score(&sme1).score;
+
+        // sme2: threshold=60 (5 days late ≤ 60 → no penalty)
+        client.set_late_threshold(&admin, &60);
+        client.record_payment(&pool, &2, &sme2, &1_000_000_000i128, &due, &paid_late);
+        let score_lenient = client.get_credit_score(&sme2).score;
+
+        assert!(
+            score_lenient > score_strict,
+            "lenient threshold should yield higher score: lenient={} strict={}",
+            score_lenient,
+            score_strict
+        );
     }
 }
