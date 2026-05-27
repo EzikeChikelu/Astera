@@ -241,6 +241,79 @@ impl CreditScoreContract {
             .unwrap_or(false)
     }
 
+    /// Shared helper (#404): appends a payment record, updates counters,
+    /// recalculates score, persists everything, and marks the invoice processed.
+    /// Returns the updated credit data so callers can emit their event payload.
+    fn commit_payment_record(
+        env: &Env,
+        sme: &Address,
+        invoice_id: u64,
+        record: PaymentRecord,
+    ) -> CreditScoreData {
+        let mut credit_data = Self::get_or_create_credit_data(env, sme);
+
+        let history_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistory(sme.clone()))
+            .unwrap_or(0);
+
+        env.storage().persistent().set(
+            &DataKey::PaymentRecordIdx(sme.clone(), history_len),
+            &record,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
+
+        // Capture previous paid count before incrementing, for the running average.
+        let prev_paid = (credit_data.paid_on_time + credit_data.paid_late) as i64;
+
+        match record.status {
+            PaymentStatus::PaidOnTime => {
+                credit_data.paid_on_time += 1;
+            }
+            PaymentStatus::PaidLate => {
+                credit_data.paid_late += 1;
+            }
+            PaymentStatus::Defaulted => {
+                credit_data.defaulted += 1;
+            }
+        }
+
+        credit_data.total_invoices += 1;
+        credit_data.total_volume += record.amount;
+        // Only paid (on-time + late) invoices contribute to the average; defaults are excluded.
+        // Running sum = previous_average * previous_paid_count + new_days_late
+        let days_late = record.days_late;
+        if record.status != PaymentStatus::Defaulted {
+            credit_data.average_payment_days = calculate_average_payment_days(
+                credit_data.paid_on_time,
+                credit_data.paid_late,
+                credit_data.average_payment_days * prev_paid + days_late,
+            );
+        }
+        credit_data.score = calculate_score(
+            get_late_threshold(env),
+            credit_data.total_invoices,
+            credit_data.paid_on_time,
+            credit_data.paid_late,
+            credit_data.defaulted,
+            credit_data.total_volume,
+            credit_data.average_payment_days,
+        );
+        credit_data.last_updated = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CreditScore(sme.clone()), &credit_data);
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceProcessed(invoice_id), &true);
+
+        credit_data
+    }
+
     pub fn record_payment(
         env: Env,
         caller: Address,
@@ -294,63 +367,7 @@ impl CreditScoreContract {
             days_late,
         };
 
-        let mut credit_data = Self::get_or_create_credit_data(&env, &sme);
-
-        let history_len: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentHistory(sme.clone()))
-            .unwrap_or(0);
-
-        env.storage().persistent().set(
-            &DataKey::PaymentRecordIdx(sme.clone(), history_len),
-            &record,
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
-
-        // Capture the previous paid count before incrementing, for the running average.
-        let prev_paid = (credit_data.paid_on_time + credit_data.paid_late) as i64;
-
-        match status {
-            PaymentStatus::PaidOnTime => {
-                credit_data.paid_on_time += 1;
-            }
-            PaymentStatus::PaidLate => {
-                credit_data.paid_late += 1;
-            }
-            PaymentStatus::Defaulted => {
-                credit_data.defaulted += 1;
-            }
-        }
-
-        credit_data.total_invoices += 1;
-        credit_data.total_volume += amount;
-        // Only paid (on-time + late) invoices contribute to the average; defaults are excluded.
-        // Running sum = previous_average * previous_paid_count + new_days_late
-        credit_data.average_payment_days = calculate_average_payment_days(
-            credit_data.paid_on_time,
-            credit_data.paid_late,
-            credit_data.average_payment_days * prev_paid + days_late,
-        );
-        credit_data.score = calculate_score(
-            get_late_threshold(&env),
-            credit_data.total_invoices,
-            credit_data.paid_on_time,
-            credit_data.paid_late,
-            credit_data.defaulted,
-            credit_data.total_volume,
-            credit_data.average_payment_days,
-        );
-        credit_data.last_updated = env.ledger().timestamp();
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::CreditScore(sme.clone()), &credit_data);
-        env.storage()
-            .persistent()
-            .set(&DataKey::InvoiceProcessed(invoice_id), &true);
+        let credit_data = Self::commit_payment_record(&env, &sme, invoice_id, record);
 
         env.events().publish(
             (EVT, symbol_short!("payment")),
@@ -409,43 +426,7 @@ impl CreditScoreContract {
             days_late,
         };
 
-        let mut credit_data = Self::get_or_create_credit_data(&env, &sme);
-
-        let history_len: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentHistory(sme.clone()))
-            .unwrap_or(0);
-
-        env.storage().persistent().set(
-            &DataKey::PaymentRecordIdx(sme.clone(), history_len),
-            &record,
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
-
-        credit_data.defaulted += 1;
-        credit_data.total_invoices += 1;
-        credit_data.total_volume += amount;
-        // Defaults do not affect average_payment_days — only paid invoices contribute.
-        credit_data.score = calculate_score(
-            get_late_threshold(&env),
-            credit_data.total_invoices,
-            credit_data.paid_on_time,
-            credit_data.paid_late,
-            credit_data.defaulted,
-            credit_data.total_volume,
-            credit_data.average_payment_days,
-        );
-        credit_data.last_updated = env.ledger().timestamp();
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::CreditScore(sme.clone()), &credit_data);
-        env.storage()
-            .persistent()
-            .set(&DataKey::InvoiceProcessed(invoice_id), &true);
+        let credit_data = Self::commit_payment_record(&env, &sme, invoice_id, record);
 
         env.events().publish(
             (EVT, symbol_short!("default")),
@@ -1473,6 +1454,38 @@ mod test {
         client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
         let data = client.get_credit_score(&sme);
         assert_eq!(data.total_invoices, 1);
+    }
+
+    // ---- Issue #404: shared helper exercised via both public entry points ----
+
+    #[test]
+    fn test_shared_helper_payment_and_default_same_sme() {
+        // Both record_payment and record_default must persist via commit_payment_record
+        // and produce consistent credit data.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        // Via record_payment (on time)
+        client.record_payment(&pool, &1, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+        let after_payment = client.get_credit_score(&sme);
+        assert_eq!(after_payment.total_invoices, 1);
+        assert_eq!(after_payment.paid_on_time, 1);
+        assert_eq!(after_payment.defaulted, 0);
+
+        // Via record_default
+        client.record_default(&pool, &2, &sme, &1_000_000_000i128, &due_date);
+        let after_default = client.get_credit_score(&sme);
+        assert_eq!(after_default.total_invoices, 2);
+        assert_eq!(after_default.paid_on_time, 1);
+        assert_eq!(after_default.defaulted, 1);
+
+        // History length reflects both writes
+        assert_eq!(client.get_payment_history_length(&sme), 2);
     }
 
     // ---- Issue #405: calculate_average_payment_days divide-by-zero guard ----
