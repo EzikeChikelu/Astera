@@ -566,10 +566,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::LateThreshold, &days);
-        env.events().publish(
-            (EVT, symbol_short!("lt_upd")),
-            days,
-        );
+        env.events().publish((EVT, symbol_short!("lt_upd")), days);
     }
 
     /// Returns the current late-payment threshold in days (default 30).

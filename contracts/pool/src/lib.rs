@@ -30,8 +30,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
-    IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -112,6 +112,7 @@ pub enum PoolError {
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
     UnsupportedTokenDecimals = 34,
+    KycNotApproved = 36,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -320,6 +321,12 @@ pub struct CollateralDeposit {
     pub amount: i128,
     /// Whether the collateral has been settled (returned or seized).
     pub settled: bool,
+    /// When the collateral was originally posted.
+    pub posted_at: u64,
+    /// When the collateral was released after repayment (0 = not released).
+    pub released_at: u64,
+    /// When the collateral was seized after default (0 = not seized).
+    pub seized_at: u64,
 }
 
 #[contracttype]
@@ -477,7 +484,12 @@ fn calculate_total_due(
     config: &PoolConfig,
     now: u64,
 ) -> PoolResult<(u128, i128)> {
-    let elapsed_secs = now
+    let accrual_end = if now > record.due_date {
+        record.due_date
+    } else {
+        now
+    };
+    let elapsed_secs = accrual_end
         .checked_sub(record.funded_at)
         .ok_or(PoolError::AmountOverflow)?;
     let total_interest = calculate_interest(
@@ -493,6 +505,39 @@ fn calculate_total_due(
         .and_then(|value| value.checked_add(record.factoring_fee))
         .ok_or(PoolError::AmountOverflow)?;
     Ok((total_interest, total_due))
+}
+
+fn release_collateral(
+    env: &Env,
+    invoice_id: u64,
+    released_by: &Address,
+    settled_at: u64,
+) {
+    if let Some(mut col) = env
+        .storage()
+        .persistent()
+        .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
+    {
+        if !col.settled {
+            let col_token_client = token::Client::new(env, &col.token);
+            col_token_client.transfer(&env.current_contract_address(), &col.depositor, &col.amount);
+            col.settled = true;
+            col.released_at = settled_at;
+            env.storage()
+                .persistent()
+                .set(&DataKey::CollateralDeposit(invoice_id), &col);
+            env.events().publish(
+                (EVT, symbol_short!("col_ret")),
+                (
+                    invoice_id,
+                    col.depositor,
+                    col.amount,
+                    released_by.clone(),
+                    settled_at,
+                ),
+            );
+        }
+    }
 }
 
 /// #367: Retrieve token configuration including decimals, with fallback to EXPECTED_DECIMALS
@@ -567,11 +612,10 @@ fn resolve_factoring_fee(
     // #367: Normalize principal to stroops for fee calculation
     let token_config = get_token_config(env, token)?;
     let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
-    let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps);
+    let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps)?;
     // Denormalize fee back to token units
     let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
     Ok(fee)
-    calculate_factoring_fee(principal, fee_bps)
 }
 
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
@@ -1008,7 +1052,7 @@ impl FundingPool {
                 .get(&DataKey::InvestorKyc(investor.clone()))
                 .unwrap_or(false);
             if !approved {
-                return Err(PoolError::Unauthorized);
+                return Err(PoolError::KycNotApproved);
             }
         }
 
@@ -1807,28 +1851,7 @@ impl FundingPool {
 
         // Handle collateral release after main transfer
         if fully_repaid {
-            if let Some(mut col) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
-            {
-                if !col.settled {
-                    let col_token_client = token::Client::new(env, &col.token);
-                    col_token_client.transfer(
-                        &env.current_contract_address(),
-                        &col.depositor,
-                        &col.amount,
-                    );
-                    col.settled = true;
-                    env.storage()
-                        .persistent()
-                        .set(&DataKey::CollateralDeposit(invoice_id), &col);
-                    env.events().publish(
-                        (EVT, symbol_short!("col_ret")),
-                        (invoice_id, col.depositor, col.amount),
-                    );
-                }
-            }
+            release_collateral(env, invoice_id, &payer, now);
         }
 
         Self::non_reentrant_end(env); // <- ADD GUARD END
@@ -1981,6 +2004,9 @@ impl FundingPool {
             token: token.clone(),
             amount,
             settled: false,
+            posted_at: env.ledger().timestamp(),
+            released_at: 0,
+            seized_at: 0,
         };
         env.storage()
             .persistent()
@@ -1994,7 +2020,14 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("col_dep")),
-            (invoice_id, depositor, token, amount),
+            (
+                invoice_id,
+                depositor.clone(),
+                token,
+                amount,
+                depositor,
+                env.ledger().timestamp(),
+            ),
         );
         Ok(())
     }
@@ -2061,6 +2094,7 @@ impl FundingPool {
         env.storage().instance().set(&token_totals_key, &tt);
 
         col.settled = true;
+        col.seized_at = now;
         env.storage()
             .persistent()
             .set(&DataKey::CollateralDeposit(invoice_id), &col);
@@ -2072,7 +2106,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("col_seiz")),
-            (invoice_id, col.depositor, col.amount),
+            (invoice_id, col.depositor, col.amount, admin, now),
         );
         Ok(())
     }
@@ -2627,7 +2661,7 @@ impl FundingPool {
                 .get(&DataKey::InvestorKyc(to.clone()))
                 .unwrap_or(false);
             if !approved {
-                return Err(PoolError::Unauthorized);
+                return Err(PoolError::KycNotApproved);
             }
         }
 
@@ -2797,6 +2831,50 @@ impl FundingPool {
         } else {
             Ok(remaining)
         }
+    }
+
+    pub fn update_invoice_due_date(
+        env: Env,
+        invoice_contract: Address,
+        invoice_id: u64,
+        new_due_date: u64,
+    ) {
+        invoice_contract.require_auth();
+        bump_instance(&env);
+
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("not initialized");
+        if invoice_contract != config.invoice_contract {
+            panic_with_error!(&env, PoolError::Unauthorized);
+        }
+
+        let mut record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
+        if new_due_date <= record.due_date {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let old_due_date = record.due_date;
+        record.due_date = new_due_date;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FundedInvoice(invoice_id), &record);
+        set_funded_invoice_ttl(&env, invoice_id, false);
+        env.events().publish(
+            (EVT, symbol_short!("due_ext")),
+            (
+                invoice_id,
+                old_due_date,
+                new_due_date,
+                env.ledger().timestamp(),
+            ),
+        );
     }
 
     fn require_admin(env: &Env, admin: &Address) -> PoolResult<()> {
@@ -3037,8 +3115,8 @@ impl FundingPool {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        BytesN, Env,
+        testutils::{Address as _, Events, Ledger},
+        BytesN, Env, IntoVal,
     };
 
     #[contract]
@@ -3123,6 +3201,27 @@ mod test {
 
     fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
         soroban_sdk::token::StellarAssetClient::new(env, token_id).mint(to, &amount);
+    }
+
+    fn latest_event(env: &Env) -> (Address, Vec<soroban_sdk::Val>, soroban_sdk::Val) {
+        let events = env.events().all();
+        events.get(events.len() - 1).unwrap()
+    }
+
+    fn latest_event_for(
+        env: &Env,
+        topic: Symbol,
+    ) -> (Address, Vec<soroban_sdk::Val>, soroban_sdk::Val) {
+        let events = env.events().all();
+        let mut index = events.len();
+        while index > 0 {
+            let event = events.get(index - 1).unwrap();
+            if event.1.get(1).unwrap() == topic.clone().into_val(env) {
+                return event;
+            }
+            index -= 1;
+        }
+        panic!("event not found");
     }
 
     #[test]
@@ -3844,6 +3943,31 @@ mod test {
         let col = client.get_collateral_deposit(&1u64).unwrap();
         assert_eq!(col.amount, required);
         assert!(!col.settled);
+        assert_eq!(col.posted_at, env.ledger().timestamp());
+        assert_eq!(col.released_at, 0);
+        assert_eq!(col.seized_at, 0);
+
+        let event = latest_event_for(&env, symbol_short!("col_dep"));
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![
+                &env,
+                EVT.into_val(&env),
+                symbol_short!("col_dep").into_val(&env)
+            ]
+        );
+        assert_eq!(
+            event.2,
+            (
+                1u64,
+                sme.clone(),
+                usdc_id.clone(),
+                required,
+                sme.clone(),
+                env.ledger().timestamp(),
+            )
+                .into_val(&env)
+        );
 
         // Now funding should succeed
         client.fund_invoice(
@@ -3895,8 +4019,31 @@ mod test {
         // sme_balance_after = sme_balance_before - total_due + collateral_returned
         let col = client.get_collateral_deposit(&1u64).unwrap();
         assert!(col.settled);
+        assert_eq!(col.released_at, env.ledger().timestamp());
+        assert_eq!(col.seized_at, 0);
         // Net: sme paid total_due but got collateral back
         assert!(sme_balance_after > sme_balance_before - principal);
+
+        let event = latest_event_for(&env, symbol_short!("col_ret"));
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![
+                &env,
+                EVT.into_val(&env),
+                symbol_short!("col_ret").into_val(&env)
+            ]
+        );
+        assert_eq!(
+            event.2,
+            (
+                1u64,
+                sme.clone(),
+                required,
+                sme.clone(),
+                env.ledger().timestamp(),
+            )
+                .into_val(&env)
+        );
     }
 
     #[test]
@@ -3932,6 +4079,8 @@ mod test {
 
         let col = client.get_collateral_deposit(&1u64).unwrap();
         assert!(col.settled);
+        assert_eq!(col.seized_at, env.ledger().timestamp());
+        assert_eq!(col.released_at, 0);
 
         // Pool value should have increased by collateral amount, deployed reduced
         let tt_after = client.get_token_totals(&usdc_id);
@@ -3940,6 +4089,53 @@ mod test {
             tt_after.total_deployed,
             tt_before.total_deployed - principal
         );
+
+        let event = latest_event_for(&env, symbol_short!("col_seiz"));
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![
+                &env,
+                EVT.into_val(&env),
+                symbol_short!("col_seiz").into_val(&env)
+            ]
+        );
+        assert_eq!(
+            event.2,
+            (
+                1u64,
+                sme.clone(),
+                required,
+                admin.clone(),
+                env.ledger().timestamp(),
+            )
+                .into_val(&env)
+        );
+    }
+
+    #[test]
+    fn test_estimate_repayment_respects_updated_due_date() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let initial_due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &initial_due_date, &usdc_id);
+
+        env.ledger().with_mut(|l| l.timestamp = initial_due_date + (5 * SECS_PER_DAY));
+        let capped_amount = client.estimate_repayment(&1u64);
+
+        let extended_due_date = initial_due_date + (10 * SECS_PER_DAY);
+        client.update_invoice_due_date(&invoice_contract, &1u64, &extended_due_date);
+        let extended_amount = client.estimate_repayment(&1u64);
+
+        assert!(extended_amount > capped_amount);
     }
 
     #[test]
@@ -4581,7 +4777,7 @@ mod test {
         client.set_kyc_required(&admin, &true);
         mint(&env, &usdc_id, &investor, 1_000);
         let result = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+        assert_eq!(result, Err(Ok(PoolError::KycNotApproved)));
     }
 
     #[test]
@@ -4615,7 +4811,7 @@ mod test {
         // Revoke KYC — subsequent deposit must be blocked
         client.set_investor_kyc(&admin, &investor, &false);
         let result = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+        assert_eq!(result, Err(Ok(PoolError::KycNotApproved)));
     }
 
     #[test]
@@ -4632,6 +4828,26 @@ mod test {
 
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.pool_value, 500);
+    }
+
+    #[test]
+    fn test_kyc_required_flag_toggle_blocks_and_restores_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 3_000);
+        client.set_kyc_required(&admin, &true);
+        let blocked = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(blocked, Err(Ok(PoolError::KycNotApproved)));
+
+        client.set_kyc_required(&admin, &false);
+        client.deposit(&investor, &usdc_id, &1_000);
+
+        client.set_kyc_required(&admin, &true);
+        let blocked_again = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(blocked_again, Err(Ok(PoolError::KycNotApproved)));
     }
 
     #[test]
