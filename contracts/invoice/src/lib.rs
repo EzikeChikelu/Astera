@@ -550,9 +550,18 @@ impl InvoiceContract {
         if admin != stored_admin {
             panic!("unauthorized");
         }
+        let old_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireRegisteredDebtor)
+            .unwrap_or(false);
         env.storage()
             .instance()
             .set(&DataKey::RequireRegisteredDebtor, &required);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "debtor_reg_updated")),
+            (admin, old_required, required),
+        );
     }
 
     pub fn pause(env: Env, admin: Address) {
@@ -958,10 +967,19 @@ impl InvoiceContract {
         if admin != stored_admin {
             panic!("unauthorized");
         }
+        let old_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeResolutionWindow)
+            .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionWindow, &window);
         bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "dispute_window_updated")),
+            (admin, old_window, window),
+        );
     }
 
     pub fn get_dispute_window(env: Env) -> u64 {
