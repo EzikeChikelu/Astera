@@ -83,6 +83,26 @@ pub struct CreditScoreData {
 }
 
 #[contracttype]
+#[derive(Clone)]
+pub struct ScoreThresholds {
+    pub excellent: u32,
+    pub very_good: u32,
+    pub good: u32,
+    pub fair: u32,
+}
+
+impl ScoreThresholds {
+    pub fn defaults() -> Self {
+        Self {
+            excellent: 800,
+            very_good: 740,
+            good: 670,
+            fair: 580,
+        }
+    }
+}
+
+#[contracttype]
 pub enum DataKey {
     CreditScore(Address),
     PaymentHistory(Address),
@@ -100,6 +120,8 @@ pub enum DataKey {
     ContractVersion,
     /// Configurable late-payment threshold in days (#430).
     LateThreshold,
+    /// #428: Configurable score thresholds (Excellent, Very Good, Good, Fair)
+    ScoreThresholds,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -491,19 +513,49 @@ impl CreditScoreContract {
     }
 
     pub fn get_score_band(env: Env, score: u32) -> String {
-        if score >= 800 {
+        let thresholds = Self::get_score_thresholds(&env);
+        if score >= thresholds.excellent {
             String::from_str(&env, "Excellent")
-        } else if score >= 740 {
+        } else if score >= thresholds.very_good {
             String::from_str(&env, "Very Good")
-        } else if score >= 670 {
+        } else if score >= thresholds.good {
             String::from_str(&env, "Good")
-        } else if score >= 580 {
+        } else if score >= thresholds.fair {
             String::from_str(&env, "Fair")
-        } else if score >= 500 {
+        } else if score >= BASE_SCORE {
             String::from_str(&env, "Poor")
         } else {
             String::from_str(&env, "Very Poor")
         }
+    }
+
+    pub fn get_score_thresholds(env: &Env) -> ScoreThresholds {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScoreThresholds)
+            .unwrap_or_else(ScoreThresholds::defaults)
+    }
+
+    pub fn set_score_thresholds(env: Env, admin: Address, thresholds: ScoreThresholds) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        // Validate thresholds are strictly decreasing
+        if !(thresholds.excellent > thresholds.very_good
+            && thresholds.very_good > thresholds.good
+            && thresholds.good > thresholds.fair
+            && thresholds.fair > BASE_SCORE)
+        {
+            panic!("invalid score thresholds: must be strictly decreasing");
+        }
+        let old = Self::get_score_thresholds(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoreThresholds, &thresholds);
+        env.events().publish(
+            (EVT, symbol_short!("thresh")),
+            (old.excellent, old.very_good, old.good, old.fair),
+        );
     }
 
     pub fn is_invoice_processed(env: Env, invoice_id: u64) -> bool {
@@ -870,6 +922,7 @@ mod test {
 
         let (client, _admin, _invoice, _pool) = setup(&env);
 
+        // Test with default thresholds: excellent=800, very_good=740, good=670, fair=580
         assert_eq!(
             client.get_score_band(&850),
             String::from_str(&env, "Excellent")
@@ -890,6 +943,60 @@ mod test {
             client.get_score_band(&400),
             String::from_str(&env, "Very Poor")
         );
+    }
+
+    #[test]
+    fn test_set_score_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Test default thresholds
+        let defaults = ScoreThresholds::defaults();
+        assert_eq!(defaults.excellent, 800);
+        assert_eq!(defaults.very_good, 740);
+        assert_eq!(defaults.good, 670);
+        assert_eq!(defaults.fair, 580);
+
+        // Update to new thresholds
+        let new_thresholds = ScoreThresholds {
+            excellent: 750,
+            very_good: 700,
+            good: 650,
+            fair: 600,
+        };
+        client.set_score_thresholds(&admin, &new_thresholds);
+
+        // Verify new thresholds are applied
+        assert_eq!(
+            client.get_score_band(&750),
+            String::from_str(&env, "Excellent")
+        );
+        assert_eq!(
+            client.get_score_band(&700),
+            String::from_str(&env, "Very Good")
+        );
+        assert_eq!(client.get_score_band(&650), String::from_str(&env, "Good"));
+        assert_eq!(client.get_score_band(&600), String::from_str(&env, "Fair"));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid score thresholds")]
+    fn test_set_invalid_score_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Try to set invalid thresholds (not strictly decreasing)
+        let invalid_thresholds = ScoreThresholds {
+            excellent: 700,
+            very_good: 750, // Invalid: greater than excellent
+            good: 650,
+            fair: 600,
+        };
+        client.set_score_thresholds(&admin, &invalid_thresholds);
     }
 
     #[test]
@@ -1066,17 +1173,20 @@ mod test {
         env.mock_all_auths();
         let (client, _admin, _invoice, _pool) = setup(&env);
 
+        // Get the thresholds being used
+        let thresholds = ScoreThresholds::defaults();
+
         for score in MIN_SCORE..=MAX_SCORE {
             let band = client.get_score_band(&score);
-            let expected = if score >= 800 {
+            let expected = if score >= thresholds.excellent {
                 "Excellent"
-            } else if score >= 740 {
+            } else if score >= thresholds.very_good {
                 "Very Good"
-            } else if score >= 670 {
+            } else if score >= thresholds.good {
                 "Good"
-            } else if score >= 580 {
+            } else if score >= thresholds.fair {
                 "Fair"
-            } else if score >= 500 {
+            } else if score >= BASE_SCORE {
                 "Poor"
             } else {
                 "Very Poor"
