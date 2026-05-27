@@ -7,8 +7,6 @@
 // - Oracle: mark_verified(), mark_disputed()
 // - Anyone: cleanup_expired_storage(), read-only view functions (e.g., get_invoice)
 
-
-
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     String, Symbol, Vec,
@@ -67,6 +65,7 @@ pub enum InvoiceError {
     InvoiceNotFound = 3,
     HashMismatch = 4,
     SmeExposureLimitExceeded = 5,
+    AmountOverflow = 6,
 }
 
 #[contracttype]
@@ -140,7 +139,11 @@ fn parse_version() -> ContractVersion {
         .and_then(|s| s.split('-').next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    ContractVersion { major, minor, patch }
+    ContractVersion {
+        major,
+        minor,
+        patch,
+    }
 }
 
 const CURRENT_MIGRATION_VERSION: u32 = 1;
@@ -204,7 +207,9 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     }
 
     invoice.status = InvoiceStatus::Expired;
-    env.storage().persistent().set(&DataKey::Invoice(invoice.id), &invoice);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Invoice(invoice.id), &invoice);
     set_invoice_ttl(env, invoice.id, true);
 
     let mut stats: StorageStats = env
@@ -215,7 +220,8 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     stats.active_invoices = stats.active_invoices.saturating_sub(1);
     env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-    env.events().publish((EVT, symbol_short!("expired")), invoice.id);
+    env.events()
+        .publish((EVT, symbol_short!("expired")), invoice.id);
     invoice
 }
 
@@ -244,20 +250,34 @@ fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
-    let ttl = if is_completed { COMPLETED_INVOICE_TTL } else { ACTIVE_INVOICE_TTL };
-    env.storage().persistent().extend_ttl(&DataKey::Invoice(id), ttl, ttl);
+    let ttl = if is_completed {
+        COMPLETED_INVOICE_TTL
+    } else {
+        ACTIVE_INVOICE_TTL
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::Invoice(id), ttl, ttl);
 }
 
 fn get_max_outstanding_per_sme(env: &Env) -> i128 {
-    env.storage().instance().get(&DataKey::MaxOutstandingPerSme).unwrap_or(i128::MAX)
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxOutstandingPerSme)
+        .unwrap_or(i128::MAX)
 }
 
 fn get_sme_outstanding(env: &Env, sme: &Address) -> i128 {
-    env.storage().persistent().get(&DataKey::SmeOutstanding(sme.clone())).unwrap_or(0)
+    env.storage()
+        .persistent()
+        .get(&DataKey::SmeOutstanding(sme.clone()))
+        .unwrap_or(0)
 }
 
 fn set_sme_outstanding(env: &Env, sme: &Address, value: i128) {
-    env.storage().persistent().set(&DataKey::SmeOutstanding(sme.clone()), &value);
+    env.storage()
+        .persistent()
+        .set(&DataKey::SmeOutstanding(sme.clone()), &value);
 }
 
 fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
@@ -267,13 +287,17 @@ fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
 
 fn write_u64_decimal(buf: &mut [u8], mut n: u64) -> usize {
     if n == 0 {
-        if buf.is_empty() { return 0; }
+        if buf.is_empty() {
+            return 0;
+        }
         buf[0] = b'0';
         return 1;
     }
     let mut i = 0usize;
     while n > 0 {
-        if i >= buf.len() { break; }
+        if i >= buf.len() {
+            break;
+        }
         buf[i] = b'0' + (n % 10) as u8;
         n /= 10;
         i += 1;
@@ -297,7 +321,10 @@ fn concat_prefix_u64(env: &Env, prefix: &[u8], id: u64) -> String {
 }
 
 fn load_invoice(env: &Env, id: u64) -> Invoice {
-    env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found")
+    env.storage()
+        .persistent()
+        .get(&DataKey::Invoice(id))
+        .expect("invoice not found")
 }
 
 #[contract]
@@ -316,53 +343,126 @@ impl InvoiceContract {
         if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
-        if max_invoice_amount <= 0 { panic!("max invoice amount must be positive"); }
-        if expiration_duration_secs == 0 { panic!("expiration duration must be non-zero"); }
-        if grace_period_days > 90 { panic!("grace period cannot exceed 90 days"); }
+        if max_invoice_amount <= 0 {
+            panic!("max invoice amount must be positive");
+        }
+        if expiration_duration_secs == 0 {
+            panic!("expiration duration must be non-zero");
+        }
+        if grace_period_days > 90 {
+            panic!("grace period cannot exceed 90 days");
+        }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Pool, &pool);
         env.storage().instance().set(&DataKey::InvoiceCount, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
-        env.storage().instance().set(&DataKey::StorageStats, &StorageStats::default());
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageStats, &StorageStats::default());
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.storage().instance().set(&DataKey::GracePeriodDays, &grace_period_days);
-        env.storage().instance().set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
-        env.storage().instance().set(&DataKey::MaxOutstandingPerSme, &i128::MAX);
-        env.storage().instance().set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
-        env.storage().instance().set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
-        env.storage().instance().set(&DataKey::ContractVersion, &parse_version());
-        env.storage().instance().set(&DataKey::MigrationVersion, &0u32);
-        env.storage().instance().set(&DataKey::RequireRegisteredDebtor, &false);
-        env.storage().instance().set(&DataKey::DebtorIds, &Vec::<String>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriodDays, &grace_period_days);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOutstandingPerSme, &i128::MAX);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
+        env.storage().instance().set(
+            &DataKey::DisputeResolutionWindow,
+            &DEFAULT_DISPUTE_RESOLUTION_WINDOW,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &parse_version());
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireRegisteredDebtor, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::DebtorIds, &Vec::<String>::new(&env));
         bump_instance(&env);
     }
 
     pub fn version(env: Env) -> ContractVersion {
-        env.storage().instance().get(&DataKey::ContractVersion).unwrap_or_else(parse_version)
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(parse_version)
     }
 
     pub fn migration_version(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::MigrationVersion).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0)
     }
 
     pub fn run_migration(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        let current: u32 = env.storage().instance().get(&DataKey::MigrationVersion).unwrap_or(0);
-        if current >= CURRENT_MIGRATION_VERSION { return; }
-        env.storage().instance().set(&DataKey::MigrationVersion, &CURRENT_MIGRATION_VERSION);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0);
+        if current >= CURRENT_MIGRATION_VERSION {
+            return;
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &CURRENT_MIGRATION_VERSION);
     }
 
-    pub fn register_debtor(env: Env, admin: Address, debtor_id: String, debtor_name: String, max_exposure: i128) {
+    pub fn register_debtor(
+        env: Env,
+        admin: Address,
+        debtor_id: String,
+        debtor_name: String,
+        max_exposure: i128,
+    ) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if max_exposure <= 0 { panic!("max_exposure must be positive"); }
-        let record = DebtorRecord { debtor_id: debtor_id.clone(), debtor_name, max_exposure, current_exposure: 0, is_active: true };
-        env.storage().persistent().set(&DataKey::DebtorRecord(debtor_id.clone()), &record);
-        let mut ids: Vec<String> = env.storage().instance().get(&DataKey::DebtorIds).unwrap_or_else(|| Vec::new(&env));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if max_exposure <= 0 {
+            panic!("max_exposure must be positive");
+        }
+        let record = DebtorRecord {
+            debtor_id: debtor_id.clone(),
+            debtor_name,
+            max_exposure,
+            current_exposure: 0,
+            is_active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id.clone()), &record);
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env));
         if !ids.contains(&debtor_id) {
             ids.push_back(debtor_id);
             env.storage().instance().set(&DataKey::DebtorIds, &ids);
@@ -371,32 +471,64 @@ impl InvoiceContract {
 
     pub fn deactivate_debtor(env: Env, admin: Address, debtor_id: String) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        let mut record: DebtorRecord = env.storage().persistent().get(&DataKey::DebtorRecord(debtor_id.clone())).expect("debtor not found");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let mut record: DebtorRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id.clone()))
+            .expect("debtor not found");
         record.is_active = false;
-        env.storage().persistent().set(&DataKey::DebtorRecord(debtor_id), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id), &record);
     }
 
     pub fn get_debtor(env: Env, debtor_id: String) -> DebtorRecord {
-        env.storage().persistent().get(&DataKey::DebtorRecord(debtor_id)).expect("debtor not found")
+        env.storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id))
+            .expect("debtor not found")
     }
 
     pub fn list_debtors(env: Env) -> Vec<String> {
-        env.storage().instance().get(&DataKey::DebtorIds).unwrap_or_else(|| Vec::new(&env))
+        env.storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn set_require_registered_debtor(env: Env, admin: Address, required: bool) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        env.storage().instance().set(&DataKey::RequireRegisteredDebtor, &required);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireRegisteredDebtor, &required);
     }
 
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
         env.events().publish((EVT, symbol_short!("paused")), admin);
@@ -404,59 +536,134 @@ impl InvoiceContract {
 
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
-        env.events().publish((EVT, symbol_short!("unpaused")), admin);
+        env.events()
+            .publish((EVT, symbol_short!("unpaused")), admin);
     }
 
     pub fn is_paused(env: Env) -> bool {
         bump_instance(&env);
-        env.storage().instance().get::<DataKey, bool>(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
         admin.require_auth();
         require_not_paused(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
         env.storage().instance().set(&DataKey::Oracle, &oracle);
         bump_instance(&env);
-        env.events().publish((EVT, symbol_short!("set_orc")), (admin, oracle));
+        env.events()
+            .publish((EVT, symbol_short!("set_orc")), (admin, oracle));
     }
 
-    pub fn create_invoice(env: Env, owner: Address, debtor: String, amount: i128, due_date: u64, description: String, verification_hash: String) -> u64 {
-        Self::create_invoice_with_metadata(env, owner, debtor, amount, due_date, description, verification_hash, None)
+    pub fn create_invoice(
+        env: Env,
+        owner: Address,
+        debtor: String,
+        amount: i128,
+        due_date: u64,
+        description: String,
+        verification_hash: String,
+    ) -> u64 {
+        Self::create_invoice_with_metadata(
+            env,
+            owner,
+            debtor,
+            amount,
+            due_date,
+            description,
+            verification_hash,
+            None,
+        )
     }
 
-    pub fn create_invoice_with_metadata(env: Env, owner: Address, debtor: String, amount: i128, due_date: u64, description: String, verification_hash: String, metadata_uri: Option<String>) -> u64 {
+    pub fn create_invoice_with_metadata(
+        env: Env,
+        owner: Address,
+        debtor: String,
+        amount: i128,
+        due_date: u64,
+        description: String,
+        verification_hash: String,
+        metadata_uri: Option<String>,
+    ) -> u64 {
         owner.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
 
         if let Some(uri) = metadata_uri.as_ref() {
-            if !is_valid_metadata_uri(&env, uri) { panic!("invalid metadata uri"); }
+            if !is_valid_metadata_uri(&env, uri) {
+                panic!("invalid metadata uri");
+            }
         }
-        if amount <= 0 { panic!("amount must be positive"); }
-        let max_invoice_amount: i128 = env.storage().instance().get(&DataKey::MaxInvoiceAmount).expect("max invoice amount not set");
-        if amount > max_invoice_amount { panic!("invoice amount exceeds maximum"); }
-        if due_date <= env.ledger().timestamp() { panic!("due date must be in the future"); }
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let max_invoice_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxInvoiceAmount)
+            .expect("max invoice amount not set");
+        if amount > max_invoice_amount {
+            panic!("invoice amount exceeds maximum");
+        }
+        if due_date <= env.ledger().timestamp() {
+            panic!("due date must be in the future");
+        }
 
         let outstanding = get_sme_outstanding(&env, &owner);
         let max_outstanding = get_max_outstanding_per_sme(&env);
-        if outstanding.saturating_add(amount) > max_outstanding { panic!("SmeExposureLimitExceeded"); }
-
-        let require_registered: bool = env.storage().instance().get(&DataKey::RequireRegisteredDebtor).unwrap_or(false);
-        if require_registered {
-            let mut record: DebtorRecord = env.storage().persistent().get(&DataKey::DebtorRecord(debtor.clone())).expect("debtor not registered");
-            if !record.is_active { panic!("debtor is not active"); }
-            if record.current_exposure + amount > record.max_exposure { panic!("invoice would exceed debtor exposure limit"); }
-            record.current_exposure += amount;
-            env.storage().persistent().set(&DataKey::DebtorRecord(debtor.clone()), &record);
+        if outstanding.saturating_add(amount) > max_outstanding {
+            panic!("SmeExposureLimitExceeded");
         }
 
-        let daily_limit: u32 = env.storage().instance().get(&DataKey::DailyInvoiceLimit).unwrap_or(MAX_INVOICES_PER_DAY);
+        let require_registered: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireRegisteredDebtor)
+            .unwrap_or(false);
+        if require_registered {
+            let mut record: DebtorRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::DebtorRecord(debtor.clone()))
+                .expect("debtor not registered");
+            if !record.is_active {
+                panic!("debtor is not active");
+            }
+            if record.current_exposure + amount > record.max_exposure {
+                panic!("invoice would exceed debtor exposure limit");
+            }
+            record.current_exposure += amount;
+            env.storage()
+                .persistent()
+                .set(&DataKey::DebtorRecord(debtor.clone()), &record);
+        }
+
+        let daily_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DailyInvoiceLimit)
+            .unwrap_or(MAX_INVOICES_PER_DAY);
         let now = env.ledger().timestamp();
         let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
         let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
@@ -466,35 +673,70 @@ impl InvoiceContract {
             daily_count = 0;
             env.storage().instance().set(&daily_reset_key, &now);
         }
-        if daily_count >= daily_limit { panic!("daily invoice limit exceeded"); }
+        if daily_count >= daily_limit {
+            panic!("daily invoice limit exceeded");
+        }
         daily_count += 1;
         env.storage().instance().set(&daily_count_key, &daily_count);
 
-        let count: u64 = env.storage().instance().get(&DataKey::InvoiceCount).unwrap_or(0);
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0);
         let id = count + 1;
-        let pool_addr: Address = env.storage().instance().get(&DataKey::Pool).expect("pool not configured");
+        let pool_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("pool not configured");
         let empty_str = String::from_str(&env, "");
         let has_oracle = env.storage().instance().has(&DataKey::Oracle);
-        let initial_status = if has_oracle { InvoiceStatus::AwaitingVerification } else { InvoiceStatus::Pending };
-
-        let invoice = Invoice {
-            id, owner: owner.clone(), debtor, amount, due_date, description,
-            status: initial_status, created_at: env.ledger().timestamp(),
-            funded_at: 0, paid_at: 0, pool_contract: pool_addr, verification_hash,
-            metadata_uri: metadata_uri.clone(), oracle_verified: false,
-            dispute_reason: empty_str, disputed_at: 0, grace_period_override: None,
+        let initial_status = if has_oracle {
+            InvoiceStatus::AwaitingVerification
+        } else {
+            InvoiceStatus::Pending
         };
 
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        let invoice = Invoice {
+            id,
+            owner: owner.clone(),
+            debtor,
+            amount,
+            due_date,
+            description,
+            status: initial_status,
+            created_at: env.ledger().timestamp(),
+            funded_at: 0,
+            paid_at: 0,
+            pool_contract: pool_addr,
+            verification_hash,
+            metadata_uri: metadata_uri.clone(),
+            oracle_verified: false,
+            dispute_reason: empty_str,
+            disputed_at: 0,
+            grace_period_override: None,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
         env.storage().instance().set(&DataKey::InvoiceCount, &id);
 
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.total_invoices += 1;
         stats.active_invoices += 1;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish((EVT, symbol_short!("created")), (id, owner, amount, metadata_uri, env.ledger().timestamp()));
+        env.events().publish(
+            (EVT, symbol_short!("created")),
+            (id, owner, amount, metadata_uri, env.ledger().timestamp()),
+        );
         id
     }
 
@@ -502,28 +744,65 @@ impl InvoiceContract {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if limit == 0 { panic!("daily invoice limit must be positive"); }
-        if limit > MAX_DAILY_INVOICE_LIMIT { panic!("daily invoice limit too high"); }
-        env.storage().instance().set(&DataKey::DailyInvoiceLimit, &limit);
-        env.events().publish((EVT, symbol_short!("set_limit")), (admin, limit));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if limit == 0 {
+            panic!("daily invoice limit must be positive");
+        }
+        if limit > MAX_DAILY_INVOICE_LIMIT {
+            panic!("daily invoice limit too high");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DailyInvoiceLimit, &limit);
+        env.events()
+            .publish((EVT, symbol_short!("set_limit")), (admin, limit));
     }
 
     pub fn get_daily_invoice_limit(env: Env) -> u32 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::DailyInvoiceLimit).unwrap_or(MAX_INVOICES_PER_DAY)
+        env.storage()
+            .instance()
+            .get(&DataKey::DailyInvoiceLimit)
+            .unwrap_or(MAX_INVOICES_PER_DAY)
     }
 
-    pub fn verify_invoice(env: Env, id: u64, oracle: Address, approved: bool, reason: String, oracle_hash: String) -> Result<(), InvoiceError> {
+    pub fn verify_invoice(
+        env: Env,
+        id: u64,
+        oracle: Address,
+        approved: bool,
+        reason: String,
+        oracle_hash: String,
+    ) -> Result<(), InvoiceError> {
         oracle.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_oracle: Address = env.storage().instance().get(&DataKey::Oracle).expect("oracle not configured");
-        if oracle != stored_oracle { panic!("unauthorized oracle"); }
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::AwaitingVerification { panic!("invoice is not awaiting verification"); }
-        if invoice.verification_hash != oracle_hash { return Err(InvoiceError::HashMismatch); }
+        let stored_oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracle)
+            .expect("oracle not configured");
+        if oracle != stored_oracle {
+            panic!("unauthorized oracle");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::AwaitingVerification {
+            panic!("invoice is not awaiting verification");
+        }
+        if invoice.verification_hash != oracle_hash {
+            return Err(InvoiceError::HashMismatch);
+        }
         if approved {
             invoice.status = InvoiceStatus::Verified;
             invoice.oracle_verified = true;
@@ -532,12 +811,18 @@ impl InvoiceContract {
             invoice.dispute_reason = reason;
             invoice.disputed_at = env.ledger().timestamp();
         }
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
         if approved {
-            env.events().publish((EVT, symbol_short!("verified")), (id, oracle_hash));
+            env.events()
+                .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
         } else {
-            env.events().publish((EVT, symbol_short!("disputed")), (id, env.ledger().timestamp()));
+            env.events().publish(
+                (EVT, symbol_short!("disputed")),
+                (id, env.ledger().timestamp()),
+            );
         }
         Ok(())
     }
@@ -546,14 +831,32 @@ impl InvoiceContract {
         caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::Disputed { panic!("invoice is not disputed"); }
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        let oracle: Address = env.storage().instance().get(&DataKey::Oracle).expect("oracle not configured");
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Disputed {
+            panic!("invoice is not disputed");
+        }
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracle)
+            .expect("oracle not configured");
         if caller == oracle {
             // Oracle can always resolve
         } else if caller == admin {
-            let window: u64 = env.storage().instance().get(&DataKey::DisputeResolutionWindow).unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
+            let window: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::DisputeResolutionWindow)
+                .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
             if env.ledger().timestamp() < invoice.disputed_at.saturating_add(window) {
                 panic!("dispute resolution window not yet passed for admin");
             }
@@ -570,126 +873,250 @@ impl InvoiceContract {
                 invoice.status = InvoiceStatus::Cancelled;
                 let sme = invoice.owner.clone();
                 decrease_sme_outstanding(&env, &sme, invoice.amount);
-                let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+                let mut stats: StorageStats = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::StorageStats)
+                    .unwrap_or_default();
                 stats.active_invoices = stats.active_invoices.saturating_sub(1);
                 env.storage().instance().set(&DataKey::StorageStats, &stats);
                 set_invoice_ttl(&env, id, true);
             }
         }
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
-        env.events().publish((EVT, symbol_short!("resolved")), (id, resolution, caller));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        env.events()
+            .publish((EVT, symbol_short!("resolved")), (id, resolution, caller));
     }
 
     pub fn set_dispute_window(env: Env, admin: Address, window: u64) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        env.storage().instance().set(&DataKey::DisputeResolutionWindow, &window);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &window);
         bump_instance(&env);
     }
 
     pub fn get_dispute_window(env: Env) -> u64 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::DisputeResolutionWindow).unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeResolutionWindow)
+            .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
     }
 
-    pub fn mark_funded(env: Env, id: u64, pool: Address) {
+    pub fn mark_funded(env: Env, id: u64, pool: Address) -> Result<(), InvoiceError> {
         pool.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let authorized_pool: Address = env.storage().instance().get(&DataKey::Pool).expect("not initialized");
-        if pool != authorized_pool { panic!("unauthorized pool"); }
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
         invoice = maybe_expire_pending_invoice(&env, invoice);
-        if invoice.status == InvoiceStatus::Expired { panic!("invoice is expired"); }
-        let is_fundable = invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
-        if !is_fundable { panic!("invoice is not in fundable state"); }
+        if invoice.status == InvoiceStatus::Expired {
+            panic!("invoice is expired");
+        }
+        let is_fundable =
+            invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
+        if !is_fundable {
+            panic!("invoice is not in fundable state");
+        }
         invoice.status = InvoiceStatus::Funded;
         invoice.funded_at = env.ledger().timestamp();
         invoice.pool_contract = pool;
         let sme = invoice.owner.clone();
         let current_outstanding = get_sme_outstanding(&env, &sme);
-        let new_outstanding = current_outstanding.saturating_add(invoice.amount);
+        let new_outstanding = current_outstanding
+            .checked_add(invoice.amount)
+            .ok_or(InvoiceError::AmountOverflow)?;
         let max_outstanding = get_max_outstanding_per_sme(&env);
-        if new_outstanding > max_outstanding { panic!("SmeExposureLimitExceeded"); }
+        if new_outstanding > max_outstanding {
+            return Err(InvoiceError::SmeExposureLimitExceeded);
+        }
         set_sme_outstanding(&env, &sme, new_outstanding);
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
-        env.events().publish((EVT, symbol_short!("funded")), (id, env.ledger().timestamp()));
+        env.events().publish(
+            (EVT, symbol_short!("funded")),
+            (id, env.ledger().timestamp()),
+        );
+        Ok(())
     }
 
     pub fn mark_paid(env: Env, id: u64, pool: Address) {
         pool.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let authorized_pool: Address = env.storage().instance().get(&DataKey::Pool).expect("not initialized");
-        if pool != authorized_pool { panic!("unauthorized: only pool can mark paid"); }
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::Funded { panic!("invoice is not funded"); }
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized: only pool can mark paid");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("invoice is not funded");
+        }
         let pool_client = PoolClient::new(&env, &pool);
-        if !pool_client.is_invoice_repaid(&id) { panic!("repayment not verified by pool contract"); }
+        if !pool_client.is_invoice_repaid(&id) {
+            panic!("repayment not verified by pool contract");
+        }
         invoice.status = InvoiceStatus::Paid;
         invoice.paid_at = env.ledger().timestamp();
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, true);
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        env.events().publish((EVT, symbol_short!("paid")), (id, env.ledger().timestamp()));
+        env.events()
+            .publish((EVT, symbol_short!("paid")), (id, env.ledger().timestamp()));
     }
 
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
         pool.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let authorized_pool: Address = env.storage().instance().get(&DataKey::Pool).expect("not initialized");
-        if pool != authorized_pool { panic!("unauthorized pool"); }
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::Funded { panic!("invoice is not funded"); }
-        let global_grace: u32 = env.storage().instance().get(&DataKey::GracePeriodDays).unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("invoice is not funded");
+        }
+        let global_grace: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         let grace_period_days = invoice.grace_period_override.unwrap_or(global_grace);
         let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
         let now = env.ledger().timestamp();
         let default_at = invoice.due_date + grace_period_secs;
-        if now < default_at { panic!("grace period has not elapsed: default available at {}", default_at); }
+        if now < default_at {
+            panic!(
+                "grace period has not elapsed: default available at {}",
+                default_at
+            );
+        }
         invoice.status = InvoiceStatus::Defaulted;
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, true);
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        env.events().publish((EVT, symbol_short!("default")), (id, env.ledger().timestamp()));
+        env.events().publish(
+            (EVT, symbol_short!("default")),
+            (id, env.ledger().timestamp()),
+        );
     }
 
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
         invoice = maybe_expire_pending_invoice(&env, invoice);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         let can_cancel = if caller == invoice.owner {
-            matches!(invoice.status, InvoiceStatus::Pending | InvoiceStatus::AwaitingVerification | InvoiceStatus::Verified)
+            matches!(
+                invoice.status,
+                InvoiceStatus::Pending
+                    | InvoiceStatus::AwaitingVerification
+                    | InvoiceStatus::Verified
+            )
         } else if caller == admin {
-            matches!(invoice.status, InvoiceStatus::Pending | InvoiceStatus::AwaitingVerification | InvoiceStatus::Verified | InvoiceStatus::Disputed)
-        } else { false };
+            matches!(
+                invoice.status,
+                InvoiceStatus::Pending
+                    | InvoiceStatus::AwaitingVerification
+                    | InvoiceStatus::Verified
+                    | InvoiceStatus::Disputed
+            )
+        } else {
+            false
+        };
         if !can_cancel {
-            if caller != invoice.owner && caller != admin { panic!("unauthorized"); }
+            if caller != invoice.owner && caller != admin {
+                panic!("unauthorized");
+            }
             panic!("invalid status transition");
         }
         invoice.status = InvoiceStatus::Cancelled;
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, true);
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        env.events().publish((EVT, symbol_short!("cancelled")), (id, caller));
+        env.events()
+            .publish((EVT, symbol_short!("cancelled")), (id, caller));
     }
 
     /// Admin-only single-entry cleanup (existing behaviour, unchanged).
@@ -697,16 +1124,32 @@ impl InvoiceContract {
         caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if caller != admin { panic!("unauthorized"); }
-        let invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if caller != admin {
+            panic!("unauthorized");
+        }
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
         let is_completed = invoice.status == InvoiceStatus::Paid
             || invoice.status == InvoiceStatus::Defaulted
             || invoice.status == InvoiceStatus::Cancelled
             || invoice.status == InvoiceStatus::Expired;
-        if !is_completed { panic!("can only cleanup completed invoices"); }
+        if !is_completed {
+            panic!("can only cleanup completed invoices");
+        }
         env.storage().persistent().remove(&DataKey::Invoice(id));
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.cleaned_invoices += 1;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish((EVT, symbol_short!("cleanup")), id);
@@ -745,7 +1188,10 @@ impl InvoiceContract {
         bump_instance(&env);
 
         if ids.len() > MAX_CLEANUP_BATCH {
-            panic!("cleanup batch exceeds maximum of {} entries", MAX_CLEANUP_BATCH);
+            panic!(
+                "cleanup batch exceeds maximum of {} entries",
+                MAX_CLEANUP_BATCH
+            );
         }
 
         let mut removed: u32 = 0;
@@ -787,10 +1233,8 @@ impl InvoiceContract {
             stats.cleaned_invoices = stats.cleaned_invoices.saturating_add(removed as u64);
             env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-            env.events().publish(
-                (EVT, symbol_short!("st_clean")),
-                (removed, caller),
-            );
+            env.events()
+                .publish((EVT, symbol_short!("st_clean")), (removed, caller));
         }
 
         removed
@@ -818,7 +1262,8 @@ impl InvoiceContract {
             .get(&DataKey::StorageStats)
             .unwrap_or_default();
 
-        (stats.active_invoices as u64)
+        stats
+            .active_invoices
             .saturating_mul(STROOPS_PER_LEDGER_PER_ENTRY)
             .saturating_mul(LEDGERS_PER_MONTH)
     }
@@ -847,31 +1292,61 @@ impl InvoiceContract {
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);
         let image = String::from_str(&env, "https://astera.io/metadata/invoice/placeholder.svg");
-        InvoiceMetadata { name, description: inv.description.clone(), image, amount: inv.amount, debtor: inv.debtor.clone(), due_date: inv.due_date, status: inv.status.clone(), symbol, decimals: 7 }
+        InvoiceMetadata {
+            name,
+            description: inv.description.clone(),
+            image,
+            amount: inv.amount,
+            debtor: inv.debtor.clone(),
+            due_date: inv.due_date,
+            status: inv.status.clone(),
+            symbol,
+            decimals: 7,
+        }
     }
 
     pub fn get_invoice_count(env: Env) -> u64 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::InvoiceCount).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0)
     }
 
     pub fn get_storage_stats(env: Env) -> StorageStats {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default()
+        env.storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default()
     }
 
     pub fn check_expiration(env: Env, id: u64) -> bool {
         bump_instance(&env);
         let inv = load_invoice(&env, id);
-        if inv.status != InvoiceStatus::Pending { return false; }
-        let expiration_duration_secs: u64 = env.storage().instance().get(&DataKey::ExpirationDurationSecs).unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
+        if inv.status != InvoiceStatus::Pending {
+            return false;
+        }
+        let expiration_duration_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExpirationDurationSecs)
+            .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
         let now = env.ledger().timestamp();
-        if now <= inv.created_at.saturating_add(expiration_duration_secs) { return false; }
+        if now <= inv.created_at.saturating_add(expiration_duration_secs) {
+            return false;
+        }
         let mut expired_inv = inv;
         expired_inv.status = InvoiceStatus::Expired;
-        env.storage().persistent().set(&DataKey::Invoice(id), &expired_inv);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &expired_inv);
         set_invoice_ttl(&env, id, true);
-        let mut stats: StorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish((EVT, symbol_short!("expired")), id);
@@ -881,11 +1356,15 @@ impl InvoiceContract {
     pub fn batch_check_expiration(env: Env, ids: Vec<u64>) -> u32 {
         bump_instance(&env);
         let batch_size = ids.len();
-        if batch_size > 20 { panic!("batch_check_expiration: max 20 IDs per call"); }
+        if batch_size > 20 {
+            panic!("batch_check_expiration: max 20 IDs per call");
+        }
         let mut expired_count = 0u32;
         for i in 0..batch_size {
             let id = ids.get(i).unwrap();
-            if Self::check_expiration(env.clone(), id) { expired_count += 1; }
+            if Self::check_expiration(env.clone(), id) {
+                expired_count += 1;
+            }
         }
         expired_count
     }
@@ -893,37 +1372,72 @@ impl InvoiceContract {
     pub fn set_grace_period(env: Env, admin: Address, days: u32) {
         admin.require_auth();
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if days > 90 { panic!("grace period cannot exceed 90 days"); }
-        env.storage().instance().set(&DataKey::GracePeriodDays, &days);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if days > 90 {
+            panic!("grace period cannot exceed 90 days");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriodDays, &days);
     }
 
     pub fn set_max_invoice_amount(env: Env, admin: Address, max_invoice_amount: i128) {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if max_invoice_amount <= 0 { panic!("max invoice amount must be positive"); }
-        env.storage().instance().set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
-        env.events().publish((EVT, symbol_short!("set_max")), (admin, max_invoice_amount));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if max_invoice_amount <= 0 {
+            panic!("max invoice amount must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
+        env.events()
+            .publish((EVT, symbol_short!("set_max")), (admin, max_invoice_amount));
     }
 
     pub fn get_max_invoice_amount(env: Env) -> i128 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::MaxInvoiceAmount).expect("max invoice amount not set")
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxInvoiceAmount)
+            .expect("max invoice amount not set")
     }
 
     pub fn set_max_sme_outstanding(env: Env, admin: Address, max: i128) {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if max <= 0 { panic!("max outstanding must be positive"); }
-        env.storage().instance().set(&DataKey::MaxOutstandingPerSme, &max);
-        env.events().publish((EVT, symbol_short!("sme_max")), (admin, max));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if max <= 0 {
+            panic!("max outstanding must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOutstandingPerSme, &max);
+        env.events()
+            .publish((EVT, symbol_short!("sme_max")), (admin, max));
     }
 
     pub fn get_sme_outstanding(env: Env, sme: Address) -> i128 {
@@ -935,43 +1449,94 @@ impl InvoiceContract {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        if expiration_duration_secs == 0 { panic!("expiration duration must be non-zero"); }
-        env.storage().instance().set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
-        env.events().publish((EVT, symbol_short!("set_exp")), (admin, expiration_duration_secs));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if expiration_duration_secs == 0 {
+            panic!("expiration duration must be non-zero");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
+        env.events().publish(
+            (EVT, symbol_short!("set_exp")),
+            (admin, expiration_duration_secs),
+        );
     }
 
     pub fn get_expiration_duration(env: Env) -> u64 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::ExpirationDurationSecs).unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS)
+        env.storage()
+            .instance()
+            .get(&DataKey::ExpirationDurationSecs)
+            .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS)
     }
 
     pub fn get_grace_period(env: Env) -> u32 {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::GracePeriodDays).unwrap_or(DEFAULT_GRACE_PERIOD_DAYS)
+        env.storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS)
     }
 
     pub fn set_invoice_grace_period(env: Env, admin: Address, id: u64, days: u32) {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized: caller is not admin"); }
-        if days > MAX_GRACE_PERIOD_OVERRIDE_DAYS { panic!("grace period override {} days exceeds maximum of {} days", days, MAX_GRACE_PERIOD_OVERRIDE_DAYS); }
-        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::Funded { panic!("grace period override only allowed on Funded invoices"); }
-        let global_grace: u32 = env.storage().instance().get(&DataKey::GracePeriodDays).unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+        if days > MAX_GRACE_PERIOD_OVERRIDE_DAYS {
+            panic!(
+                "grace period override {} days exceeds maximum of {} days",
+                days, MAX_GRACE_PERIOD_OVERRIDE_DAYS
+            );
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("grace period override only allowed on Funded invoices");
+        }
+        let global_grace: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         let old_days = invoice.grace_period_override.unwrap_or(global_grace);
         invoice.grace_period_override = Some(days);
-        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
-        env.events().publish((EVT, symbol_short!("gp_upd")), (id, old_days, days));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        env.events()
+            .publish((EVT, symbol_short!("gp_upd")), (id, old_days, days));
     }
 
     pub fn get_invoice_grace_period(env: Env, id: u64) -> u32 {
         bump_instance(&env);
-        let invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        let global_grace: u32 = env.storage().instance().get(&DataKey::GracePeriodDays).unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        let global_grace: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         invoice.grace_period_override.unwrap_or(global_grace)
     }
 
@@ -979,43 +1544,91 @@ impl InvoiceContract {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
         env.storage().instance().set(&DataKey::Pool, &pool);
-        env.events().publish((EVT, symbol_short!("set_pool")), (admin, pool));
+        env.events()
+            .publish((EVT, symbol_short!("set_pool")), (admin, pool));
     }
 
     pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
         admin.require_auth();
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        env.storage().instance().set(&DataKey::ProposedWasmHash, &wasm_hash);
-        env.storage().instance().set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
-        env.events().publish((EVT, symbol_short!("upg_prop")), (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS));
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposedWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, symbol_short!("upg_prop")),
+            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+        );
     }
 
     pub fn execute_upgrade(env: Env, admin: Address) {
         admin.require_auth();
         bump_instance(&env);
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin { panic!("unauthorized"); }
-        let scheduled_at: u64 = env.storage().instance().get(&DataKey::UpgradeScheduledAt).expect("no upgrade proposed");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let scheduled_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeScheduledAt)
+            .expect("no upgrade proposed");
         let now = env.ledger().timestamp();
-        if now < scheduled_at + UPGRADE_TIMELOCK_SECS { panic!("upgrade timelock not expired"); }
-        let wasm_hash: BytesN<32> = env.storage().instance().get(&DataKey::ProposedWasmHash).expect("no wasm hash proposed");
+        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+            panic!("upgrade timelock not expired");
+        }
+        let wasm_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposedWasmHash)
+            .expect("no wasm hash proposed");
         env.deployer().update_current_contract_wasm(wasm_hash);
-        env.events().publish((EVT, symbol_short!("upgraded")), (admin, now));
+        env.events()
+            .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 
     pub fn check_default_warning(env: Env, id: u64) -> bool {
-        let invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("invoice not found");
-        if invoice.status != InvoiceStatus::Funded { return false; }
-        let grace_period_days: u32 = env.storage().instance().get(&DataKey::GracePeriodDays).unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            return false;
+        }
+        let grace_period_days: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         let default_at = invoice.due_date + grace_period_days as u64 * SECS_PER_DAY;
         let now = env.ledger().timestamp();
         if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
-            env.events().publish((EVT, symbol_short!("def_warn")), (id, default_at));
+            env.events()
+                .publish((EVT, symbol_short!("def_warn")), (id, default_at));
             return true;
         }
         false
@@ -1036,7 +1649,9 @@ mod test {
         pub struct MockPoolTrue;
         #[contractimpl]
         impl MockPoolTrue {
-            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool { true }
+            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
+                true
+            }
         }
     }
 
@@ -1046,7 +1661,9 @@ mod test {
         pub struct MockPoolFalse;
         #[contractimpl]
         impl MockPoolFalse {
-            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool { false }
+            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
+                false
+            }
         }
     }
 
@@ -1056,11 +1673,25 @@ mod test {
         let admin = Address::generate(env);
         let pool = env.register(mock_pool_true::MockPoolTrue, ());
         let sme = Address::generate(env);
-        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &90u32);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &90u32,
+        );
         (client, admin, pool, sme)
     }
 
-    fn setup_with_oracle(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address, Address) {
+    fn setup_with_oracle(
+        env: &Env,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let (client, admin, pool, sme) = setup(env);
         let oracle = Address::generate(env);
         client.set_oracle(&admin, &oracle);
@@ -1073,9 +1704,21 @@ mod test {
 
     // ── #290: cleanup_expired_storage tests ──────────────────────────────────
 
-    fn make_invoice(env: &Env, client: &InvoiceContractClient<'_>, sme: &Address, amount: i128) -> u64 {
+    fn make_invoice(
+        env: &Env,
+        client: &InvoiceContractClient<'_>,
+        sme: &Address,
+        amount: i128,
+    ) -> u64 {
         let due = env.ledger().timestamp() + 86_400;
-        client.create_invoice(sme, &String::from_str(env, "Debtor"), &amount, &due, &String::from_str(env, "desc"), &String::from_str(env, "hash"))
+        client.create_invoice(
+            sme,
+            &String::from_str(env, "Debtor"),
+            &amount,
+            &due,
+            &String::from_str(env, "desc"),
+            &String::from_str(env, "hash"),
+        )
     }
 
     #[test]
@@ -1113,9 +1756,22 @@ mod test {
         let admin = Address::generate(&env);
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
-        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &1u32);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &1u32,
+        );
         let due = env.ledger().timestamp() + 86_400;
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000, &due, &String::from_str(&env, "d"), &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000,
+            &due,
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
         client.mark_funded(&id, &pool);
         env.ledger().with_mut(|l| l.timestamp = due + 2 * 86_400);
         client.mark_defaulted(&id, &pool);
@@ -1135,7 +1791,14 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
         client.initialize(&admin, &pool, &i128::MAX, &1u64, &90u32);
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "d"), &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
         env.ledger().with_mut(|l| l.timestamp += 2);
         let inv = client.get_invoice(&id); // trigger expiration
         assert_eq!(inv.status, InvoiceStatus::Expired);
@@ -1179,7 +1842,8 @@ mod test {
         let id2 = make_invoice(&env, &client, &sme, 500); // still pending
         let id3 = make_invoice(&env, &client, &sme, 500);
         client.cancel_invoice(&id3, &sme);
-        let removed = client.cleanup_expired_storage(&admin, &soroban_sdk::vec![&env, id1, id2, id3]);
+        let removed =
+            client.cleanup_expired_storage(&admin, &soroban_sdk::vec![&env, id1, id2, id3]);
         assert_eq!(removed, 2);
         assert_eq!(client.get_storage_stats().cleaned_invoices, 2);
         assert_eq!(client.get_invoice(&id2).status, InvoiceStatus::Pending);
@@ -1208,7 +1872,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
         let mut ids = soroban_sdk::vec![&env];
-        for i in 1u64..=51 { ids.push_back(i); }
+        for i in 1u64..=51 {
+            ids.push_back(i);
+        }
         client.cleanup_expired_storage(&admin, &ids);
     }
 
@@ -1287,9 +1953,19 @@ mod test {
         env.mock_all_auths();
         let (client, _admin, pool, sme) = setup(&env);
         let hash = String::from_str(&env, "abc123");
-        let id = client.create_invoice(&sme, &String::from_str(&env, "ACME Corp"), &1_000_000_000i128, &(env.ledger().timestamp() + 2_592_000), &String::from_str(&env, "Invoice #001 - Goods delivery"), &hash);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "ACME Corp"),
+            &1_000_000_000i128,
+            &(env.ledger().timestamp() + 2_592_000),
+            &String::from_str(&env, "Invoice #001 - Goods delivery"),
+            &hash,
+        );
         assert_eq!(id, 1);
-        assert!(matches!(client.get_invoice(&id).status, InvoiceStatus::Pending));
+        assert!(matches!(
+            client.get_invoice(&id).status,
+            InvoiceStatus::Pending
+        ));
         let meta = client.get_metadata(&id);
         assert_eq!(meta.status, InvoiceStatus::Pending);
         assert_eq!(meta.amount, 1_000_000_000i128);
@@ -1308,7 +1984,14 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(&sme, &String::from_str(&env, "X"), &0i128, &(env.ledger().timestamp() + 1), &String::from_str(&env, "d"), &String::from_str(&env, "h"));
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &0i128,
+            &(env.ledger().timestamp() + 1),
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
     }
 
     #[test]
@@ -1318,7 +2001,14 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(&sme, &String::from_str(&env, "X"), &100i128, &999_999, &String::from_str(&env, "d"), &String::from_str(&env, "h"));
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &100i128,
+            &999_999,
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
     }
 
     #[test]
@@ -1327,7 +2017,14 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
         client.mark_funded(&id, &Address::generate(&env));
     }
 
@@ -1337,9 +2034,47 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, pool, sme) = setup(&env);
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
         client.mark_funded(&id, &pool);
         client.mark_funded(&id, &pool);
+    }
+
+    #[test]
+    fn test_mark_funded_overflow_returns_amount_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let first = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &i128::MAX,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h1"),
+        );
+        client.mark_funded(&first, &pool);
+
+        let second = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h2"),
+        );
+        let result = client.try_mark_funded(&second, &pool);
+
+        assert_eq!(result, Err(Ok(InvoiceError::AmountOverflow)));
     }
 
     #[test]
@@ -1350,7 +2085,14 @@ mod test {
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 50_000;
         for _ in 0..10 {
-            client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &due, &String::from_str(&env, "i"), &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due,
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1363,7 +2105,14 @@ mod test {
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 50_000;
         for _ in 0..11 {
-            client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &due, &String::from_str(&env, "i"), &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due,
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1385,7 +2134,14 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _pool, sme) = setup(&env);
         client.pause(&admin);
-        client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
     }
 
     #[test]
@@ -1398,8 +2154,21 @@ mod test {
         let client = InvoiceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let sme = Address::generate(&env);
-        client.initialize(&admin, &pool_id, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &90u32);
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
+        client.initialize(
+            &admin,
+            &pool_id,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &90u32,
+        );
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
         client.mark_funded(&id, &pool_id);
         client.mark_paid(&id, &pool_id);
     }
@@ -1415,18 +2184,34 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
         client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
-        let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
         env.ledger().with_mut(|l| l.timestamp += 11);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
     }
 
-    fn setup_with_grace(env: &Env, grace_days: u32) -> (InvoiceContractClient<'_>, Address, Address, Address) {
+    fn setup_with_grace(
+        env: &Env,
+        grace_days: u32,
+    ) -> (InvoiceContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
         let pool = Address::generate(env);
         let sme = Address::generate(env);
-        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &grace_days);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &grace_days,
+        );
         (client, admin, pool, sme)
     }
 
@@ -1437,10 +2222,29 @@ mod test {
         let pool = Address::generate(env);
         let oracle = Address::generate(env);
         let owner = Address::generate(env);
-        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &DEFAULT_GRACE_PERIOD_DAYS);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &DEFAULT_GRACE_PERIOD_DAYS,
+        );
         client.set_oracle(&admin, &oracle);
-        let id = client.create_invoice(&owner, &String::from_str(env, "ACME Corp"), &1_000_0000000i128, &(env.ledger().timestamp() + SECS_PER_DAY * 30), &String::from_str(env, "Test invoice"), &String::from_str(env, "hash"));
-        client.verify_invoice(&id, &oracle, &true, &String::from_str(env, ""), &String::from_str(env, "hash"));
+        let id = client.create_invoice(
+            &owner,
+            &String::from_str(env, "ACME Corp"),
+            &1_000_0000000i128,
+            &(env.ledger().timestamp() + SECS_PER_DAY * 30),
+            &String::from_str(env, "Test invoice"),
+            &String::from_str(env, "hash"),
+        );
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(env, ""),
+            &String::from_str(env, "hash"),
+        );
         client.mark_funded(&id, &pool);
         (client, admin, pool, owner)
     }
