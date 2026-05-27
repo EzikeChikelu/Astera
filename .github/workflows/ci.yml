@@ -109,7 +109,7 @@ jobs:
         run: |
           MAX_SIZE_BYTES=204800
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            SIZE=$(stat -c%s "$wasm")
+            SIZE=$(wc -c < "$wasm" | tr -d ' ')
             echo "$wasm: $SIZE bytes"
             if [ "$SIZE" -gt "$MAX_SIZE_BYTES" ]; then
               echo "ERROR: $wasm exceeds limit"

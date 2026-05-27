@@ -46,6 +46,7 @@ const PTS_NEW_INVOICE: u32 = 5;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
 #[contracttype]
 #[derive(Clone)]
@@ -105,7 +106,9 @@ impl ScoreThresholds {
 #[contracttype]
 pub enum DataKey {
     CreditScore(Address),
+    /// Number of retained records in the rolling payment history window.
     PaymentHistory(Address),
+    PaymentHistoryStart(Address),
     PaymentRecordIdx(Address, u32),
     InvoiceProcessed(u64),
     Admin,
@@ -145,6 +148,52 @@ fn get_late_threshold(env: &Env) -> i64 {
         .persistent()
         .get(&DataKey::LateThreshold)
         .unwrap_or(30)
+}
+
+fn max_payment_history(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxPaymentHistory)
+        .unwrap_or(MAX_PAYMENT_HISTORY)
+}
+
+fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
+    let max_history = max_payment_history(env);
+    if max_history == 0 {
+        panic!("payment history limit must be positive");
+    }
+
+    let history_len: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistory(sme.clone()))
+        .unwrap_or(0);
+    let start_idx: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistoryStart(sme.clone()))
+        .unwrap_or(0);
+
+    if history_len < max_history {
+        let idx = (start_idx + history_len) % max_history;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentRecordIdx(sme.clone(), idx), record);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentRecordIdx(sme.clone(), start_idx), record);
+        let new_start = (start_idx + 1) % max_history;
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistoryStart(sme.clone()), &new_start);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistory(sme.clone()), &max_history);
+    }
 }
 
 fn calculate_score(
@@ -227,6 +276,9 @@ impl CreditScoreContract {
         env.storage().instance().set(&DataKey::ScoreVersion, &1u32);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPaymentHistory, &MAX_PAYMENT_HISTORY);
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -317,20 +369,7 @@ impl CreditScoreContract {
         };
 
         let mut credit_data = Self::get_or_create_credit_data(&env, &sme);
-
-        let history_len: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentHistory(sme.clone()))
-            .unwrap_or(0);
-
-        env.storage().persistent().set(
-            &DataKey::PaymentRecordIdx(sme.clone(), history_len),
-            &record,
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
+        append_payment_record(&env, &sme, &record);
 
         // Capture the previous paid count before incrementing, for the running average.
         let prev_paid = (credit_data.paid_on_time + credit_data.paid_late) as i64;
@@ -432,20 +471,7 @@ impl CreditScoreContract {
         };
 
         let mut credit_data = Self::get_or_create_credit_data(&env, &sme);
-
-        let history_len: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentHistory(sme.clone()))
-            .unwrap_or(0);
-
-        env.storage().persistent().set(
-            &DataKey::PaymentRecordIdx(sme.clone(), history_len),
-            &record,
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
+        append_payment_record(&env, &sme, &record);
 
         credit_data.defaulted += 1;
         credit_data.total_invoices += 1;
@@ -485,9 +511,16 @@ impl CreditScoreContract {
             .instance()
             .get(&DataKey::PaymentHistory(sme.clone()))
             .unwrap_or(0);
+        let start_idx: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistoryStart(sme.clone()))
+            .unwrap_or(0);
+        let max_history = max_payment_history(&env);
 
         let mut records = Vec::new(&env);
-        for i in 0..history_len {
+        for offset in 0..history_len {
+            let i = (start_idx + offset) % max_history;
             if let Some(record) = env
                 .storage()
                 .persistent()
@@ -500,9 +533,24 @@ impl CreditScoreContract {
     }
 
     pub fn get_payment_record(env: Env, sme: Address, index: u32) -> Option<PaymentRecord> {
+        let history_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistory(sme.clone()))
+            .unwrap_or(0);
+        if index >= history_len {
+            return None;
+        }
+        let start_idx: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistoryStart(sme.clone()))
+            .unwrap_or(0);
+        let max_history = max_payment_history(&env);
+        let idx = (start_idx + index) % max_history;
         env.storage()
             .persistent()
-            .get(&DataKey::PaymentRecordIdx(sme, index))
+            .get(&DataKey::PaymentRecordIdx(sme, idx))
     }
 
     pub fn get_payment_history_length(env: Env, sme: Address) -> u32 {
@@ -625,6 +673,24 @@ impl CreditScoreContract {
             .persistent()
             .get(&DataKey::LateThreshold)
             .unwrap_or(30)
+    }
+
+    pub fn set_max_payment_history(env: Env, admin: Address, max_history: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        if max_history == 0 {
+            panic!("payment history limit must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPaymentHistory, &max_history);
+        env.events()
+            .publish((EVT, symbol_short!("hist_upd")), max_history);
+    }
+
+    pub fn get_max_payment_history(env: Env) -> u32 {
+        max_payment_history(&env)
     }
 
     fn get_or_create_credit_data(env: &Env, sme: &Address) -> CreditScoreData {
@@ -1206,8 +1272,9 @@ mod test {
     // **Validates: Requirements 7.1, 7.2, 7.3**
     #[test]
     fn test_prop_payment_history_ordering() {
-        // For any sequence of N records, get_payment_history returns N records in insertion order,
-        // and get_payment_record(i) matches get_payment_history()[i].
+        // For any sequence of N records, get_payment_history returns the most recent
+        // MAX_PAYMENT_HISTORY records in insertion order, and get_payment_record(i)
+        // matches get_payment_history()[i].
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);
@@ -1223,13 +1290,16 @@ mod test {
         for trial in 0..20u64 {
             let (client, _admin, _invoice, pool) = setup(&env);
             let sme = Address::generate(&env);
-            let n = (lcg(&mut seed) % 10 + 1) as u64;
+            let n = (lcg(&mut seed) % 150 + 1) as u64;
             let due_date = 200_000u64;
-            let mut expected_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+            let mut expected_ids: std::vec::Vec<u64> = std::vec::Vec::new();
 
             for i in 0..n {
                 let invoice_id = trial * 20 + i + 1;
-                expected_ids.push_back(invoice_id);
+                if expected_ids.len() == MAX_PAYMENT_HISTORY as usize {
+                    expected_ids.remove(0);
+                }
+                expected_ids.push(invoice_id);
                 let is_default = lcg(&mut seed) % 3 == 0;
                 if is_default {
                     client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
@@ -1245,10 +1315,12 @@ mod test {
                 }
             }
 
-            // History length matches
+            let expected_len = n.min(MAX_PAYMENT_HISTORY as u64) as u32;
+
+            // History length matches the capped window size.
             assert_eq!(
                 client.get_payment_history_length(&sme),
-                n as u32,
+                expected_len,
                 "trial {}: history length mismatch",
                 trial
             );
@@ -1257,13 +1329,13 @@ mod test {
             let history = client.get_payment_history(&sme);
             assert_eq!(
                 history.len(),
-                n as u32,
+                expected_len,
                 "trial {}: history vec length mismatch",
                 trial
             );
 
             // Individual record lookup matches history
-            for i in 0..n as u32 {
+            for i in 0..expected_len {
                 let by_index = client.get_payment_record(&sme, &i).unwrap();
                 let from_history = history.get(i).unwrap();
                 assert_eq!(
@@ -1273,13 +1345,48 @@ mod test {
                 );
                 assert_eq!(
                     by_index.invoice_id,
-                    expected_ids.get(i).unwrap(),
+                    *expected_ids.get(i as usize).unwrap(),
                     "trial {}: record {} not in insertion order",
                     trial,
                     i
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_payment_history_rolling_window_caps_at_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for invoice_id in 1u64..=200u64 {
+            client.record_payment(
+                &pool,
+                &invoice_id,
+                &sme,
+                &1_000_000_000i128,
+                &due_date,
+                &(due_date - 1000),
+            );
+        }
+
+        assert_eq!(client.get_payment_history_length(&sme), MAX_PAYMENT_HISTORY);
+
+        let history = client.get_payment_history(&sme);
+        assert_eq!(history.len(), MAX_PAYMENT_HISTORY);
+        assert_eq!(history.get(0).unwrap().invoice_id, 101);
+        assert_eq!(history.get(99).unwrap().invoice_id, 200);
+        assert_eq!(client.get_payment_record(&sme, &0).unwrap().invoice_id, 101);
+        assert_eq!(
+            client.get_payment_record(&sme, &99).unwrap().invoice_id,
+            200
+        );
+        assert!(client.get_payment_record(&sme, &100).is_none());
     }
 
     // **Feature: credit-scoring, Property 9: Idempotency guard**
