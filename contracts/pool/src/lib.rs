@@ -1651,7 +1651,7 @@ impl FundingPool {
         };
         fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        
+
         Self::non_reentrant_end(&env);
         Ok(())
     }
@@ -1665,9 +1665,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        
+
         Self::non_reentrant_start(&env);
-        
+
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
         }

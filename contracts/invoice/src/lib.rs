@@ -724,7 +724,9 @@ impl InvoiceContract {
         let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
         if now >= next_reset {
             daily_count = 0;
-            env.storage().instance().set(&next_reset_key, &next_day_boundary(now));
+            env.storage()
+                .instance()
+                .set(&next_reset_key, &next_day_boundary(now));
         }
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
