@@ -1618,9 +1618,9 @@ impl FundingPool {
             return Err(PoolError::InvalidAmount);
         }
 
-        Self::non_reentrant_start(&env); // <- ADD GUARD START
+        Self::non_reentrant_start(env); // <- ADD GUARD START
 
-        let config: PoolConfig = get_config_cached(&env)?;
+        let config: PoolConfig = get_config_cached(env)?;
         let funded_invoice_key = DataKey::FundedInvoice(invoice_id);
         let mut record: FundedInvoice = env
             .storage()
@@ -1691,8 +1691,8 @@ impl FundingPool {
                 .ok_or(PoolError::ShareTokenNotConfigured)?;
             let total_shares: i128 = env.invoke_contract(
                 &share_token,
-                &Symbol::new(&env, "total_supply"),
-                Vec::new(&env),
+                &Symbol::new(env, "total_supply"),
+                Vec::new(env),
             );
             if total_shares > 0 {
                 let reward_delta = total_interest_i128
@@ -1709,13 +1709,13 @@ impl FundingPool {
         // Write all state BEFORE external call
         env.storage().persistent().set(&funded_invoice_key, &record);
         if fully_repaid {
-            set_funded_invoice_ttl(&env, invoice_id, true);
+            set_funded_invoice_ttl(env, invoice_id, true);
         }
         env.storage().instance().set(&token_totals_key, &tt);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         // Transfer LAST - interaction
-        let token_client = token::Client::new(&env, &record.token);
+        let token_client = token::Client::new(env, &record.token);
         token_client.transfer(&payer, &env.current_contract_address(), &amount);
 
         // Handle collateral release after main transfer
@@ -1726,7 +1726,7 @@ impl FundingPool {
                 .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
             {
                 if !col.settled {
-                    let col_token_client = token::Client::new(&env, &col.token);
+                    let col_token_client = token::Client::new(env, &col.token);
                     col_token_client.transfer(
                         &env.current_contract_address(),
                         &col.depositor,
@@ -1744,7 +1744,7 @@ impl FundingPool {
             }
         }
 
-        Self::non_reentrant_end(&env); // <- ADD GUARD END
+        Self::non_reentrant_end(env); // <- ADD GUARD END
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
@@ -1752,7 +1752,7 @@ impl FundingPool {
                 .checked_add(record.factoring_fee)
                 .ok_or(PoolError::AmountOverflow)?;
             if let Err(e) =
-                Self::process_withdrawal_queue(&env, record.token.clone(), available_amount)
+                Self::process_withdrawal_queue(env, record.token.clone(), available_amount)
             {
                 // Log error but don't fail the repayment
                 // `format!` is unavailable in `no_std`; keep a lightweight log.
