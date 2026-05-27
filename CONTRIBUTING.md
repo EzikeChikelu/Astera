@@ -74,7 +74,9 @@ git checkout -b feat/your-feature-name
 
 ### Step 4: Set up your environment
 
-Follow the **Development Environment Setup** section below to install Rust, Node.js, and other tools.
+Follow the **Development Environment Setup** section below to install Rust,
+Node.js, and other tools. If you plan to use Docker Compose locally, read
+[docs/local-development.md](docs/local-development.md) first.
 
 ### Step 5: Make your change
 
@@ -154,7 +156,11 @@ A maintainer will review your PR within 1–3 business days. They may request ch
 
 ## � Prerequisites
 
-Before beginning local development, ensure you have the following tools installed. If you are on Windows, we strongly recommend using WSL2—see the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md) for detailed instructions.
+Before contributing, set up your environment as follows. If you are using
+Docker Compose for local development, start with the
+[Local Development Guide](docs/local-development.md). If you are using Windows,
+please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
+For a guide on how to interact with the contracts, see the [Smart Contract Interaction Guide](docs/interacting-with-contracts.md).
 
 ### Required Tools
 
@@ -361,11 +367,14 @@ cargo test --test integration_tests --verbose
 cargo test --test integration_tests test_deposit_and_repay
 ```
 
-The integration test file is located at `contracts/tests/integration_tests.rs`.
+Fuzz harness smoke tests are also part of CI for the contract crates that support them:
 
-#### Building Contracts for Deployment
+```bash
+cd contracts/invoice
+cargo test --test fuzz_tests --verbose
+```
 
-Before deployment or creating a PR with contract changes, verify the release build succeeds:
+Build for deployment:
 
 ```bash
 cd contracts
@@ -797,7 +806,26 @@ Then restart the frontend dev server: `npm run dev`
 
 ---
 
-## 📋 Pull Request Guidelines
+## 🤖 Dependabot PRs
+
+Dependabot checks the Rust workspace, frontend npm dependencies, and GitHub
+Actions workflows for dependency updates. It opens pull requests with existing
+area labels so maintainers can route them quickly:
+
+- `smart-contract` and `devops` for Cargo workspace updates
+- `frontend` and `devops` for frontend npm updates
+- `devops` and `tooling` for GitHub Actions updates
+
+When reviewing a Dependabot PR:
+
+1. Prioritize security updates and runtime dependency updates before tooling-only changes.
+2. Confirm the affected area by checking the labels and changed lockfiles.
+3. Run the relevant local checks from the testing section above.
+4. Merge only one dependency update PR at a time when failures would be hard to isolate.
+
+---
+
+## 📋 Pull Request Process
 
 ### Before Opening a PR
 
@@ -822,9 +850,20 @@ Then restart the frontend dev server: `npm run dev`
    git rebase upstream/main
    ```
 
-### Branch Naming
+Before opening a PR, make sure you:
 
-Use this format for feature branches:
+- [ ] Linked an issue (e.g., `Closes #123`)
+- [ ] Built the project locally
+- [ ] All tests pass (`cargo test` and `npm run build`)
+- [ ] Code is formatted consistently (`cargo fmt`, Prettier)
+- [ ] Linting passes (`cargo clippy`, `npm run lint`)
+- [ ] Commit messages follow Conventional Commits
+- [ ] PR title follows the `type(scope): description` format
+- [ ] PR description clearly explains the change
+- [ ] New public contract functions include tests
+- [ ] No secrets or `.env.local` committed
+- [ ] `CHANGELOG.md` updated under the `Unreleased` section if the change is user-facing
+- [ ] **Smart contract security checklist** completed (see `.github/pull_request_template.md`) if `contracts/` changed
 
 ```
 feat/short-description

@@ -16,7 +16,8 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
     let pool = Address::generate(env);
     let sme = Address::generate(env);
     let expiration = 30u64 * 86_400u64;
-    client.initialize(&admin, &pool, &i128::MAX, &expiration, &u32::MAX);
+    // Contract enforces `grace_period_days <= 90`.
+    client.initialize(&admin, &pool, &i128::MAX, &expiration, &90u32);
     (client, admin, pool, sme)
 }
 
@@ -163,6 +164,28 @@ proptest! {
 
         let invoice = client.get_invoice(&id);
         prop_assert_eq!(invoice.due_date, due_date);
+    }
+
+    /// Fuzz test: Large due dates are rejected before they can overflow deadline math.
+    #[test]
+    fn fuzz_invoice_due_dates_reject_far_future(
+        due_date in (u64::MAX - 10_000u64)..u64::MAX
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+        );
+
+        prop_assert_eq!(result, Err(Ok(invoice::InvoiceError::DateOverflow)));
     }
 
     /// Fuzz test: Grace period configuration
