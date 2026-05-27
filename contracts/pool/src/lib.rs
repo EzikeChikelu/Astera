@@ -112,12 +112,11 @@ pub enum PoolError {
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
     UnsupportedTokenDecimals = 36,
-    // #413: invalid collateral configuration
-    InvalidThreshold = 37,
-    // Pre-existing: fee-on-transfer token mismatch
-    TransferMismatch = 38,
-    UnsupportedTokenDecimals = 34,
-    KycNotApproved = 36,
+    // #384: distinct zero and negative amount errors
+    ZeroAmount = 37,
+    NegativeAmount = 38,
+    // fee-on-transfer token mismatch
+    TransferMismatch = 39,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1039,8 +1038,12 @@ impl FundingPool {
         investor.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
-        if amount <= 0 {
-            return Err(PoolError::InvalidAmount);
+        // #384: Distinguish zero and negative amounts
+        if amount == 0 {
+            return Err(PoolError::ZeroAmount);
+        }
+        if amount < 0 {
+            return Err(PoolError::NegativeAmount);
         }
         Self::assert_accepted_token(&env, &token)?;
 
@@ -3456,13 +3459,14 @@ mod test {
     // ---- Issue #61: Edge-Case Tests ----
 
     #[test]
+    #[test]
     fn test_deposit_zero_amount_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let result = client.try_deposit(&investor, &usdc_id, &0i128);
-        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+        assert_eq!(result, Err(Ok(PoolError::ZeroAmount)));
     }
 
     #[test]
@@ -3472,7 +3476,7 @@ mod test {
         let (client, _admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let result = client.try_deposit(&investor, &usdc_id, &-100i128);
-        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+        assert_eq!(result, Err(Ok(PoolError::NegativeAmount)));
     }
 
     #[test]
