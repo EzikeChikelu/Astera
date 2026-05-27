@@ -1440,9 +1440,18 @@ impl InvoiceContract {
         if days > 90 {
             panic!("grace period cannot exceed 90 days");
         }
+        let old_days: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         env.storage()
             .instance()
             .set(&DataKey::GracePeriodDays, &days);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "grace_period_updated")),
+            (admin, old_days, days),
+        );
     }
 
     pub fn set_max_invoice_amount(env: Env, admin: Address, max_invoice_amount: i128) {
