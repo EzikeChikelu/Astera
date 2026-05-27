@@ -74,7 +74,9 @@ git checkout -b feat/your-feature-name
 
 ### Step 4: Set up your environment
 
-Follow the **Development Environment Setup** section below to install Rust, Node.js, and other tools.
+Follow the **Development Environment Setup** section below to install Rust,
+Node.js, and other tools. If you plan to use Docker Compose locally, read
+[docs/local-development.md](docs/local-development.md) first.
 
 ### Step 5: Make your change
 
@@ -154,7 +156,11 @@ A maintainer will review your PR within 1–3 business days. They may request ch
 
 ## � Prerequisites
 
-Before beginning local development, ensure you have the following tools installed. If you are on Windows, we strongly recommend using WSL2—see the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md) for detailed instructions.
+Before contributing, set up your environment as follows. If you are using
+Docker Compose for local development, start with the
+[Local Development Guide](docs/local-development.md). If you are using Windows,
+please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
+For a guide on how to interact with the contracts, see the [Smart Contract Interaction Guide](docs/interacting-with-contracts.md).
 
 ### Required Tools
 
@@ -345,11 +351,14 @@ cargo test --test fuzz_tests --verbose
 PROPTEST_SEED=<seed> cargo test --test fuzz_tests
 ```
 
-Fuzz tests are **required to pass** in the CI pipeline. If fuzzing finds an issue, fix the underlying code logic and re-run the tests.
+Fuzz harness smoke tests are also part of CI for the contract crates that support them:
 
-#### Integration Tests
+```bash
+cd contracts/invoice
+cargo test --test fuzz_tests --verbose
+```
 
-End-to-end tests that verify multiple contracts interacting together:
+Build for deployment:
 
 ```bash
 cd contracts
@@ -685,97 +694,26 @@ Then restart the frontend dev server: `npm run dev`
 
 ---
 
-## 🔐 Security Checklist
+## 🤖 Dependabot PRs
 
-**Before submitting a PR with smart contract changes, review and check off the following security items.** This checklist helps catch common vulnerabilities and ensures code quality.
+Dependabot checks the Rust workspace, frontend npm dependencies, and GitHub
+Actions workflows for dependency updates. It opens pull requests with existing
+area labels so maintainers can route them quickly:
 
-### Authorization & Access Control
+- `smart-contract` and `devops` for Cargo workspace updates
+- `frontend` and `devops` for frontend npm updates
+- `devops` and `tooling` for GitHub Actions updates
 
-- [ ] All state-changing functions require proper authorization with `.require_auth()`
-- [ ] Admin-only functions are guarded by checking against a stored admin address
-- [ ] Pool-only functions verify the caller is the registered pool contract
-- [ ] No auth bypass—authorization checks cannot be skipped or circumvented
-- [ ] Auth is checked BEFORE state mutations (not after)
+When reviewing a Dependabot PR:
 
-### Input Validation
-
-- [ ] All numeric inputs (amounts, rates, delays) are validated for reasonable bounds
-- [ ] Zero or negative amounts are rejected where they shouldn't be allowed
-- [ ] Addresses are validated before use (e.g., not checking against empty addresses)
-- [ ] Due dates are validated to be in the future for invoices
-- [ ] Token addresses are validated to be whitelisted or registered
-
-### Reentrancy & State Safety
-
-- [ ] Functions follow the Check-Effects-Interactions pattern:
-  - **Check**: Validate inputs and authorization first
-  - **Effects**: Update internal state
-  - **Interactions**: Call external contracts last
-- [ ] No dangerous nested calls that could re-enter the contract
-- [ ] Idempotency guards (e.g., `executed` or `paid` flags) prevent duplicate execution
-- [ ] Events are emitted consistently for all state changes
-
-### Integer Arithmetic
-
-- [ ] Overflow and underflow are not possible (Rust enforces this in release mode, but reason through math)
-- [ ] Interest calculations use appropriate precision (avoid losing funds due to rounding)
-- [ ] Checked arithmetic operations (`.checked_add()`, `.checked_sub()`, `.checked_mul()`) for complex operations
-- [ ] Division by zero is impossible (divisors are validated to be > 0)
-
-### Storage & Data Integrity
-
-- [ ] All mutable storage reads (`env.storage().instance().get()`) are followed by validation
-- [ ] Storage keys are defined in a `DataKey` enum to avoid collisions
-- [ ] Critical data (balances, permissions) is stored durably, not transiently
-- [ ] Data migrations (if any) maintain consistency and don't corrupt state
-
-### Error Handling & Recovery
-
-- [ ] Errors are clear and descriptive (help developers debug)
-- [ ] `panic!()` is used for contract errors; messages are concise
-- [ ] No silent failures—failed operations are explicitly rejected
-- [ ] Recovery paths are tested (e.g., what happens if a withdrawal fails?)
-
-### Cryptography & Secrets
-
-- [ ] No private keys, seed phrases, or secrets hardcoded in the contract
-- [ ] All signing is delegated to Stellar's transaction signing mechanism
-- [ ] Contract does not attempt to implement custom cryptography
-- [ ] Nonces or timestamps are only used with explicit purpose and validation
-
-### Testing & Coverage
-
-- [ ] New functions include unit tests covering happy path + edge cases
-- [ ] Edge cases are explicitly tested (zero amounts, max values, boundary conditions)
-- [ ] Fuzz tests pass without panicking on random inputs
-- [ ] Integration tests verify multi-contract interactions
-- [ ] Authorization tests verify unauthorized callers are blocked
-
-### Code Quality
-
-- [ ] `cargo clippy -- -D warnings` passes (no warnings)
-- [ ] `cargo fmt` has been run (consistent code formatting)
-- [ ] `cargo audit` reports no critical or high-severity dependency vulnerabilities
-- [ ] Comments explain non-obvious logic, especially around security-critical code
-- [ ] No useless clones, allocations, or performance issues flagged by Clippy
-
-### Configuration & Constants
-
-- [ ] Magic numbers (rates, caps, limits) are defined as named `const` values at the module level
-- [ ] Default yield rate and factoring fees are capped and validated
-- [ ] Timelock durations are appropriate for mainnet (typically 24+ hours)
-- [ ] All constants are documented with their purpose and unit
-
-### Event Logging
-
-- [ ] All state-changing operations emit clear events
-- [ ] Events include relevant indexed topics (contract, user, invoice_id, etc.)
-- [ ] Events are emitted AFTER state changes to maintain consistency
-- [ ] Events are queryable and useful for frontend and monitoring
+1. Prioritize security updates and runtime dependency updates before tooling-only changes.
+2. Confirm the affected area by checking the labels and changed lockfiles.
+3. Run the relevant local checks from the testing section above.
+4. Merge only one dependency update PR at a time when failures would be hard to isolate.
 
 ---
 
-## 📋 Pull Request Guidelines
+## 📋 Pull Request Process
 
 ### Before Opening a PR
 
@@ -800,29 +738,20 @@ Then restart the frontend dev server: `npm run dev`
    git rebase upstream/main
    ```
 
-### Branch Naming
+Before opening a PR, make sure you:
 
-Use this format for feature branches:
-
-```
-feat/short-description
-fix/short-description
-docs/short-description
-refactor/short-description
-```
-
-Examples:
-- `feat/add-invoice-repayment-tracking`
-- `fix/pool-withdraw-edge-case`
-- `docs/add-deployment-guide`
-
-### Commit Message Format
-
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-type(scope): short description
-```
+- [ ] Linked an issue (e.g., `Closes #123`)
+- [ ] Built the project locally
+- [ ] All tests pass (`cargo test` and `npm run build`)
+- [ ] Code is formatted consistently (`cargo fmt`, Prettier)
+- [ ] Linting passes (`cargo clippy`, `npm run lint`)
+- [ ] Commit messages follow Conventional Commits
+- [ ] PR title follows the `type(scope): description` format
+- [ ] PR description clearly explains the change
+- [ ] New public contract functions include tests
+- [ ] No secrets or `.env.local` committed
+- [ ] `CHANGELOG.md` updated under the `Unreleased` section if the change is user-facing
+- [ ] **Smart contract security checklist** completed (see `.github/pull_request_template.md`) if `contracts/` changed
 
 Where `type` is one of:
 - `feat` — New feature

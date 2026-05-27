@@ -3,6 +3,7 @@ import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
 import { Toaster } from 'react-hot-toast';
+import { assertEnvValid } from '@/lib/env';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -25,12 +26,17 @@ import { NextIntlClientProvider } from 'next-intl';
 import { getMessages, getLocale } from 'next-intl/server';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Validate environment variables early
+  assertEnvValid();
+
   const locale = await getLocale();
   const messages = await getMessages();
 
   return (
     <html lang={locale}>
       <head>
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#ffffff" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
@@ -39,7 +45,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         />
       </head>
       <body className="min-h-screen bg-[var(--bg)] text-[var(--text-primary)]">
-        <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:bg-brand-primary focus:text-white focus:p-2 focus:rounded">
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:bg-brand-primary focus:text-white focus:p-2 focus:rounded"
+        >
           Skip to main content
         </a>
         <NextIntlClientProvider messages={messages}>
@@ -48,7 +57,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <main id="main-content" role="main">
               {children}
             </main>
-            <Toaster position="top-right" duration={5000} />
+            <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
           </ThemeProvider>
         </NextIntlClientProvider>
       </body>

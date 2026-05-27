@@ -15,6 +15,8 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 - [ ] Audit report reviewed and published
 - [ ] Economic model validated by financial experts
 - [ ] Legal compliance review completed
+- [ ] Audit findings recorded in [security audit tracking](security-audit/audit-tracking.md)
+- [ ] No unresolved critical/high findings remain in the audit tracker
 
 ### Code Quality
 
@@ -39,7 +41,7 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 ### Documentation
 
 - [ ] Mainnet deployment guide reviewed
-- [ ] Incident response plan documented
+- [ ] Incident response plan documented ([disaster recovery runbook](disaster-recovery.md))
 - [ ] Emergency contact list updated
 - [ ] User documentation complete
 - [ ] Terms of service and privacy policy published
@@ -111,7 +113,7 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 
 - [ ] Deploy transaction monitoring
 - [ ] Configure anomaly detection
-- [ ] Test incident response procedures
+- [ ] Test incident response procedures against [disaster-recovery.md](disaster-recovery.md)
 - [ ] Verify emergency contacts
 
 ---
@@ -168,7 +170,7 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 ### Quarterly
 
 - [ ] Code audit and dependency updates
-- [ ] Review incident response plan
+- [ ] Review the [disaster recovery runbook](disaster-recovery.md)
 - [ ] Conduct security drills
 
 ### Annually
@@ -183,6 +185,9 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 
 ### If Critical Vulnerability Discovered
 
+Follow [docs/disaster-recovery.md](disaster-recovery.md), Scenario 1, and then
+use this checklist:
+
 1. [ ] Notify all team members immediately
 2. [ ] Assess threat and confirm severity
 3. [ ] Execute emergency pause (if available)
@@ -192,6 +197,9 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 
 ### If Unusual Activity Detected
 
+Follow [docs/disaster-recovery.md](disaster-recovery.md), Scenario 2 or
+Scenario 4 depending on whether the issue is admin access or bad state.
+
 1. [ ] Investigate and confirm anomaly
 2. [ ] Determine if malicious or benign
 3. [ ] Increase monitoring if needed
@@ -199,6 +207,9 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 5. [ ] Take appropriate action
 
 ### If System Outage
+
+Follow [docs/disaster-recovery.md](disaster-recovery.md), Scenario 3, before
+marking the service restored.
 
 1. [ ] Identify root cause
 2. [ ] Notify users of outage
@@ -233,6 +244,7 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 ## Important Links
 
 - [Full Mainnet Deployment Guide](mainnet-deployment.md)
+- [Disaster Recovery Runbook](disaster-recovery.md)
 - [Testnet Deployment Guide](deployment.md)
 - [Stellar Expert Mainnet](https://stellar.expert/explorer/public)
 - [Stellar Status Page](https://status.stellar.org)

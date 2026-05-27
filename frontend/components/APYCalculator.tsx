@@ -1,25 +1,26 @@
+// Astera/frontend/components/APYCalculator.tsx
+
 'use client';
 
 import { useMemo, useState } from 'react';
+import { usePoolConfig } from '@/lib/cache';
 import { formatApyPercent, projectedInterestStroops } from '@/lib/apy';
 import { formatUSDC, toStroops } from '@/lib/stellar';
 
-export type APYCalculatorProps = {
-  /** Live `yield_bps` from the pool contract (`get_config`). */
-  yieldBps: number | null;
-  /** While pool config is loading. */
-  loading?: boolean;
-  className?: string;
-};
-
 const DEFAULT_LOCK_DAYS = '30';
+const DEFAULT_YIELD_BPS = 800;
 
 /**
  * Real-time projection of simple interest over a chosen horizon using the pool’s yield rate.
  */
-export function APYCalculator({ yieldBps, loading = false, className = '' }: APYCalculatorProps) {
+export function APYCalculator({ className = '' }: { className?: string }) {
   const [depositInput, setDepositInput] = useState('');
   const [lockDaysInput, setLockDaysInput] = useState(DEFAULT_LOCK_DAYS);
+  const { data: poolConfig, error, isLoading } = usePoolConfig();
+
+  const yieldBps = poolConfig?.yieldBps ?? (error ? DEFAULT_YIELD_BPS : null);
+  const hasValidPoolRate = yieldBps !== null && yieldBps >= 0;
+  const isFallbackRate = !!error && yieldBps === DEFAULT_YIELD_BPS;
 
   const { interestStroops, totalStroops } = useMemo(() => {
     if (yieldBps === null || yieldBps < 0) {
@@ -44,14 +45,12 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
     };
   }, [depositInput, lockDaysInput, yieldBps]);
 
-  const hasValidPoolRate = yieldBps !== null && yieldBps >= 0;
-
   return (
     <div className={`p-6 bg-brand-card border border-brand-border rounded-2xl ${className}`.trim()}>
       <h2 className="text-lg font-semibold mb-1">Earnings calculator</h2>
       <p className="text-xs text-brand-muted mb-4">
         Model projected returns using the pool&apos;s current rate (
-        {loading
+        {isLoading
           ? 'loading…'
           : hasValidPoolRate
             ? `${formatApyPercent(yieldBps!)}% APY`
@@ -70,7 +69,7 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
               placeholder="0.00"
               value={depositInput}
               onChange={(e) => setDepositInput(e.target.value)}
-              disabled={loading || !hasValidPoolRate}
+              disabled={isLoading || !hasValidPoolRate}
               className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
             />
             <span className="absolute right-4 top-1/2 -translate-y-1/2 text-brand-muted text-sm font-medium">
@@ -87,7 +86,7 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
             step="1"
             value={lockDaysInput}
             onChange={(e) => setLockDaysInput(e.target.value)}
-            disabled={loading || !hasValidPoolRate}
+            disabled={isLoading || !hasValidPoolRate}
             className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
           />
         </div>
@@ -96,7 +95,7 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
           <div className="p-4 bg-brand-dark border border-brand-border rounded-xl">
             <p className="text-xs text-brand-muted mb-1">Projected interest</p>
             <p className="text-xl font-semibold text-brand-gold">
-              {loading || !hasValidPoolRate
+              {isLoading || !hasValidPoolRate
                 ? '—'
                 : depositInput && parseFloat(depositInput) > 0
                   ? formatUSDC(interestStroops)
@@ -106,7 +105,7 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
           <div className="p-4 bg-brand-dark border border-brand-border rounded-xl">
             <p className="text-xs text-brand-muted mb-1">Total at maturity</p>
             <p className="text-xl font-semibold text-white">
-              {loading || !hasValidPoolRate
+              {isLoading || !hasValidPoolRate
                 ? '—'
                 : depositInput && parseFloat(depositInput) > 0
                   ? formatUSDC(totalStroops)
@@ -115,6 +114,13 @@ export function APYCalculator({ yieldBps, loading = false, className = '' }: APY
           </div>
         </div>
       </div>
+
+      {isFallbackRate && (
+        <p className="mt-4 text-xs text-yellow-300">
+          Failed to load live pool configuration. Using fallback APY of{' '}
+          {formatApyPercent(DEFAULT_YIELD_BPS)}%.
+        </p>
+      )}
 
       <p className="mt-4 text-xs text-brand-muted leading-relaxed border-t border-brand-border pt-4">
         <strong className="text-brand-muted">Disclaimer:</strong> This projection uses the
