@@ -37,6 +37,7 @@ Closes #
 - [ ] No secrets, private keys, or production contract IDs in code
 - [ ] API reference updated if contract interface changed
 - [ ] PR title is descriptive and follows `type(scope): description` convention
+- [ ] **Smart contract changes?** Reviewed against the [Security Checklist](../CONTRIBUTING.md#-security-checklist) in CONTRIBUTING.md
 
 ## Screenshots (UI changes only)
 
