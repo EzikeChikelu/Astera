@@ -8,6 +8,7 @@
     "start": "next start",
     "start:e2e": "next build && next start",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "prepare": "cd .. && git config core.hooksPath frontend/.husky",
     "test": "jest",

@@ -7,9 +7,10 @@ jest.mock('@sentry/nextjs', () => ({
   captureException: jest.fn(),
 }));
 
-function ThrowingComponent() {
+const ThrowingComponent: React.FC = () => {
   throw new Error('render failure');
-}
+  return <div />;
+};
 
 describe('ErrorBoundary', () => {
   const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
