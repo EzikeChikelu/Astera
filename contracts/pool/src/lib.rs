@@ -111,7 +111,7 @@ pub enum PoolError {
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
-    UnsupportedTokenDecimals = 34,
+    UnsupportedTokenDecimals = 36,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -569,9 +569,8 @@ fn resolve_factoring_fee(
     let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
     let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps);
     // Denormalize fee back to token units
-    let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
+    let fee = denormalize_from_stroops(normalized_fee?, token_config.decimals);
     Ok(fee)
-    calculate_factoring_fee(principal, fee_bps)
 }
 
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
