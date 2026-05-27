@@ -375,7 +375,7 @@ cargo build --target wasm32-unknown-unknown --release
 
 # Verify WASM binary sizes (required by CI; max 200 KB per contract)
 for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-  SIZE=$(stat -f%z "$wasm" 2>/dev/null || stat -c%s "$wasm" 2>/dev/null)
+  SIZE=$(wc -c < "$wasm" | tr -d ' ')
   echo "$wasm: $SIZE bytes"
   if [ "$SIZE" -gt 204800 ]; then
     echo "ERROR: Binary too large for deployment"
@@ -514,6 +514,28 @@ npm run test:e2e  # (requires running Stellar network)
 ```
 
 The CI pipeline runs a similar sequence. Passing locally means your PR is more likely to pass CI.
+
+#### Running CI Locally with `act` (macOS)
+
+To simulate the GitHub Actions CI pipeline locally before pushing, you can use [`act`](https://nektosact.com/):
+
+```bash
+# Install act (on macOS with Homebrew)
+brew install act
+
+# Run the CI pipeline locally
+act --reuse-containers
+
+# Run a specific job (e.g., check-wasm-size)
+act --job check-wasm-size
+```
+
+**Important for macOS users**: The CI scripts use cross-platform utilities that work on both Linux and macOS. Specifically, we use `wc -c` instead of the Linux-only `stat -c` for binary size checks. If you encounter errors when running CI locally on macOS, ensure you're using standard POSIX utilities and avoid Linux-specific GNU tools. If you need to debug a size check, use:
+
+```bash
+# Cross-platform way to check WASM binary size on macOS or Linux
+wc -c < target/wasm32-unknown-unknown/release/invoice.wasm | tr -d ' '
+```
 
 ---
 
