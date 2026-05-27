@@ -228,7 +228,7 @@ describe('SSE Events Polling Service', () => {
     });
 
     it('should map default event to error toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['default']();
+      const toastConfig = EVENT_TOAST_MAP['default'](undefined);
       expect(toastConfig.kind).toBe('error');
       expect(toastConfig.title).toBe('Invoice Defaulted');
     });
