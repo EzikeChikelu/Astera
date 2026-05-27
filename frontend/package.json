@@ -19,7 +19,7 @@
   "dependencies": {
     "@sentry/nextjs": "9.18.0",
     "@stellar/freighter-api": "^6.0.1",
-    "@stellar/js-xdr": "^4.0.0",
+    "@stellar/js-xdr": "^3.1.2",
     "@stellar/stellar-sdk": "^14.6.1",
     "@swc/helpers": "^0.5.23",
     "jose": "^6.2.3",
@@ -75,6 +75,7 @@
   },
   "overrides": {
     "serialize-javascript": "7.0.5",
-    "rollup": "4.60.4"
+    "rollup": "4.60.4",
+    "@stellar/js-xdr": "^3.1.2"
   }
 }

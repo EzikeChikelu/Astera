@@ -46,6 +46,10 @@ const PTS_NEW_INVOICE: u32 = 5;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+/// Current on-chain storage schema version (#397). Bump by one and add a
+/// matching arm in `run_migration` whenever the persistent storage layout
+/// changes so a deployed contract can migrate state after a WASM upgrade.
+const CURRENT_MIGRATION_VERSION: u32 = 1;
 pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
 #[contracttype]
@@ -116,11 +120,15 @@ pub enum DataKey {
     PoolContract,
     Initialized,
     ScoreVersion,
+    /// Size of the rolling payment-history window retained per SME.
+    MaxPaymentHistory,
     Paused,
     ProposedWasmHash,
     UpgradeScheduledAt,
     /// Semantic version stored during initialize() (#237).
     ContractVersion,
+    /// Applied storage-schema migration level (#397).
+    MigrationVersion,
     /// Configurable late-payment threshold in days (#430).
     LateThreshold,
     /// #428: Configurable score thresholds (Excellent, Very Good, Good, Fair)
@@ -283,6 +291,9 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &parse_credit_score_version());
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &0u32);
     }
 
     /// Returns the semantic version of this deployed credit-score contract (#237).
@@ -291,6 +302,37 @@ impl CreditScoreContract {
             .instance()
             .get(&DataKey::ContractVersion)
             .unwrap_or_else(parse_credit_score_version)
+    }
+
+    /// Returns the applied storage-schema migration level (#397).
+    pub fn migration_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0)
+    }
+
+    /// Run pending storage migrations after a WASM upgrade (#397).
+    ///
+    /// Admin-only and idempotent: once the contract has reached
+    /// `CURRENT_MIGRATION_VERSION` further calls are a no-op. Each migration
+    /// step transforms the persistent storage layout for one schema version
+    /// and is meant to be invoked manually after `execute_upgrade`.
+    pub fn run_migration(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0);
+        if current >= CURRENT_MIGRATION_VERSION {
+            return;
+        }
+        // Future migration arms (current -> current + 1) transform storage here.
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &CURRENT_MIGRATION_VERSION);
     }
 
     pub fn pause(env: Env, admin: Address) {
@@ -771,6 +813,9 @@ impl CreditScoreContract {
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 }
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(test)]
 mod test {
@@ -1714,7 +1759,14 @@ mod test {
         let due_date = 200_000u64;
 
         // Via record_payment (on time)
-        client.record_payment(&pool, &1, &sme, &1_000_000_000i128, &due_date, &(due_date - 1000));
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
         let after_payment = client.get_credit_score(&sme);
         assert_eq!(after_payment.total_invoices, 1);
         assert_eq!(after_payment.paid_on_time, 1);
@@ -2072,5 +2124,36 @@ mod test {
             score_lenient,
             score_strict
         );
+    }
+
+    #[test]
+    fn test_run_migration_bumps_version_and_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Fresh deployment starts at migration level 0.
+        assert_eq!(client.migration_version(), 0);
+
+        // Running the migration advances to the current schema version while
+        // preserving existing state (the contract stays at the same version).
+        let version_before = client.version();
+        client.run_migration(&admin);
+        assert_eq!(client.migration_version(), CURRENT_MIGRATION_VERSION);
+        assert_eq!(client.version(), version_before);
+
+        // Re-running is a no-op (idempotent).
+        client.run_migration(&admin);
+        assert_eq!(client.migration_version(), CURRENT_MIGRATION_VERSION);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_run_migration_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        let attacker = Address::generate(&env);
+        client.run_migration(&attacker);
     }
 }

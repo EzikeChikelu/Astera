@@ -117,6 +117,10 @@ pub enum PoolError {
     NegativeAmount = 38,
     // fee-on-transfer token mismatch
     TransferMismatch = 39,
+    // #109: investor not KYC-approved
+    KycNotApproved = 40,
+    // collateral threshold/ratio validation
+    InvalidThreshold = 41,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -154,6 +158,10 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+/// Current on-chain storage schema version (#397). Bump by one and add a
+/// matching arm in `run_migration` whenever the persistent storage layout
+/// changes so a deployed contract can migrate state after a WASM upgrade.
+const CURRENT_MIGRATION_VERSION: u32 = 1;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -511,12 +519,7 @@ fn calculate_total_due(
     Ok((total_interest, total_due))
 }
 
-fn release_collateral(
-    env: &Env,
-    invoice_id: u64,
-    released_by: &Address,
-    settled_at: u64,
-) {
+fn release_collateral(env: &Env, invoice_id: u64, released_by: &Address, settled_at: u64) {
     if let Some(mut col) = env
         .storage()
         .persistent()
@@ -856,6 +859,38 @@ impl FundingPool {
             .instance()
             .get(&DataKey::ContractVersion)
             .unwrap_or_else(parse_pool_version)
+    }
+
+    /// Returns the applied storage-schema migration level (#397).
+    pub fn migration_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0)
+    }
+
+    /// Run pending storage migrations after a WASM upgrade (#397).
+    ///
+    /// Admin-only and idempotent: once the contract has reached
+    /// `CURRENT_MIGRATION_VERSION` further calls are a no-op. Each migration
+    /// step transforms the persistent storage layout for one schema version
+    /// and is meant to be invoked manually after `execute_upgrade`.
+    pub fn run_migration(env: Env, admin: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationVersion)
+            .unwrap_or(0);
+        if current >= CURRENT_MIGRATION_VERSION {
+            return Ok(());
+        }
+        // Future migration arms (current -> current + 1) transform storage here.
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &CURRENT_MIGRATION_VERSION);
+        Ok(())
     }
 
     pub fn pause(env: Env, admin: Address) -> Result<(), PoolError> {
@@ -4175,7 +4210,8 @@ mod test {
         let initial_due_date = env.ledger().timestamp() + SECS_PER_DAY;
         client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &initial_due_date, &usdc_id);
 
-        env.ledger().with_mut(|l| l.timestamp = initial_due_date + (5 * SECS_PER_DAY));
+        env.ledger()
+            .with_mut(|l| l.timestamp = initial_due_date + (5 * SECS_PER_DAY));
         let capped_amount = client.estimate_repayment(&1u64);
 
         let extended_due_date = initial_due_date + (10 * SECS_PER_DAY);

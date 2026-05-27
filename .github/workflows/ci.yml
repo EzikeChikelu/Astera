@@ -170,6 +170,14 @@ jobs:
           npm rebuild @parcel/watcher --foreground-scripts || true
           node -e "require('@parcel/watcher'); console.log('parcel watcher ok after rebuild')"
 
+      # #391: @stellar/stellar-sdk and freighter-api must share a single XDR
+      # codec. Duplicate @stellar/js-xdr versions cause silent envelope
+      # decode failures during wallet signing, so fail the build if more than
+      # one resolved version is present in node_modules.
+      - name: Verify single @stellar/js-xdr version (#391)
+        run: |
+          node -e "const fs=require('fs'),cp=require('child_process');const paths=cp.execSync('find node_modules -path \"*/@stellar/js-xdr/package.json\"').toString().split('\n').filter(Boolean);const versions=[...new Set(paths.map(p=>JSON.parse(fs.readFileSync(p,'utf8')).version))];console.log('Resolved @stellar/js-xdr versions:',versions.join(', ')||'(none)');if(versions.length!==1){console.error('::error::Found '+versions.length+' @stellar/js-xdr versions; expected exactly 1. Duplicate XDR codecs cause envelope decode errors (#391).');process.exit(1);}"
+
       - name: Type-check TypeScript (includes tests)
         run: npm run typecheck
 
@@ -239,10 +247,12 @@ jobs:
       - name: Build frontend
         run: npm run build
         env:
+          # #395: real deployed testnet contract IDs, configured as repository
+          # variables. E2E must exercise real contracts, never placeholders.
           NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
+          NEXT_PUBLIC_INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
+          NEXT_PUBLIC_POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
+          NEXT_PUBLIC_USDC_TOKEN_ID: ${{ vars.TESTNET_USDC_TOKEN_ID }}
 
       - name: Configure Playwright base URL
         run: |
@@ -252,10 +262,15 @@ jobs:
       - name: Run Playwright E2E tests
         run: npm run test:e2e
         env:
+          # #395: same real testnet IDs for the test run. The bare *_CONTRACT_ID
+          # vars are read by the fail-fast guard in playwright.config.ts and by
+          # the deployed-contract spec; the run fails if they are placeholders.
           NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
+          NEXT_PUBLIC_INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
+          NEXT_PUBLIC_POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
+          NEXT_PUBLIC_USDC_TOKEN_ID: ${{ vars.TESTNET_USDC_TOKEN_ID }}
+          INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
+          POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
 
       - name: Upload Playwright report
         if: always()
