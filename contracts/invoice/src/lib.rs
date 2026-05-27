@@ -76,6 +76,8 @@ pub enum InvoiceError {
     EmptyField = 7,
     FieldTooLong = 8,
     DateOverflow = 9,
+    // #406: metadata URL validation
+    InvalidMetadata = 10,
 }
 
 #[contracttype]
@@ -617,7 +619,14 @@ impl InvoiceContract {
         due_date: u64,
         description: String,
         verification_hash: String,
+        metadata_url: String,
     ) -> u64 {
+        if metadata_url.is_empty() {
+            soroban_sdk::panic_with_error!(&env, InvoiceError::InvalidMetadata);
+        }
+        if !is_valid_metadata_uri(&env, &metadata_url) {
+            soroban_sdk::panic_with_error!(&env, InvoiceError::InvalidMetadata);
+        }
         Self::create_invoice_with_metadata(
             env,
             owner,
@@ -626,7 +635,7 @@ impl InvoiceContract {
             due_date,
             description,
             verification_hash,
-            None,
+            Some(metadata_url),
         )
     }
 
@@ -1800,6 +1809,7 @@ mod test {
             &due,
             &String::from_str(env, "desc"),
             &String::from_str(env, "hash"),
+            &String::from_str(env, "https://example.com/meta"),
         )
     }
 
@@ -1853,6 +1863,7 @@ mod test {
             &due,
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&id, &pool);
         env.ledger().with_mut(|l| l.timestamp = due + 2 * 86_400);
@@ -1880,6 +1891,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         env.ledger().with_mut(|l| l.timestamp += 2);
         let inv = client.get_invoice(&id); // trigger expiration
@@ -2042,6 +2054,7 @@ mod test {
             &(env.ledger().timestamp() + 2_592_000),
             &String::from_str(&env, "Invoice #001 - Goods delivery"),
             &hash,
+            &String::from_str(&env, "https://example.com/meta"),
         );
         assert_eq!(id, 1);
         assert!(matches!(
@@ -2073,6 +2086,7 @@ mod test {
             &(env.ledger().timestamp() + 1),
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2090,6 +2104,7 @@ mod test {
             &999_999,
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2105,6 +2120,7 @@ mod test {
             &u64::MAX,
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
     }
@@ -2123,6 +2139,7 @@ mod test {
             &due_date,
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
     }
@@ -2140,6 +2157,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&id, &Address::generate(&env));
     }
@@ -2157,6 +2175,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&id, &pool);
         client.mark_funded(&id, &pool);
@@ -2177,6 +2196,7 @@ mod test {
             &due_date,
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h1"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&first, &pool);
 
@@ -2187,6 +2207,7 @@ mod test {
             &due_date,
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h2"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         let result = client.try_mark_funded(&second, &pool);
 
@@ -2208,6 +2229,7 @@ mod test {
                 &due,
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
         }
     }
@@ -2228,6 +2250,7 @@ mod test {
                 &due,
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
         }
     }
@@ -2249,6 +2272,7 @@ mod test {
             &due,
             &String::from_str(&env, "i"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
 
         // Jump forward 5 days (432_000 seconds)
@@ -2265,6 +2289,7 @@ mod test {
                 &(new_timestamp + 50_000),
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
         }
     }
@@ -2294,6 +2319,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2321,6 +2347,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&id, &pool_id);
         client.mark_paid(&id, &pool_id);
@@ -2344,6 +2371,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         env.ledger().with_mut(|l| l.timestamp += 11);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
@@ -2390,6 +2418,7 @@ mod test {
             &(env.ledger().timestamp() + SECS_PER_DAY * 30),
             &String::from_str(env, "Test invoice"),
             &String::from_str(env, "hash"),
+            &String::from_str(env, "https://example.com/meta"),
         );
         client.verify_invoice(
             &id,
@@ -2435,6 +2464,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, ""), // empty description
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2453,6 +2483,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &long_desc,
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2469,6 +2500,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2485,6 +2517,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, ""), // empty hash
+            &String::from_str(&env, "https://example.com/meta"),
         );
     }
 
@@ -2500,8 +2533,76 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash123"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         assert_eq!(id, 1);
+    }
+
+    // ── #406: per-invoice metadata URL tests ─────────────────────────────────
+
+    #[test]
+    fn test_create_invoice_metadata_url_stored_and_returned() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let url = String::from_str(&env, "https://example.com/invoice/1");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash123"),
+            &url,
+        );
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.metadata_uri, Some(url));
+    }
+
+    #[test]
+    fn test_create_invoice_empty_metadata_url_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash123"),
+            &String::from_str(&env, ""),
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::InvalidMetadata)));
+    }
+
+    #[test]
+    fn test_create_invoice_different_urls_per_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let url1 = String::from_str(&env, "https://example.com/invoice/1");
+        let url2 = String::from_str(&env, "https://example.com/invoice/2");
+        let id1 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "h1"),
+            &url1,
+        );
+        let id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "h2"),
+            &url2,
+        );
+        assert_eq!(client.get_invoice(&id1).metadata_uri, Some(url1));
+        assert_eq!(client.get_invoice(&id2).metadata_uri, Some(url2));
     }
 
     // ── #446: completed TTL tests ─────────────────────────────────────────────
@@ -2592,6 +2693,7 @@ mod test {
                 &due,
                 &String::from_str(&env, "desc"),
                 &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
 
             let mut last_ord = status_ordinal(&InvoiceStatus::Pending);
@@ -2669,6 +2771,7 @@ mod test {
                 &due,
                 &String::from_str(&env, "d"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
 
             // Randomly reach a terminal state
@@ -2757,6 +2860,7 @@ mod test {
                 &due,
                 &String::from_str(&env, "d"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
 
             client.mark_funded(&id, &pool);
@@ -2828,6 +2932,7 @@ mod test {
                 &(env.ledger().timestamp() + 10_000),
                 &String::from_str(&env, "d"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
 
             // Initially Pending
