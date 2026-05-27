@@ -331,6 +331,24 @@ Release notes are generated automatically from conventional commits using `git-c
 
 ---
 
+## 🤖 Dependabot & Automated Dependency Updates
+
+This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to keep dependencies up to date automatically. It is configured in [`.github/dependabot.yml`](.github/dependabot.yml) and opens PRs for:
+
+- **Rust/Cargo** crates in `/contracts` — weekly
+- **npm** packages in `/frontend` — weekly
+- **GitHub Actions** — monthly
+
+### Handling Dependabot PRs
+
+1. **Review the diff** — check the changelog/release notes linked in the PR description.
+2. **Check CI** — all status checks must pass before merging.
+3. **Merge promptly** — especially security updates (PRs labelled `dependencies`).
+4. **Batch minor/patch updates** — you can use Dependabot's "Rebase" button to combine multiple minor bumps if CI is green.
+5. **Breaking changes** — if a major version bump requires code changes, open a follow-up issue or PR.
+
+Maintainers should aim to merge or close Dependabot PRs within one week of opening.
+
 ## 📋 Pull Request Process
 
 ### Before Opening a PR

@@ -11,6 +11,7 @@ import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
 import TestnetFaucet from '@/components/TestnetFaucet';
 import PipelineBoard from '@/components/dashboard/PipelineBoard';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import {
   getMultipleInvoices,
   getInvoiceCount,
@@ -40,6 +41,15 @@ const PAGE_SIZE = 20;
 const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
 export default function DashboardPage() {
+  const { wallet } = useStore();
+  return (
+    <ErrorBoundary walletAddress={wallet?.address}>
+      <DashboardContent />
+    </ErrorBoundary>
+  );
+}
+
+function DashboardContent() {
   const t = useTranslations('Dashboard');
   const router = useRouter();
   const pathname = usePathname();
