@@ -170,6 +170,9 @@ jobs:
           npm rebuild @parcel/watcher --foreground-scripts || true
           node -e "require('@parcel/watcher'); console.log('parcel watcher ok after rebuild')"
 
+      - name: Type-check TypeScript (includes tests)
+        run: npm run typecheck
+
       - name: Run ESLint
         run: npm run lint
 

@@ -10,6 +10,10 @@ const baseConfig: PoolConfig = {
   yieldBps: 800, // 8.0%
   factoringFeeBps: 250, // 2.50%
   compoundInterest: false,
+  proposedYieldBps: 0,
+  yieldProposalAt: 0,
+  yieldTimelockSecs: 0,
+  maxSingleInvestorBps: 10000,
 };
 
 function totals(deposited: bigint, deployed: bigint): PoolTokenTotals {
