@@ -1,13 +1,13 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
-    directory: "/contracts"
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
       - "smart-contract"
+      - "devops"
 
   - package-ecosystem: "npm"
     directory: "/frontend"
@@ -15,13 +15,13 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     labels:
-      - "dependencies"
       - "frontend"
+      - "devops"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
     labels:
-      - "dependencies"
       - "devops"
+      - "tooling"

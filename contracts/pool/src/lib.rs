@@ -105,6 +105,8 @@ pub enum PoolError {
     ConcentrationLimitExceeded = 30,
     // #275: utilization guardrails
     UtilizationLimitExceeded = 33,
+    AmountOverflow = 34,
+    BatchTooLarge = 35,
     // #227 / #222
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
@@ -220,6 +222,7 @@ pub struct CreditScoreData {
 
 /// Scaling factor for reward_per_share to maintain precision with integer arithmetic.
 const REWARD_PRECISION: i128 = 1_000_000_000_000;
+const MAX_BATCH_SIZE: u32 = 20;
 
 #[contracttype]
 #[derive(Clone)]
@@ -261,6 +264,13 @@ pub struct FundingRequest {
     pub sme: Address,
     pub due_date: u64,
     pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentRequest {
+    pub invoice_id: u64,
+    pub amount: i128,
 }
 
 #[contracttype]
@@ -395,16 +405,14 @@ fn calculate_interest(
     yield_bps: u32,
     elapsed_secs: u64,
     is_compound: bool,
-) -> u128 {
+) -> PoolResult<u128> {
     let denominator = BPS_DENOM as u128 * SECS_PER_YEAR as u128;
     if !is_compound {
-        // Use checked intermediates so very large principals or durations fail
-        // predictably instead of overflowing before the final division.
         let numerator = principal
             .checked_mul(yield_bps as u128)
             .and_then(|value| value.checked_mul(elapsed_secs as u128))
-            .expect("interest calculation overflow");
-        return numerator / denominator;
+            .ok_or(PoolError::AmountOverflow)?;
+        return Ok(numerator / denominator);
     }
     let elapsed_days = elapsed_secs / 86400;
     let mut amount = principal;
@@ -412,28 +420,64 @@ fn calculate_interest(
     for _ in 0..elapsed_days {
         let accrued = amount
             .checked_mul(daily_rate_num)
-            .expect("interest calculation overflow")
+            .ok_or(PoolError::AmountOverflow)?
             / denominator;
         amount = amount
             .checked_add(accrued)
-            .expect("interest calculation overflow");
+            .ok_or(PoolError::AmountOverflow)?;
     }
     let remaining_secs = elapsed_secs % 86400;
     if remaining_secs > 0 {
         let accrued = amount
             .checked_mul(yield_bps as u128)
             .and_then(|value| value.checked_mul(remaining_secs as u128))
-            .expect("interest calculation overflow")
+            .ok_or(PoolError::AmountOverflow)?
             / denominator;
         amount = amount
             .checked_add(accrued)
-            .expect("interest calculation overflow");
+            .ok_or(PoolError::AmountOverflow)?;
     }
-    amount - principal
+    amount
+        .checked_sub(principal)
+        .ok_or(PoolError::AmountOverflow)
 }
 
-fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> i128 {
-    ((principal as u128 * factoring_fee_bps as u128) / BPS_DENOM as u128) as i128
+fn u128_to_i128(value: u128) -> PoolResult<i128> {
+    if value > i128::MAX as u128 {
+        return Err(PoolError::AmountOverflow);
+    }
+    Ok(value as i128)
+}
+
+fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
+    let fee = (principal as u128)
+        .checked_mul(factoring_fee_bps as u128)
+        .ok_or(PoolError::AmountOverflow)?
+        / BPS_DENOM as u128;
+    u128_to_i128(fee)
+}
+
+fn calculate_total_due(
+    record: &FundedInvoice,
+    config: &PoolConfig,
+    now: u64,
+) -> PoolResult<(u128, i128)> {
+    let elapsed_secs = now
+        .checked_sub(record.funded_at)
+        .ok_or(PoolError::AmountOverflow)?;
+    let total_interest = calculate_interest(
+        record.principal as u128,
+        config.yield_bps,
+        elapsed_secs,
+        config.compound_interest,
+    )?;
+    let total_interest_i128 = u128_to_i128(total_interest)?;
+    let total_due = record
+        .principal
+        .checked_add(total_interest_i128)
+        .and_then(|value| value.checked_add(record.factoring_fee))
+        .ok_or(PoolError::AmountOverflow)?;
+    Ok((total_interest, total_due))
 }
 
 /// Returns the required collateral amount for `principal` given the pool's collateral config.
@@ -474,7 +518,7 @@ fn resolve_factoring_fee(
         }
     }
 
-    Ok(calculate_factoring_fee(principal, fee_bps))
+    calculate_factoring_fee(principal, fee_bps)
 }
 
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
@@ -493,6 +537,13 @@ fn fund_invoice_request(
 ) -> PoolResult<()> {
     if request.principal <= 0 {
         return Err(PoolError::InvalidAmount);
+    }
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::FundedInvoice(request.invoice_id))
+    {
+        return Err(PoolError::StorageCorrupted);
     }
 
     // Verify the token is accepted.
@@ -515,7 +566,10 @@ fn fund_invoice_request(
         .instance()
         .get(&token_totals_key)
         .unwrap_or_default();
-    let available_liquidity = tt.pool_value - tt.total_deployed;
+    let available_liquidity = tt
+        .pool_value
+        .checked_sub(tt.total_deployed)
+        .ok_or(PoolError::AmountOverflow)?;
     if available_liquidity < request.principal {
         return Err(PoolError::InsufficientLiquidity);
     }
@@ -547,7 +601,10 @@ fn fund_invoice_request(
         .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
     set_funded_invoice_ttl(env, request.invoice_id, false);
 
-    tt.total_deployed += request.principal;
+    tt.total_deployed = tt
+        .total_deployed
+        .checked_add(request.principal)
+        .ok_or(PoolError::AmountOverflow)?;
     env.storage().instance().set(&token_totals_key, &tt);
 
     // #275: check utilization after deployment
@@ -556,7 +613,10 @@ fn fund_invoice_request(
         let utilization = ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         if utilization > config.max_utilization_bps {
             // Revert the deployment
-            tt.total_deployed -= request.principal;
+            tt.total_deployed = tt
+                .total_deployed
+                .checked_sub(request.principal)
+                .ok_or(PoolError::AmountOverflow)?;
             env.storage().instance().set(&token_totals_key, &tt);
             return Err(PoolError::UtilizationLimitExceeded);
         }
@@ -568,8 +628,14 @@ fn fund_invoice_request(
         }
     }
 
-    stats.total_funded_invoices += 1;
-    stats.active_funded_invoices += 1;
+    stats.total_funded_invoices = stats
+        .total_funded_invoices
+        .checked_add(1)
+        .ok_or(PoolError::AmountOverflow)?;
+    stats.active_funded_invoices = stats
+        .active_funded_invoices
+        .checked_add(1)
+        .ok_or(PoolError::AmountOverflow)?;
 
     env.events().publish(
         (EVT, symbol_short!("funded")),
@@ -1487,6 +1553,9 @@ impl FundingPool {
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
         }
+        if requests.len() > MAX_BATCH_SIZE {
+            return Err(PoolError::BatchTooLarge);
+        }
 
         let config = get_config_cached(&env)?;
         let accepted_tokens: Vec<Address> = env
@@ -1509,23 +1578,49 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn repay_invoice(
+    pub fn fund_invoices_batch(
         env: Env,
-        invoice_id: u64,
+        admin: Address,
+        requests: Vec<FundingRequest>,
+    ) -> Result<(), PoolError> {
+        Self::fund_multiple_invoices(env, admin, requests)
+    }
+
+    pub fn repay_invoices_batch(
+        env: Env,
         payer: Address,
-        amount: i128,
+        repayments: Vec<RepaymentRequest>,
     ) -> Result<(), PoolError> {
         payer.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
+        if repayments.is_empty() {
+            return Err(PoolError::InvalidAmount);
+        }
+        if repayments.len() > MAX_BATCH_SIZE {
+            return Err(PoolError::BatchTooLarge);
+        }
 
+        for i in 0..repayments.len() {
+            let request = repayments.get(i).ok_or(PoolError::StorageCorrupted)?;
+            Self::repay_invoice_request(&env, request.invoice_id, payer.clone(), request.amount)?;
+        }
+        Ok(())
+    }
+
+    fn repay_invoice_request(
+        env: &Env,
+        invoice_id: u64,
+        payer: Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
         if amount <= 0 {
             return Err(PoolError::InvalidAmount);
         }
 
-        Self::non_reentrant_start(&env); // <- ADD GUARD START
+        Self::non_reentrant_start(env); // <- ADD GUARD START
 
-        let config: PoolConfig = get_config_cached(&env)?;
+        let config: PoolConfig = get_config_cached(env)?;
         let funded_invoice_key = DataKey::FundedInvoice(invoice_id);
         let mut record: FundedInvoice = env
             .storage()
@@ -1534,24 +1629,22 @@ impl FundingPool {
             .ok_or(PoolError::InvoiceNotFound)?;
 
         let now = env.ledger().timestamp();
-        let elapsed_secs = now - record.funded_at;
-        let total_interest = calculate_interest(
-            record.principal as u128,
-            config.yield_bps,
-            elapsed_secs,
-            config.compound_interest,
-        );
-        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+        let (total_interest, total_due) = calculate_total_due(&record, &config, now)?;
+        let total_interest_i128 = u128_to_i128(total_interest)?;
 
         if record.repaid_amount >= total_due {
             return Err(PoolError::AlreadyFullyRepaid);
         }
-        if record.repaid_amount + amount > total_due {
+        let new_repaid_amount = record
+            .repaid_amount
+            .checked_add(amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        if new_repaid_amount > total_due {
             return Err(PoolError::Overpayment);
         }
 
         // Update state FIRST - effects
-        record.repaid_amount += amount;
+        record.repaid_amount = new_repaid_amount;
         let fully_repaid = record.repaid_amount >= total_due;
 
         let token_totals_key = DataKey::TokenTotals(record.token.clone());
@@ -1568,11 +1661,26 @@ impl FundingPool {
             .unwrap_or_default();
 
         if fully_repaid {
-            tt.total_deployed -= record.principal;
-            tt.pool_value += total_interest as i128;
-            tt.total_fee_revenue += record.factoring_fee;
-            tt.protocol_revenue += record.factoring_fee; // #236: track separately for treasury
-            tt.total_paid_out += total_due;
+            tt.total_deployed = tt
+                .total_deployed
+                .checked_sub(record.principal)
+                .ok_or(PoolError::AmountOverflow)?;
+            tt.pool_value = tt
+                .pool_value
+                .checked_add(total_interest_i128)
+                .ok_or(PoolError::AmountOverflow)?;
+            tt.total_fee_revenue = tt
+                .total_fee_revenue
+                .checked_add(record.factoring_fee)
+                .ok_or(PoolError::AmountOverflow)?;
+            tt.protocol_revenue = tt
+                .protocol_revenue
+                .checked_add(record.factoring_fee)
+                .ok_or(PoolError::AmountOverflow)?;
+            tt.total_paid_out = tt
+                .total_paid_out
+                .checked_add(total_due)
+                .ok_or(PoolError::AmountOverflow)?;
             stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
             // Distribute interest proportionally to share holders via reward_per_share accumulator.
@@ -1583,24 +1691,31 @@ impl FundingPool {
                 .ok_or(PoolError::ShareTokenNotConfigured)?;
             let total_shares: i128 = env.invoke_contract(
                 &share_token,
-                &Symbol::new(&env, "total_supply"),
-                Vec::new(&env),
+                &Symbol::new(env, "total_supply"),
+                Vec::new(env),
             );
             if total_shares > 0 {
-                tt.reward_per_share += (total_interest as i128 * REWARD_PRECISION) / total_shares;
+                let reward_delta = total_interest_i128
+                    .checked_mul(REWARD_PRECISION)
+                    .and_then(|value| value.checked_div(total_shares))
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.reward_per_share = tt
+                    .reward_per_share
+                    .checked_add(reward_delta)
+                    .ok_or(PoolError::AmountOverflow)?;
             }
         }
 
         // Write all state BEFORE external call
         env.storage().persistent().set(&funded_invoice_key, &record);
         if fully_repaid {
-            set_funded_invoice_ttl(&env, invoice_id, true);
+            set_funded_invoice_ttl(env, invoice_id, true);
         }
         env.storage().instance().set(&token_totals_key, &tt);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         // Transfer LAST - interaction
-        let token_client = token::Client::new(&env, &record.token);
+        let token_client = token::Client::new(env, &record.token);
         token_client.transfer(&payer, &env.current_contract_address(), &amount);
 
         // Handle collateral release after main transfer
@@ -1611,7 +1726,7 @@ impl FundingPool {
                 .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
             {
                 if !col.settled {
-                    let col_token_client = token::Client::new(&env, &col.token);
+                    let col_token_client = token::Client::new(env, &col.token);
                     col_token_client.transfer(
                         &env.current_contract_address(),
                         &col.depositor,
@@ -1629,13 +1744,15 @@ impl FundingPool {
             }
         }
 
-        Self::non_reentrant_end(&env); // <- ADD GUARD END
+        Self::non_reentrant_end(env); // <- ADD GUARD END
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
-            let available_amount = total_interest as i128 + record.factoring_fee;
+            let available_amount = total_interest_i128
+                .checked_add(record.factoring_fee)
+                .ok_or(PoolError::AmountOverflow)?;
             if let Err(e) =
-                Self::process_withdrawal_queue(&env, record.token.clone(), available_amount)
+                Self::process_withdrawal_queue(env, record.token.clone(), available_amount)
             {
                 // Log error but don't fail the repayment
                 // `format!` is unavailable in `no_std`; keep a lightweight log.
@@ -1645,7 +1762,7 @@ impl FundingPool {
 
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
-                (invoice_id, record.principal, total_interest as i128, now),
+                (invoice_id, record.principal, total_interest_i128, now),
             );
         } else {
             env.events().publish(
@@ -1654,6 +1771,18 @@ impl FundingPool {
             );
         }
         Ok(())
+    }
+
+    pub fn repay_invoice(
+        env: Env,
+        invoice_id: u64,
+        payer: Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        payer.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::repay_invoice_request(&env, invoice_id, payer, amount)
     }
 
     // ---- Collateral management ----
@@ -1814,14 +1943,7 @@ impl FundingPool {
             .get(&DataKey::Config)
             .ok_or(PoolError::NotInitialized)?;
         let now = env.ledger().timestamp();
-        let elapsed_secs = now - record.funded_at;
-        let total_interest = calculate_interest(
-            record.principal as u128,
-            config.yield_bps,
-            elapsed_secs,
-            config.compound_interest,
-        );
-        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+        let (_total_interest, total_due) = calculate_total_due(&record, &config, now)?;
 
         if record.repaid_amount >= total_due {
             return Err(PoolError::AlreadyFullyRepaid);
@@ -2542,14 +2664,7 @@ impl FundingPool {
             .get(&DataKey::Config)
             .ok_or(PoolError::NotInitialized)?;
         let now = env.ledger().timestamp();
-        let elapsed_secs = now - record.funded_at;
-        let total_interest = calculate_interest(
-            record.principal as u128,
-            config.yield_bps,
-            elapsed_secs,
-            config.compound_interest,
-        );
-        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+        let (_total_interest, total_due) = calculate_total_due(&record, &config, now)?;
 
         if record.repaid_amount < total_due {
             return Err(PoolError::InvalidAmount);
@@ -2587,14 +2702,7 @@ impl FundingPool {
         }
 
         let now = env.ledger().timestamp();
-        let elapsed = now - record.funded_at;
-        let interest = calculate_interest(
-            record.principal as u128,
-            config.yield_bps,
-            elapsed,
-            config.compound_interest,
-        );
-        let total_due = record.principal + interest as i128 + record.factoring_fee;
+        let (_interest, total_due) = calculate_total_due(&record, &config, now)?;
         // Return remaining amount due (total - already repaid)
         let remaining = total_due - record.repaid_amount;
         if remaining < 0 {
@@ -3961,14 +4069,15 @@ mod test {
             5_000u32,
             5 * SECS_PER_YEAR,
             false,
-        );
+        )
+        .unwrap();
         assert!(interest > 0);
         assert!(interest < 3_000_000_000_000_000u128);
     }
 
     #[test]
     fn test_yield_calc_precision_small_amounts() {
-        let interest = calculate_interest(1u128, 800u32, 86_400u64, false);
+        let interest = calculate_interest(1u128, 800u32, 86_400u64, false).unwrap();
         assert_eq!(interest, 0u128);
     }
 
@@ -4025,6 +4134,135 @@ mod test {
         let attacker = Address::generate(&env);
         let result = client.try_fund_multiple_invoices(&attacker, &requests);
         assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_fund_invoices_batch_funds_five_invoices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let mut requests = Vec::new(&env);
+        for invoice_id in 1u64..=5u64 {
+            requests.push_back(FundingRequest {
+                invoice_id,
+                principal: 1_000,
+                sme: sme.clone(),
+                due_date: env.ledger().timestamp() + 86_400,
+                token: usdc_id.clone(),
+            });
+        }
+
+        client.fund_invoices_batch(&admin, &requests);
+
+        for invoice_id in 1u64..=5u64 {
+            assert!(client.get_funded_invoice(&invoice_id).is_some());
+        }
+        let stats = client.get_storage_stats();
+        assert_eq!(stats.active_funded_invoices, 5);
+    }
+
+    #[test]
+    fn test_fund_invoices_batch_rejects_more_than_twenty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let mut requests = Vec::new(&env);
+        for invoice_id in 1u64..=21u64 {
+            requests.push_back(FundingRequest {
+                invoice_id,
+                principal: 1,
+                sme: sme.clone(),
+                due_date: env.ledger().timestamp() + 86_400,
+                token: usdc_id.clone(),
+            });
+        }
+
+        let result = client.try_fund_invoices_batch(&admin, &requests);
+        assert_eq!(result, Err(Ok(PoolError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_repay_invoices_batch_repays_multiple_invoices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let mut fund_requests = Vec::new(&env);
+        for invoice_id in 1u64..=3u64 {
+            fund_requests.push_back(FundingRequest {
+                invoice_id,
+                principal: 1_000,
+                sme: sme.clone(),
+                due_date: env.ledger().timestamp() + 86_400,
+                token: usdc_id.clone(),
+            });
+        }
+        client.fund_invoices_batch(&admin, &fund_requests);
+
+        let mut repayments = Vec::new(&env);
+        for invoice_id in 1u64..=3u64 {
+            let amount = client.estimate_repayment(&invoice_id);
+            repayments.push_back(RepaymentRequest { invoice_id, amount });
+        }
+        client.repay_invoices_batch(&sme, &repayments);
+
+        for invoice_id in 1u64..=3u64 {
+            let record = client.get_funded_invoice(&invoice_id).unwrap();
+            assert_eq!(record.repaid_amount, record.principal);
+        }
+    }
+
+    #[test]
+    fn test_total_due_overflow_returns_amount_overflow() {
+        let env = Env::default();
+        let token = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let record = FundedInvoice {
+            invoice_id: 1,
+            sme,
+            token,
+            principal: i128::MAX,
+            funded_at: 0,
+            factoring_fee: 0,
+            due_date: u64::MAX,
+            repaid_amount: 0,
+        };
+        let config = PoolConfig {
+            invoice_contract: Address::generate(&env),
+            admin: Address::generate(&env),
+            yield_bps: u32::MAX,
+            factoring_fee_bps: 0,
+            compound_interest: false,
+            last_yield_change_at: 0,
+            yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
+            max_yield_change_bps: DEFAULT_MAX_YIELD_CHANGE_BPS,
+            proposed_yield_bps: 0,
+            yield_proposal_at: 0,
+            yield_timelock_secs: DEFAULT_YIELD_TIMELOCK_SECS,
+            min_deposit_amount: DEFAULT_MIN_DEPOSIT_AMOUNT,
+            max_single_investor_bps: DEFAULT_MAX_SINGLE_INVESTOR_BPS,
+            max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
+            withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+            max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
+            utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
+        };
+
+        assert_eq!(
+            calculate_total_due(&record, &config, u64::MAX),
+            Err(PoolError::AmountOverflow)
+        );
     }
 
     #[test]

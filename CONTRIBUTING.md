@@ -331,23 +331,24 @@ Release notes are generated automatically from conventional commits using `git-c
 
 ---
 
-## 🤖 Dependabot & Automated Dependency Updates
+## 🤖 Dependabot PRs
 
-This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to keep dependencies up to date automatically. It is configured in [`.github/dependabot.yml`](.github/dependabot.yml) and opens PRs for:
+Dependabot checks the Rust workspace, frontend npm dependencies, and GitHub
+Actions workflows for dependency updates. It opens pull requests with existing
+area labels so maintainers can route them quickly:
 
-- **Rust/Cargo** crates in `/contracts` — weekly
-- **npm** packages in `/frontend` — weekly
-- **GitHub Actions** — monthly
+- `smart-contract` and `devops` for Cargo workspace updates
+- `frontend` and `devops` for frontend npm updates
+- `devops` and `tooling` for GitHub Actions updates
 
-### Handling Dependabot PRs
+When reviewing a Dependabot PR:
 
-1. **Review the diff** — check the changelog/release notes linked in the PR description.
-2. **Check CI** — all status checks must pass before merging.
-3. **Merge promptly** — especially security updates (PRs labelled `dependencies`).
-4. **Batch minor/patch updates** — you can use Dependabot's "Rebase" button to combine multiple minor bumps if CI is green.
-5. **Breaking changes** — if a major version bump requires code changes, open a follow-up issue or PR.
+1. Prioritize security updates and runtime dependency updates before tooling-only changes.
+2. Confirm the affected area by checking the labels and changed lockfiles.
+3. Run the relevant local checks from the testing section above.
+4. Merge only one dependency update PR at a time when failures would be hard to isolate.
 
-Maintainers should aim to merge or close Dependabot PRs within one week of opening.
+---
 
 ## 📋 Pull Request Process
 

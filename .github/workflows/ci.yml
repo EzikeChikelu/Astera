@@ -239,6 +239,11 @@ jobs:
           NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
           NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
 
+      - name: Configure Playwright base URL
+        run: |
+          PORT=$(node -e "const net = require('node:net'); const server = net.createServer(); server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => console.log(port)); });")
+          echo "PLAYWRIGHT_BASE_URL=http://127.0.0.1:${PORT}" >> "$GITHUB_ENV"
+
       - name: Run Playwright E2E tests
         run: npm run test:e2e
         env:
