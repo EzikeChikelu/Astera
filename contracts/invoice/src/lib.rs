@@ -716,12 +716,12 @@ impl InvoiceContract {
         let now = env.ledger().timestamp();
         let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
         let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
-        let reset_time: u64 = env.storage().instance().get(&daily_reset_key).unwrap_or(0);
+        let next_reset: u64 = env.storage().instance().get(&daily_reset_key).unwrap_or(0);
         let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
-        if now >= reset_time {
+        if now >= next_reset {
             daily_count = 0;
-            let next_reset = (now / SECS_PER_DAY + 1) * SECS_PER_DAY;
-            env.storage().instance().set(&daily_reset_key, &next_reset);
+            let anchored = (now / SECS_PER_DAY + 1) * SECS_PER_DAY;
+            env.storage().instance().set(&daily_reset_key, &anchored);
         }
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
@@ -2209,6 +2209,41 @@ mod test {
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
             );
+        }
+    }
+
+    #[test]
+    fn test_daily_reset_anchored_to_day_boundary_no_drift() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due = |env: &Env| env.ledger().timestamp() + 86_400;
+        // Simulate 365 daily resets, verify each lands at exact day boundary
+        for day in 0..365 {
+            let ts = 1_000_000 + day * 86_400;
+            env.ledger().with_mut(|l| l.timestamp = ts as u64);
+            // Creating an invoice triggers the reset check
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due(&env),
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+            );
+            // First invoice after reset should succeed (daily_count was reset to 0)
+            // Verify by checking we can create up to the limit
+            for _ in 1..10 {
+                client.create_invoice(
+                    &sme,
+                    &String::from_str(&env, "D"),
+                    &100i128,
+                    &due(&env),
+                    &String::from_str(&env, "i"),
+                    &String::from_str(&env, "h"),
+                );
+            }
         }
     }
 

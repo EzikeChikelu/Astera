@@ -111,9 +111,9 @@ pub enum PoolError {
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
-    UnsupportedTokenDecimals = 36,
+    UnsupportedTokenDecimals = 34,
     // #413: invalid collateral threshold
-    InvalidThreshold = 37,
+    InvalidThreshold = 36,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1924,10 +1924,7 @@ impl FundingPool {
         if threshold < 0 {
             return Err(PoolError::InvalidAmount);
         }
-        if collateral_bps == 0 {
-            return Err(PoolError::InvalidThreshold);
-        }
-        if collateral_bps > BPS_DENOM {
+        if collateral_bps == 0 || collateral_bps > BPS_DENOM {
             return Err(PoolError::InvalidThreshold);
         }
         let cfg = CollateralConfig {
@@ -3778,7 +3775,16 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let result = client.try_set_collateral_config(&admin, &1_000i128, &10_001u32);
-        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+        assert_eq!(result, Err(Ok(PoolError::InvalidThreshold)));
+    }
+
+    #[test]
+    fn test_set_collateral_config_zero_collateral_bps_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let result = client.try_set_collateral_config(&admin, &1_000i128, &0u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidThreshold)));
     }
 
     #[test]
