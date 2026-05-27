@@ -111,6 +111,11 @@ pub enum PoolError {
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
+    UnsupportedTokenDecimals = 36,
+    // #413: invalid collateral configuration
+    InvalidThreshold = 37,
+    // Pre-existing: fee-on-transfer token mismatch
+    TransferMismatch = 38,
     UnsupportedTokenDecimals = 34,
     KycNotApproved = 36,
 }
@@ -614,7 +619,7 @@ fn resolve_factoring_fee(
     let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
     let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps)?;
     // Denormalize fee back to token units
-    let fee = denormalize_from_stroops(normalized_fee?, token_config.decimals);
+    let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
     Ok(fee)
 }
 
@@ -1161,10 +1166,6 @@ impl FundingPool {
             .persistent()
             .set(&investor_pos_key, &investor_position);
 
-        // Transfer tokens LAST - interaction
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&investor, &env.current_contract_address(), &amount);
-
         Self::non_reentrant_end(&env);
 
         env.events().publish(
@@ -1696,7 +1697,7 @@ impl FundingPool {
         };
         fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        
+
         Self::non_reentrant_end(&env);
         Ok(())
     }
@@ -1710,9 +1711,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        
+
         Self::non_reentrant_start(&env);
-        
+
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
         }
@@ -1944,7 +1945,7 @@ impl FundingPool {
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
         if threshold < 0 {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::InvalidThreshold);
         }
         if collateral_bps == 0 || collateral_bps > BPS_DENOM {
             return Err(PoolError::InvalidThreshold);
