@@ -12,6 +12,7 @@ pub enum DataKey {
     Symbol,
     Decimals,
     Balance(Address),
+    Allowance(Address, Address),
     TotalSupply,
 }
 
@@ -95,6 +96,56 @@ impl ShareToken {
             .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
         env.events()
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
+    }
+
+    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) {
+        owner.require_auth();
+        if amount < 0 {
+            panic!("amount must be non-negative");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+        env.events()
+            .publish((EVT, symbol_short!("approve")), (owner, spender, amount));
+    }
+
+    pub fn allowance(env: Env, owner: Address, spender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Allowance(owner, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        spender.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowed < amount {
+            panic!("allowance exceeded");
+        }
+        let balance_from = Self::balance(env.clone(), from.clone());
+        if balance_from < amount {
+            panic!("insufficient balance");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from.clone()), &(balance_from - amount));
+        let balance_to = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
+        env.storage().persistent().set(
+            &DataKey::Allowance(from.clone(), spender.clone()),
+            &(allowed - amount),
+        );
+        env.events().publish(
+            (EVT, symbol_short!("xfer_from")),
+            (spender, from, to, amount),
+        );
     }
 
     pub fn balance(env: Env, id: Address) -> i128 {
@@ -348,5 +399,39 @@ mod test {
         assert_eq!(client.total_supply(), 1_300);
         assert_eq!(client.balance(&alice), 500);
         assert_eq!(client.balance(&bob), 800);
+    }
+
+    #[test]
+    fn test_approve_and_transfer_from() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        client.mint(&owner, &1_000i128);
+        client.approve(&owner, &spender, &400i128);
+        client.transfer_from(&spender, &owner, &recipient, &250i128);
+
+        assert_eq!(client.balance(&owner), 750);
+        assert_eq!(client.balance(&recipient), 250);
+        assert_eq!(client.allowance(&owner, &spender), 150);
+        assert_eq!(client.total_supply(), 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "allowance exceeded")]
+    fn test_transfer_from_fails_exceeds_allowance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        client.mint(&owner, &1_000i128);
+        client.approve(&owner, &spender, &100i128);
+        client.transfer_from(&spender, &owner, &recipient, &101i128);
     }
 }

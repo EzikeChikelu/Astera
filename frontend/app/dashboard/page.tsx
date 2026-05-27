@@ -104,7 +104,7 @@ export default function DashboardPage() {
           .filter((value): value is StatusFilter => STATUS_TABS.includes(value as StatusFilter))
       : [];
     const initialSort = params.get('sort');
-    const initialSortValue = sortOptions.some((opt) => opt.value === initialSort)
+    const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
 
