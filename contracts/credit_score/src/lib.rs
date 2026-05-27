@@ -46,6 +46,7 @@ const PTS_NEW_INVOICE: u32 = 5;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
 #[contracttype]
 #[derive(Clone)]
@@ -83,9 +84,31 @@ pub struct CreditScoreData {
 }
 
 #[contracttype]
+#[derive(Clone)]
+pub struct ScoreThresholds {
+    pub excellent: u32,
+    pub very_good: u32,
+    pub good: u32,
+    pub fair: u32,
+}
+
+impl ScoreThresholds {
+    pub fn defaults() -> Self {
+        Self {
+            excellent: 800,
+            very_good: 740,
+            good: 670,
+            fair: 580,
+        }
+    }
+}
+
+#[contracttype]
 pub enum DataKey {
     CreditScore(Address),
+    /// Number of retained records in the rolling payment history window.
     PaymentHistory(Address),
+    PaymentHistoryStart(Address),
     PaymentRecordIdx(Address, u32),
     InvoiceProcessed(u64),
     Admin,
@@ -100,6 +123,8 @@ pub enum DataKey {
     ContractVersion,
     /// Configurable late-payment threshold in days (#430).
     LateThreshold,
+    /// #428: Configurable score thresholds (Excellent, Very Good, Good, Fair)
+    ScoreThresholds,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -123,6 +148,52 @@ fn get_late_threshold(env: &Env) -> i64 {
         .persistent()
         .get(&DataKey::LateThreshold)
         .unwrap_or(30)
+}
+
+fn max_payment_history(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxPaymentHistory)
+        .unwrap_or(MAX_PAYMENT_HISTORY)
+}
+
+fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
+    let max_history = max_payment_history(env);
+    if max_history == 0 {
+        panic!("payment history limit must be positive");
+    }
+
+    let history_len: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistory(sme.clone()))
+        .unwrap_or(0);
+    let start_idx: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistoryStart(sme.clone()))
+        .unwrap_or(0);
+
+    if history_len < max_history {
+        let idx = (start_idx + history_len) % max_history;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentRecordIdx(sme.clone(), idx), record);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::PaymentRecordIdx(sme.clone(), start_idx), record);
+        let new_start = (start_idx + 1) % max_history;
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistoryStart(sme.clone()), &new_start);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentHistory(sme.clone()), &max_history);
+    }
 }
 
 fn calculate_score(
@@ -205,6 +276,9 @@ impl CreditScoreContract {
         env.storage().instance().set(&DataKey::ScoreVersion, &1u32);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPaymentHistory, &MAX_PAYMENT_HISTORY);
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -444,9 +518,16 @@ impl CreditScoreContract {
             .instance()
             .get(&DataKey::PaymentHistory(sme.clone()))
             .unwrap_or(0);
+        let start_idx: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistoryStart(sme.clone()))
+            .unwrap_or(0);
+        let max_history = max_payment_history(&env);
 
         let mut records = Vec::new(&env);
-        for i in 0..history_len {
+        for offset in 0..history_len {
+            let i = (start_idx + offset) % max_history;
             if let Some(record) = env
                 .storage()
                 .persistent()
@@ -459,9 +540,24 @@ impl CreditScoreContract {
     }
 
     pub fn get_payment_record(env: Env, sme: Address, index: u32) -> Option<PaymentRecord> {
+        let history_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistory(sme.clone()))
+            .unwrap_or(0);
+        if index >= history_len {
+            return None;
+        }
+        let start_idx: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentHistoryStart(sme.clone()))
+            .unwrap_or(0);
+        let max_history = max_payment_history(&env);
+        let idx = (start_idx + index) % max_history;
         env.storage()
             .persistent()
-            .get(&DataKey::PaymentRecordIdx(sme, index))
+            .get(&DataKey::PaymentRecordIdx(sme, idx))
     }
 
     pub fn get_payment_history_length(env: Env, sme: Address) -> u32 {
@@ -472,19 +568,49 @@ impl CreditScoreContract {
     }
 
     pub fn get_score_band(env: Env, score: u32) -> String {
-        if score >= 800 {
+        let thresholds = Self::get_score_thresholds(&env);
+        if score >= thresholds.excellent {
             String::from_str(&env, "Excellent")
-        } else if score >= 740 {
+        } else if score >= thresholds.very_good {
             String::from_str(&env, "Very Good")
-        } else if score >= 670 {
+        } else if score >= thresholds.good {
             String::from_str(&env, "Good")
-        } else if score >= 580 {
+        } else if score >= thresholds.fair {
             String::from_str(&env, "Fair")
-        } else if score >= 500 {
+        } else if score >= BASE_SCORE {
             String::from_str(&env, "Poor")
         } else {
             String::from_str(&env, "Very Poor")
         }
+    }
+
+    pub fn get_score_thresholds(env: &Env) -> ScoreThresholds {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScoreThresholds)
+            .unwrap_or_else(ScoreThresholds::defaults)
+    }
+
+    pub fn set_score_thresholds(env: Env, admin: Address, thresholds: ScoreThresholds) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        // Validate thresholds are strictly decreasing
+        if !(thresholds.excellent > thresholds.very_good
+            && thresholds.very_good > thresholds.good
+            && thresholds.good > thresholds.fair
+            && thresholds.fair > BASE_SCORE)
+        {
+            panic!("invalid score thresholds: must be strictly decreasing");
+        }
+        let old = Self::get_score_thresholds(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoreThresholds, &thresholds);
+        env.events().publish(
+            (EVT, symbol_short!("thresh")),
+            (old.excellent, old.very_good, old.good, old.fair),
+        );
     }
 
     pub fn is_invoice_processed(env: Env, invoice_id: u64) -> bool {
@@ -554,6 +680,24 @@ impl CreditScoreContract {
             .persistent()
             .get(&DataKey::LateThreshold)
             .unwrap_or(30)
+    }
+
+    pub fn set_max_payment_history(env: Env, admin: Address, max_history: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        if max_history == 0 {
+            panic!("payment history limit must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPaymentHistory, &max_history);
+        env.events()
+            .publish((EVT, symbol_short!("hist_upd")), max_history);
+    }
+
+    pub fn get_max_payment_history(env: Env) -> u32 {
+        max_payment_history(&env)
     }
 
     fn get_or_create_credit_data(env: &Env, sme: &Address) -> CreditScoreData {
@@ -851,6 +995,7 @@ mod test {
 
         let (client, _admin, _invoice, _pool) = setup(&env);
 
+        // Test with default thresholds: excellent=800, very_good=740, good=670, fair=580
         assert_eq!(
             client.get_score_band(&850),
             String::from_str(&env, "Excellent")
@@ -871,6 +1016,60 @@ mod test {
             client.get_score_band(&400),
             String::from_str(&env, "Very Poor")
         );
+    }
+
+    #[test]
+    fn test_set_score_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Test default thresholds
+        let defaults = ScoreThresholds::defaults();
+        assert_eq!(defaults.excellent, 800);
+        assert_eq!(defaults.very_good, 740);
+        assert_eq!(defaults.good, 670);
+        assert_eq!(defaults.fair, 580);
+
+        // Update to new thresholds
+        let new_thresholds = ScoreThresholds {
+            excellent: 750,
+            very_good: 700,
+            good: 650,
+            fair: 600,
+        };
+        client.set_score_thresholds(&admin, &new_thresholds);
+
+        // Verify new thresholds are applied
+        assert_eq!(
+            client.get_score_band(&750),
+            String::from_str(&env, "Excellent")
+        );
+        assert_eq!(
+            client.get_score_band(&700),
+            String::from_str(&env, "Very Good")
+        );
+        assert_eq!(client.get_score_band(&650), String::from_str(&env, "Good"));
+        assert_eq!(client.get_score_band(&600), String::from_str(&env, "Fair"));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid score thresholds")]
+    fn test_set_invalid_score_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Try to set invalid thresholds (not strictly decreasing)
+        let invalid_thresholds = ScoreThresholds {
+            excellent: 700,
+            very_good: 750, // Invalid: greater than excellent
+            good: 650,
+            fair: 600,
+        };
+        client.set_score_thresholds(&admin, &invalid_thresholds);
     }
 
     #[test]
@@ -1047,17 +1246,20 @@ mod test {
         env.mock_all_auths();
         let (client, _admin, _invoice, _pool) = setup(&env);
 
+        // Get the thresholds being used
+        let thresholds = ScoreThresholds::defaults();
+
         for score in MIN_SCORE..=MAX_SCORE {
             let band = client.get_score_band(&score);
-            let expected = if score >= 800 {
+            let expected = if score >= thresholds.excellent {
                 "Excellent"
-            } else if score >= 740 {
+            } else if score >= thresholds.very_good {
                 "Very Good"
-            } else if score >= 670 {
+            } else if score >= thresholds.good {
                 "Good"
-            } else if score >= 580 {
+            } else if score >= thresholds.fair {
                 "Fair"
-            } else if score >= 500 {
+            } else if score >= BASE_SCORE {
                 "Poor"
             } else {
                 "Very Poor"
@@ -1077,8 +1279,9 @@ mod test {
     // **Validates: Requirements 7.1, 7.2, 7.3**
     #[test]
     fn test_prop_payment_history_ordering() {
-        // For any sequence of N records, get_payment_history returns N records in insertion order,
-        // and get_payment_record(i) matches get_payment_history()[i].
+        // For any sequence of N records, get_payment_history returns the most recent
+        // MAX_PAYMENT_HISTORY records in insertion order, and get_payment_record(i)
+        // matches get_payment_history()[i].
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);
@@ -1094,13 +1297,16 @@ mod test {
         for trial in 0..20u64 {
             let (client, _admin, _invoice, pool) = setup(&env);
             let sme = Address::generate(&env);
-            let n = (lcg(&mut seed) % 10 + 1) as u64;
+            let n = (lcg(&mut seed) % 150 + 1) as u64;
             let due_date = 200_000u64;
-            let mut expected_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+            let mut expected_ids: std::vec::Vec<u64> = std::vec::Vec::new();
 
             for i in 0..n {
                 let invoice_id = trial * 20 + i + 1;
-                expected_ids.push_back(invoice_id);
+                if expected_ids.len() == MAX_PAYMENT_HISTORY as usize {
+                    expected_ids.remove(0);
+                }
+                expected_ids.push(invoice_id);
                 let is_default = lcg(&mut seed) % 3 == 0;
                 if is_default {
                     client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
@@ -1116,10 +1322,12 @@ mod test {
                 }
             }
 
-            // History length matches
+            let expected_len = n.min(MAX_PAYMENT_HISTORY as u64) as u32;
+
+            // History length matches the capped window size.
             assert_eq!(
                 client.get_payment_history_length(&sme),
-                n as u32,
+                expected_len,
                 "trial {}: history length mismatch",
                 trial
             );
@@ -1128,13 +1336,13 @@ mod test {
             let history = client.get_payment_history(&sme);
             assert_eq!(
                 history.len(),
-                n as u32,
+                expected_len,
                 "trial {}: history vec length mismatch",
                 trial
             );
 
             // Individual record lookup matches history
-            for i in 0..n as u32 {
+            for i in 0..expected_len {
                 let by_index = client.get_payment_record(&sme, &i).unwrap();
                 let from_history = history.get(i).unwrap();
                 assert_eq!(
@@ -1144,13 +1352,48 @@ mod test {
                 );
                 assert_eq!(
                     by_index.invoice_id,
-                    expected_ids.get(i).unwrap(),
+                    *expected_ids.get(i as usize).unwrap(),
                     "trial {}: record {} not in insertion order",
                     trial,
                     i
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_payment_history_rolling_window_caps_at_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for invoice_id in 1u64..=200u64 {
+            client.record_payment(
+                &pool,
+                &invoice_id,
+                &sme,
+                &1_000_000_000i128,
+                &due_date,
+                &(due_date - 1000),
+            );
+        }
+
+        assert_eq!(client.get_payment_history_length(&sme), MAX_PAYMENT_HISTORY);
+
+        let history = client.get_payment_history(&sme);
+        assert_eq!(history.len(), MAX_PAYMENT_HISTORY);
+        assert_eq!(history.get(0).unwrap().invoice_id, 101);
+        assert_eq!(history.get(99).unwrap().invoice_id, 200);
+        assert_eq!(client.get_payment_record(&sme, &0).unwrap().invoice_id, 101);
+        assert_eq!(
+            client.get_payment_record(&sme, &99).unwrap().invoice_id,
+            200
+        );
+        assert!(client.get_payment_record(&sme, &100).is_none());
     }
 
     // **Feature: credit-scoring, Property 9: Idempotency guard**
