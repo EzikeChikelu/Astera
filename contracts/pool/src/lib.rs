@@ -121,6 +121,10 @@ pub enum PoolError {
     KycNotApproved = 40,
     // collateral threshold/ratio validation
     InvalidThreshold = 41,
+    // #386: seize_collateral requires invoice to be in Defaulted status
+    NotDefaulted = 42,
+    // #385: pool address stored in invoice contract does not match this pool
+    InvoicePoolMismatch = 43,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -394,6 +398,13 @@ const EVT: Symbol = symbol_short!("POOL");
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
     fn get_credit_score(env: Env, sme: Address) -> CreditScoreData;
+}
+
+/// Cross-contract interface to the invoice contract (#385, #386).
+#[contractclient(name = "InvoiceContractClient")]
+pub trait InvoiceContract {
+    fn get_authorized_pool(env: Env) -> Address;
+    fn is_invoice_defaulted(env: Env, id: u64) -> bool;
 }
 
 // Cache for config to reduce storage reads
@@ -1680,6 +1691,16 @@ impl FundingPool {
         Self::non_reentrant_start(&env);
 
         let config = get_config_cached(&env)?;
+
+        // #385: verify the invoice contract still has this pool as its authorized pool.
+        // Guards against funding invoices that belong to a stale or swapped-out pool config.
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        let this_contract = env.current_contract_address();
+        match invoice_client.try_get_authorized_pool() {
+            Ok(Ok(ref auth_pool)) if auth_pool == &this_contract => {}
+            _ => return Err(PoolError::InvoicePoolMismatch),
+        }
+
         if env
             .storage()
             .persistent()
@@ -2141,6 +2162,17 @@ impl FundingPool {
             return Err(PoolError::AlreadyFullyRepaid);
         }
 
+        // #386: require the invoice to be explicitly in Defaulted status before seizing.
+        // Prevents premature seizure on invoices that are merely overdue but not yet defaulted.
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        let is_defaulted = match invoice_client.try_is_invoice_defaulted(&invoice_id) {
+            Ok(Ok(v)) => v,
+            _ => false,
+        };
+        if !is_defaulted {
+            return Err(PoolError::NotDefaulted);
+        }
+
         let mut col: CollateralDeposit = env
             .storage()
             .persistent()
@@ -2176,8 +2208,9 @@ impl FundingPool {
             COMPLETED_INVOICE_TTL,
         );
 
+        // #386: emit status-triggered seizure event (invoice was Defaulted).
         env.events().publish(
-            (EVT, symbol_short!("col_seiz")),
+            (EVT, Symbol::new(&env, "col_seiz_default")),
             (invoice_id, col.depositor, col.amount, admin, now),
         );
         Ok(())
