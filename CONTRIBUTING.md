@@ -209,6 +209,13 @@ cd contracts
 cargo test
 ```
 
+Fuzz harness smoke tests are also part of CI for the contract crates that support them:
+
+```bash
+cd contracts/invoice
+cargo test --test fuzz_tests --verbose
+```
+
 Build for deployment:
 
 ```bash
