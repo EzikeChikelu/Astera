@@ -21,7 +21,12 @@ pub trait PoolContract {
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
-const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
+// #446: completed invoices must outlive active ones — default to 5 years so
+// repayment history, dispute resolution, and credit-score lookups remain
+// accessible long after an invoice is settled.
+const DEFAULT_COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365 * 5;
+// Keep the old name as an alias so existing call-sites compile unchanged.
+const COMPLETED_INVOICE_TTL: u32 = DEFAULT_COMPLETED_INVOICE_TTL;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
@@ -66,6 +71,9 @@ pub enum InvoiceError {
     HashMismatch = 4,
     SmeExposureLimitExceeded = 5,
     AmountOverflow = 6,
+    // #436: string field validation errors
+    EmptyField = 7,
+    FieldTooLong = 8,
 }
 
 #[contracttype]
@@ -186,6 +194,8 @@ pub enum DataKey {
     DebtorRecord(String),
     DebtorIds,
     SmeOutstanding(Address),
+    // #446: admin-configurable TTL for completed invoices
+    CompletedInvoiceTtl,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -251,7 +261,12 @@ fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
     let ttl = if is_completed {
-        COMPLETED_INVOICE_TTL
+        // #446: use admin-configured TTL when set, otherwise fall back to the
+        // 5-year default so completed invoices are never evicted prematurely.
+        env.storage()
+            .instance()
+            .get(&DataKey::CompletedInvoiceTtl)
+            .unwrap_or(COMPLETED_INVOICE_TTL)
     } else {
         ACTIVE_INVOICE_TTL
     };
@@ -609,6 +624,20 @@ impl InvoiceContract {
         owner.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
+
+        // #436: validate required string fields before any storage writes
+        if description.is_empty() {
+            panic!("description must not be empty");
+        }
+        if description.len() > 256 {
+            panic!("description exceeds maximum length of 256 characters");
+        }
+        if debtor.is_empty() {
+            panic!("debtor must not be empty");
+        }
+        if verification_hash.is_empty() {
+            panic!("verification_hash must not be empty");
+        }
 
         if let Some(uri) = metadata_uri.as_ref() {
             if !is_valid_metadata_uri(&env, uri) {
@@ -1477,6 +1506,40 @@ impl InvoiceContract {
             .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS)
     }
 
+    /// #446: Set the TTL (in ledgers) applied to completed/defaulted/cancelled
+    /// invoices.  Must be at least as long as `ACTIVE_INVOICE_TTL` (1 year) so
+    /// historical records are never evicted before active ones.
+    pub fn set_completed_invoice_ttl(env: Env, admin: Address, ttl_ledgers: u32) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if ttl_ledgers < ACTIVE_INVOICE_TTL {
+            panic!("completed TTL must be at least as long as ACTIVE_INVOICE_TTL");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CompletedInvoiceTtl, &ttl_ledgers);
+        env.events()
+            .publish((EVT, symbol_short!("set_cttl")), (admin, ttl_ledgers));
+    }
+
+    /// #446: Return the currently configured completed-invoice TTL in ledgers.
+    pub fn get_completed_invoice_ttl(env: Env) -> u32 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::CompletedInvoiceTtl)
+            .unwrap_or(DEFAULT_COMPLETED_INVOICE_TTL)
+    }
+
     pub fn get_grace_period(env: Env) -> u32 {
         bump_instance(&env);
         env.storage()
@@ -2288,5 +2351,140 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
         client.set_invoice_grace_period(&admin, &1u64, &31u32);
+    }
+
+    // ── #436: empty string validation tests ──────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "description must not be empty")]
+    fn test_create_invoice_empty_description_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, ""), // empty description
+            &String::from_str(&env, "hash"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "description exceeds maximum length")]
+    fn test_create_invoice_description_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        // Build a 257-character string
+        let long_desc = String::from_bytes(
+            &env,
+            &[b'a'; 257],
+        );
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &long_desc,
+            &String::from_str(&env, "hash"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "debtor must not be empty")]
+    fn test_create_invoice_empty_debtor_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, ""), // empty debtor
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "verification_hash must not be empty")]
+    fn test_create_invoice_empty_hash_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, ""), // empty hash
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_valid_fields_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash123"),
+        );
+        assert_eq!(id, 1);
+    }
+
+    // ── #446: completed TTL tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_completed_ttl_default_is_five_years() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        // Default should be 5 years in ledgers
+        let expected = LEDGERS_PER_DAY * 365 * 5;
+        assert_eq!(client.get_completed_invoice_ttl(), expected);
+    }
+
+    #[test]
+    fn test_set_completed_invoice_ttl_admin_can_configure() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        // Set to 2 years
+        let two_years = LEDGERS_PER_DAY * 365 * 2;
+        client.set_completed_invoice_ttl(&admin, &two_years);
+        assert_eq!(client.get_completed_invoice_ttl(), two_years);
+    }
+
+    #[test]
+    #[should_panic(expected = "completed TTL must be at least as long as ACTIVE_INVOICE_TTL")]
+    fn test_set_completed_ttl_below_active_ttl_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        // Try to set TTL shorter than ACTIVE_INVOICE_TTL (1 year)
+        let too_short = LEDGERS_PER_DAY * 30; // 30 days — less than 1 year
+        client.set_completed_invoice_ttl(&admin, &too_short);
+    }
+
+    #[test]
+    fn test_completed_ttl_at_least_as_long_as_active_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let completed_ttl = client.get_completed_invoice_ttl();
+        assert!(
+            completed_ttl >= ACTIVE_INVOICE_TTL,
+            "completed TTL ({}) must be >= active TTL ({})",
+            completed_ttl,
+            ACTIVE_INVOICE_TTL
+        );
     }
 }
