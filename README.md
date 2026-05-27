@@ -252,7 +252,20 @@ To apply, in GitHub: **Settings → Branches → Branch protection rules → Add
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
 
-## 💰 Bounty Contribution
+---
+
+## 🤝 Contributing
+
+We welcome contributions from developers of all experience levels! Whether you're fixing bugs, improving documentation, adding features, or participating in the Wave Program, your work helps advance tokenized RWA solutions on Stellar.
+
+**Getting started:**
+- Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
+- Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
+- See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+
+For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
 
 - **Task:** Add SME onboarding verification — prevent duplicate SME accounts
 - **Reward:** $10
