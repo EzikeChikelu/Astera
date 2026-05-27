@@ -10,11 +10,15 @@ export function useDashboardViewMode(defaultMode: DashboardViewMode = DASHBOARD_
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    setHydrated(true);
-    const stored = window.localStorage.getItem(DASHBOARD_VIEW_STORAGE_KEY);
-    if (stored === DASHBOARD_VIEW_MODES.LIST || stored === DASHBOARD_VIEW_MODES.PIPELINE) {
-      setViewMode(stored);
-    }
+    const timer = window.setTimeout(() => {
+      setHydrated(true);
+      const stored = window.localStorage.getItem(DASHBOARD_VIEW_STORAGE_KEY);
+      if (stored === DASHBOARD_VIEW_MODES.LIST || stored === DASHBOARD_VIEW_MODES.PIPELINE) {
+        setViewMode(stored);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -24,4 +28,3 @@ export function useDashboardViewMode(defaultMode: DashboardViewMode = DASHBOARD_
 
   return { viewMode, setViewMode, hydrated };
 }
-

@@ -331,6 +331,25 @@ Release notes are generated automatically from conventional commits using `git-c
 
 ---
 
+## 🤖 Dependabot PRs
+
+Dependabot checks the Rust workspace, frontend npm dependencies, and GitHub
+Actions workflows for dependency updates. It opens pull requests with existing
+area labels so maintainers can route them quickly:
+
+- `smart-contract` and `devops` for Cargo workspace updates
+- `frontend` and `devops` for frontend npm updates
+- `devops` and `tooling` for GitHub Actions updates
+
+When reviewing a Dependabot PR:
+
+1. Prioritize security updates and runtime dependency updates before tooling-only changes.
+2. Confirm the affected area by checking the labels and changed lockfiles.
+3. Run the relevant local checks from the testing section above.
+4. Merge only one dependency update PR at a time when failures would be hard to isolate.
+
+---
+
 ## 📋 Pull Request Process
 
 ### Before Opening a PR
