@@ -205,6 +205,7 @@ fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
 }
 
 fn calculate_score(
+    env: &Env,
     late_threshold: i64,
     total_invoices: u32,
     paid_on_time: u32,
@@ -215,6 +216,43 @@ fn calculate_score(
 ) -> u32 {
     if total_invoices == 0 {
         return MIN_SCORE;
+    }
+
+    // Validate internal consistency: paid_on_time + paid_late + defaulted must equal
+    // total_invoices. A mismatch signals corrupted storage; we emit a warning event and
+    // proceed with best-effort scoring rather than panicking in production.
+    let counted = paid_on_time
+        .saturating_add(paid_late)
+        .saturating_add(defaulted);
+    if counted != total_invoices {
+        env.events().publish(
+            (
+                Symbol::new(env, "CREDIT"),
+                Symbol::new(env, "data_inconsistency"),
+            ),
+            counted,
+        );
+    }
+    debug_assert_eq!(
+        counted,
+        total_invoices,
+        "Credit score data inconsistency: paid_on_time({}) + paid_late({}) + defaulted({}) = {} != total_invoices({})",
+        paid_on_time,
+        paid_late,
+        defaulted,
+        counted,
+        total_invoices,
+    );
+
+    // total_volume must be non-negative; negative values can produce incorrect score boosts.
+    if total_volume < 0 {
+        env.events().publish(
+            (
+                Symbol::new(env, "CREDIT"),
+                Symbol::new(env, "data_inconsistency"),
+            ),
+            total_volume,
+        );
     }
 
     let mut score: i64 = BASE_SCORE as i64;
@@ -410,6 +448,7 @@ impl CreditScoreContract {
             );
         }
         credit_data.score = calculate_score(
+            env,
             get_late_threshold(env),
             credit_data.total_invoices,
             credit_data.paid_on_time,
@@ -820,7 +859,7 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, IntoVal};
 
     fn setup(env: &Env) -> (CreditScoreContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(CreditScoreContract, ());
@@ -1147,7 +1186,7 @@ mod test {
     fn test_prop_score_bounds_invariant() {
         // For any combination of inputs, score must always be in [MIN_SCORE, MAX_SCORE].
         // Uses a simple LCG to generate 100 varied input combinations.
-        let _env = Env::default();
+        let env = Env::default();
         let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -1166,6 +1205,7 @@ mod test {
             let avg_days = (lcg(&mut seed) % 60) as i64 - 10; // -10 to +49
 
             let score = calculate_score(
+                &env,
                 30,
                 total_invoices,
                 paid_on_time,
@@ -1188,7 +1228,7 @@ mod test {
     fn test_prop_scoring_formula_monotonicity() {
         // For any fixed base, adding an on-time payment scores >= adding a late payment
         // which scores >= adding a default.
-        let _env = Env::default();
+        let env = Env::default();
         let mut seed: u64 = 0xCAFE_BABE_0000_0001;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -1207,6 +1247,7 @@ mod test {
             let avg = (lcg(&mut seed) % 20) as i64;
 
             let score_on_time = calculate_score(
+                &env,
                 30,
                 base_invoices + 1,
                 base_on_time + 1,
@@ -1216,6 +1257,7 @@ mod test {
                 avg,
             );
             let score_late = calculate_score(
+                &env,
                 30,
                 base_invoices + 1,
                 base_on_time,
@@ -1225,6 +1267,7 @@ mod test {
                 avg,
             );
             let score_default = calculate_score(
+                &env,
                 30,
                 base_invoices + 1,
                 base_on_time,
@@ -1254,7 +1297,7 @@ mod test {
     #[test]
     fn test_prop_defaults_dominate() {
         // When defaulted > paid_on_time and paid_late == 0, score must be < BASE_SCORE.
-        let _env = Env::default();
+        let env = Env::default();
         let mut seed: u64 = 0xF00D_CAFE_ABCD_EF01;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -1270,7 +1313,7 @@ mod test {
             let vol = (lcg(&mut seed) % 5_000_000_000) as i128;
             let avg = (lcg(&mut seed) % 15) as i64;
 
-            let score = calculate_score(30, total, on_time, 0, defaulted, vol, avg);
+            let score = calculate_score(&env, 30, total, on_time, 0, defaulted, vol, avg);
             assert!(
                 score < BASE_SCORE,
                 "score {} >= BASE_SCORE {} when defaulted({}) > on_time({}) with no late payments",
@@ -2155,5 +2198,33 @@ mod test {
         let (client, _admin, _invoice, _pool) = setup(&env);
         let attacker = Address::generate(&env);
         client.run_migration(&attacker);
+    }
+
+    // **Feature: credit-scoring, Issue #378: data inconsistency warning event**
+    // Verifies that calculate_score emits a warning event when the invoice counters
+    // do not sum to total_invoices, while still returning a clamped score.
+    #[test]
+    fn test_inconsistent_data_emits_warning_event() {
+        let env = Env::default();
+        // paid_on_time(3) + paid_late(2) + defaulted(1) = 6, but total_invoices = 10
+        let score = calculate_score(&env, 30, 10, 3, 2, 1, 1_000_000_000, 5);
+        assert!(
+            score >= MIN_SCORE && score <= MAX_SCORE,
+            "score {} out of [{}, {}]",
+            score,
+            MIN_SCORE,
+            MAX_SCORE
+        );
+        // Verify a data_inconsistency event was published
+        let events = env.events().all();
+        assert!(!events.is_empty(), "expected at least one event");
+        let found = (0..events.len()).any(|i| {
+            let ev = events.get(i).unwrap();
+            let topics = ev.1;
+            topics.len() >= 2
+                && topics.get(1).unwrap()
+                    == Symbol::new(&env, "data_inconsistency").into_val(&env)
+        });
+        assert!(found, "data_inconsistency event not found in emitted events");
     }
 }

@@ -97,6 +97,8 @@ pub enum InvoiceError {
     InvalidDueDateExtension = 15,
     ExtensionTooLarge = 16,
     NoPendingExtension = 17,
+    // Cross-contract call to pool contract failed (network/host error, not a logic rejection)
+    PoolCallFailed = 18,
 }
 
 #[contracttype]
@@ -1213,7 +1215,11 @@ impl InvoiceContract {
             panic!("invoice is not funded");
         }
         let pool_client = PoolClient::new(&env, &pool);
-        if !pool_client.is_invoice_repaid(&id) {
+        let repaid = match pool_client.try_is_invoice_repaid(&id) {
+            Ok(Ok(v)) => v,
+            _ => panic_with_error!(&env, InvoiceError::PoolCallFailed),
+        };
+        if !repaid {
             panic!("repayment not verified by pool contract");
         }
         invoice.status = InvoiceStatus::Paid;
@@ -1824,6 +1830,28 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::Pool, &pool);
         env.events()
             .publish((EVT, symbol_short!("set_pool")), (admin, pool));
+    }
+
+    /// Returns the currently authorized pool address (#385).
+    pub fn get_authorized_pool(env: Env) -> Address {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized")
+    }
+
+    /// Returns true if the invoice with `id` has status Defaulted (#386).
+    pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
+        bump_instance(&env);
+        let invoice: Option<Invoice> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id));
+        match invoice {
+            Some(inv) => inv.status == InvoiceStatus::Defaulted,
+            None => false,
+        }
     }
 
     pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
