@@ -46,6 +46,7 @@ export function ExplorerLink({
       target="_blank"
       rel="noopener noreferrer"
       title={id}
+      aria-label={`View ${type} ${id} on Stellar Explorer`}
       className={`inline-flex items-center gap-1 font-mono text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors ${className}`}
     >
       {label}
