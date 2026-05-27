@@ -112,6 +112,8 @@ pub enum PoolError {
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
     UnsupportedTokenDecimals = 36,
+    // #413: invalid collateral threshold
+    InvalidThreshold = 37,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1922,8 +1924,11 @@ impl FundingPool {
         if threshold < 0 {
             return Err(PoolError::InvalidAmount);
         }
+        if collateral_bps == 0 {
+            return Err(PoolError::InvalidThreshold);
+        }
         if collateral_bps > BPS_DENOM {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::InvalidThreshold);
         }
         let cfg = CollateralConfig {
             threshold,
