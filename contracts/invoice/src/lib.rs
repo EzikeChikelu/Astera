@@ -67,6 +67,7 @@ pub enum InvoiceError {
     InvoiceNotFound = 3,
     HashMismatch = 4,
     SmeExposureLimitExceeded = 5,
+    AmountOverflow = 6,
 }
 
 #[contracttype]
@@ -593,7 +594,7 @@ impl InvoiceContract {
         env.storage().instance().get(&DataKey::DisputeResolutionWindow).unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
     }
 
-    pub fn mark_funded(env: Env, id: u64, pool: Address) {
+    pub fn mark_funded(env: Env, id: u64, pool: Address) -> Result<(), InvoiceError> {
         pool.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
@@ -609,13 +610,16 @@ impl InvoiceContract {
         invoice.pool_contract = pool;
         let sme = invoice.owner.clone();
         let current_outstanding = get_sme_outstanding(&env, &sme);
-        let new_outstanding = current_outstanding.saturating_add(invoice.amount);
+        let new_outstanding = current_outstanding
+            .checked_add(invoice.amount)
+            .ok_or(InvoiceError::AmountOverflow)?;
         let max_outstanding = get_max_outstanding_per_sme(&env);
-        if new_outstanding > max_outstanding { panic!("SmeExposureLimitExceeded"); }
+        if new_outstanding > max_outstanding { return Err(InvoiceError::SmeExposureLimitExceeded); }
         set_sme_outstanding(&env, &sme, new_outstanding);
         env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
         env.events().publish((EVT, symbol_short!("funded")), (id, env.ledger().timestamp()));
+        Ok(())
     }
 
     pub fn mark_paid(env: Env, id: u64, pool: Address) {
@@ -1340,6 +1344,23 @@ mod test {
         let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &(env.ledger().timestamp() + 10_000), &String::from_str(&env, "x"), &String::from_str(&env, "h"));
         client.mark_funded(&id, &pool);
         client.mark_funded(&id, &pool);
+    }
+
+    #[test]
+    fn test_mark_funded_overflow_returns_amount_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let first = client.create_invoice(&sme, &String::from_str(&env, "D"), &i128::MAX, &due_date, &String::from_str(&env, "x"), &String::from_str(&env, "h1"));
+        client.mark_funded(&first, &pool);
+
+        let second = client.create_invoice(&sme, &String::from_str(&env, "D"), &1i128, &due_date, &String::from_str(&env, "x"), &String::from_str(&env, "h2"));
+        let result = client.try_mark_funded(&second, &pool);
+
+        assert_eq!(result, Err(Ok(InvoiceError::AmountOverflow)));
     }
 
     #[test]
