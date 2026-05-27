@@ -12,7 +12,7 @@ describe('useStore', () => {
 
   it('has correct initial state', () => {
     const { result } = renderHook(() => useStore());
-    
+
     expect(result.current.wallet).toEqual({
       address: null,
       connected: false,
@@ -24,7 +24,7 @@ describe('useStore', () => {
 
   it('updates wallet state', () => {
     const { result } = renderHook(() => useStore());
-    
+
     act(() => {
       result.current.setWallet({
         address: 'GDUMMY...',
@@ -32,7 +32,7 @@ describe('useStore', () => {
         network: 'testnet',
       });
     });
-    
+
     expect(result.current.wallet).toEqual({
       address: 'GDUMMY...',
       connected: true,
@@ -43,16 +43,21 @@ describe('useStore', () => {
   it('updates pool config', () => {
     const { result } = renderHook(() => useStore());
     const mockConfig = {
-      invoice_contract: 'CONTRACT1',
+      invoiceContract: 'CONTRACT1',
       admin: 'ADMIN1',
-      yield_bps: 800,
-      compound_interest: false,
+      yieldBps: 800,
+      factoringFeeBps: 0,
+      compoundInterest: false,
+      proposedYieldBps: 0,
+      yieldProposalAt: 0,
+      yieldTimelockSecs: 0,
+      maxSingleInvestorBps: 10000,
     };
-    
+
     act(() => {
       result.current.setPoolConfig(mockConfig);
     });
-    
+
     expect(result.current.poolConfig).toEqual(mockConfig);
   });
 
@@ -63,36 +68,36 @@ describe('useStore', () => {
       available: 5000000000n,
       deployed: 5000000000n,
       earned: 0n,
-      deposit_count: 1,
+      depositCount: 1,
     };
-    
+
     act(() => {
       result.current.setPosition(mockPosition);
     });
-    
+
     expect(result.current.position).toEqual(mockPosition);
   });
 
   it('clears position when set to null', () => {
     const { result } = renderHook(() => useStore());
-    
+
     act(() => {
       result.current.setPosition({
         deposited: 10000000000n,
         available: 5000000000n,
         deployed: 5000000000n,
         earned: 0n,
-        deposit_count: 1,
+        depositCount: 1,
       });
       result.current.setPosition(null);
     });
-    
+
     expect(result.current.position).toBeNull();
   });
 
   it('disconnect resets wallet and position', () => {
     const { result } = renderHook(() => useStore());
-    
+
     act(() => {
       result.current.setWallet({
         address: 'GDUMMY...',
@@ -104,11 +109,11 @@ describe('useStore', () => {
         available: 5000000000n,
         deployed: 5000000000n,
         earned: 0n,
-        deposit_count: 1,
+        depositCount: 1,
       });
       result.current.disconnect();
     });
-    
+
     expect(result.current.wallet).toEqual({
       address: null,
       connected: false,
@@ -125,7 +130,7 @@ describe('useStore', () => {
       available: 5000000000n,
       deployed: 5000000000n,
       earned: 0n,
-      deposit_count: 1,
+      depositCount: 1,
     };
 
     act(() => {

@@ -8,6 +8,7 @@
     "start": "next start",
     "start:e2e": "next build && next start",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "prepare": "cd .. && git config core.hooksPath frontend/.husky",
     "test": "jest",
@@ -20,6 +21,7 @@
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/js-xdr": "^4.0.0",
     "@stellar/stellar-sdk": "^14.6.1",
+    "@swc/helpers": "^0.5.23",
     "jose": "^6.2.3",
     "lucide-react": "^1.16.0",
     "next": "^15.2.2",
@@ -72,6 +74,7 @@
     ]
   },
   "overrides": {
-    "serialize-javascript": "7.0.5"
+    "serialize-javascript": "7.0.5",
+    "rollup": "4.60.4"
   }
 }

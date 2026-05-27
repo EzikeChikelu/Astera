@@ -5,6 +5,8 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  schedule:
+    - cron: '0 4 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,15 +28,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-0.21.0
+          key: cargo-audit-${{ runner.os }}-0.22.1
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --version 0.21.0 --locked
+        run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Run cargo-audit
         working-directory: ./contracts
-        run: cargo audit --config .cargo/audit.toml
+        run: cargo audit -f ../Cargo.lock
 
       - name: Setup Node.js for npm audit
         uses: actions/setup-node@v4
@@ -167,6 +169,9 @@ jobs:
           fi
           npm rebuild @parcel/watcher --foreground-scripts || true
           node -e "require('@parcel/watcher'); console.log('parcel watcher ok after rebuild')"
+
+      - name: Type-check TypeScript (includes tests)
+        run: npm run typecheck
 
       - name: Run ESLint
         run: npm run lint
