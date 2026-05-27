@@ -166,6 +166,28 @@ proptest! {
         prop_assert_eq!(invoice.due_date, due_date);
     }
 
+    /// Fuzz test: Large due dates are rejected before they can overflow deadline math.
+    #[test]
+    fn fuzz_invoice_due_dates_reject_far_future(
+        due_date in (u64::MAX - 10_000u64)..u64::MAX
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+        );
+
+        prop_assert_eq!(result, Err(Ok(invoice::InvoiceError::DateOverflow)));
+    }
+
     /// Fuzz test: Grace period configuration
     #[test]
     fn fuzz_grace_period_settings(grace_days in 0u32..90u32) {

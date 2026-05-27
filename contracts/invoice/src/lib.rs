@@ -35,6 +35,7 @@ const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7;
 const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
+const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
 const MAX_METADATA_URI_LEN: u32 = 256;
@@ -74,6 +75,7 @@ pub enum InvoiceError {
     // #436: string field validation errors
     EmptyField = 7,
     FieldTooLong = 8,
+    DateOverflow = 9,
 }
 
 #[contracttype]
@@ -340,6 +342,23 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
         .persistent()
         .get(&DataKey::Invoice(id))
         .expect("invoice not found")
+}
+
+fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) -> u64 {
+    let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
+    due_date
+        .checked_add(grace_period_secs)
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow))
+}
+
+fn validate_due_date(env: &Env, due_date: u64) {
+    let now = env.ledger().timestamp();
+    let max_due_date = now
+        .checked_add(MAX_DUE_DATE_AHEAD_SECS)
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
+    if due_date > max_due_date {
+        soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow);
+    }
 }
 
 #[contract]
@@ -658,6 +677,7 @@ impl InvoiceContract {
         if due_date <= env.ledger().timestamp() {
             panic!("due date must be in the future");
         }
+        validate_due_date(&env, due_date);
 
         let outstanding = get_sme_outstanding(&env, &owner);
         let max_outstanding = get_max_outstanding_per_sme(&env);
@@ -1062,9 +1082,8 @@ impl InvoiceContract {
             .get(&DataKey::GracePeriodDays)
             .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
         let grace_period_days = invoice.grace_period_override.unwrap_or(global_grace);
-        let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
         let now = env.ledger().timestamp();
-        let default_at = invoice.due_date + grace_period_secs;
+        let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         if now < default_at {
             panic!(
                 "grace period has not elapsed: default available at {}",
@@ -1687,7 +1706,7 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::GracePeriodDays)
             .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
-        let default_at = invoice.due_date + grace_period_days as u64 * SECS_PER_DAY;
+        let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         let now = env.ledger().timestamp();
         if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
             env.events()
@@ -2072,6 +2091,40 @@ mod test {
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
         );
+    }
+
+    #[test]
+    fn test_create_invoice_due_date_overflow_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &100i128,
+            &u64::MAX,
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
+    }
+
+    #[test]
+    fn test_create_invoice_due_date_far_in_future_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due_date = env.ledger().timestamp() + MAX_DUE_DATE_AHEAD_SECS + 1;
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &100i128,
+            &due_date,
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
     }
 
     #[test]
