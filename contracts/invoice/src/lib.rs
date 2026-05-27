@@ -2364,18 +2364,32 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 50_000;
-        
+
         // Day 1: Create 1 invoice
-        client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &due, &String::from_str(&env, "i"), &String::from_str(&env, "h"));
-        
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &100i128,
+            &due,
+            &String::from_str(&env, "i"),
+            &String::from_str(&env, "h"),
+        );
+
         // Jump forward 5 days (432_000 seconds)
         let new_timestamp = env.ledger().timestamp() + (5 * 86400u64);
         env.ledger().with_mut(|l| l.timestamp = new_timestamp);
-        
+
         // Day 6: Reset should have occurred; should be able to create 10 invoices (full daily limit)
         // If the bug exists and reset_time wasn't set to now, this would fail
         for _ in 0..10 {
-            client.create_invoice(&sme, &String::from_str(&env, "D"), &100i128, &(new_timestamp + 50_000), &String::from_str(&env, "i"), &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &(new_timestamp + 50_000),
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -2810,5 +2824,295 @@ mod test {
             completed_ttl,
             ACTIVE_INVOICE_TTL
         );
+    }
+
+    // ── Invoice state machine property-based tests ──────────────────────────
+
+    fn status_ordinal(status: &InvoiceStatus) -> u8 {
+        match status {
+            InvoiceStatus::Pending => 0,
+            InvoiceStatus::AwaitingVerification => 1,
+            InvoiceStatus::Verified | InvoiceStatus::Disputed => 2,
+            InvoiceStatus::Funded => 3,
+            InvoiceStatus::Paid
+            | InvoiceStatus::Defaulted
+            | InvoiceStatus::Cancelled
+            | InvoiceStatus::Expired => 4,
+        }
+    }
+
+    // Property 1: Forward-only transitions — state ordinal never decreases
+    #[test]
+    fn test_prop_forward_only_transitions() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let mut seed: u64 = 0x5EED_F00D_0000_0001;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..50u64 {
+            let (client, _admin, pool, sme) = setup(&env);
+            let due = env.ledger().timestamp() + 86_400;
+            let id = client.create_invoice(
+                &sme,
+                &String::from_str(&env, "Debtor"),
+                &1_000_000i128,
+                &due,
+                &String::from_str(&env, "desc"),
+                &String::from_str(&env, "hash"),
+            );
+
+            let mut last_ord = status_ordinal(&InvoiceStatus::Pending);
+            let actions = (lcg(&mut seed) % 6 + 2) as u32; // 2..=7 actions per trial
+
+            for _ in 0..actions {
+                let inv = client.get_invoice(&id);
+                let cur = status_ordinal(&inv.status);
+                assert!(
+                    cur >= last_ord,
+                    "trial {}: state regressed from ordinal {} to {}",
+                    trial,
+                    last_ord,
+                    cur
+                );
+                last_ord = cur;
+
+                if cur >= 4 {
+                    break;
+                }
+
+                match (cur, lcg(&mut seed) % 5) {
+                    (0, 0) => {
+                        // Pending -> Funded (no oracle configured in setup())
+                        let _ = client.try_mark_funded(&id, &pool);
+                    }
+                    (2, 0) | (3, 0) => {
+                        let _ = client.try_mark_paid(&id, &pool);
+                    }
+                    (2, 1) | (3, 1) => {
+                        // Advance past grace period to allow default
+                        let grace: u32 = client.get_grace_period();
+                        env.ledger()
+                            .with_mut(|l| l.timestamp = due + grace as u64 * 86_400 + 1);
+                        let _ = client.try_mark_defaulted(&id, &pool);
+                    }
+                    (0..=2, 3) => {
+                        let _ = client.try_cancel_invoice(&id, &sme);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Property 2: Terminal states are absorbing — no action changes them
+    #[test]
+    fn test_prop_terminal_absorbing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let mut seed: u64 = 0x00C0_FFEE_0000_0002;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..30u64 {
+            // Setup with short grace period for default testing
+            let contract_id = env.register(InvoiceContract, ());
+            let client = InvoiceContractClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            let pool = env.register(mock_pool_true::MockPoolTrue, ());
+            let sme = Address::generate(&env);
+            client.initialize(&admin, &pool, &i128::MAX, &86_400u64, &1u32);
+
+            let due = env.ledger().timestamp() + 86_400;
+            let id = client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &1_000i128,
+                &due,
+                &String::from_str(&env, "d"),
+                &String::from_str(&env, "h"),
+            );
+
+            // Randomly reach a terminal state
+            let path = lcg(&mut seed) % 4;
+            match path {
+                0 => {
+                    // Paid
+                    client.mark_funded(&id, &pool);
+                    client.mark_paid(&id, &pool);
+                }
+                1 => {
+                    // Defaulted
+                    client.mark_funded(&id, &pool);
+                    env.ledger().with_mut(|l| l.timestamp = due + 86_400 + 1);
+                    client.mark_defaulted(&id, &pool);
+                }
+                2 => {
+                    // Cancelled
+                    client.cancel_invoice(&id, &sme);
+                }
+                _ => {
+                    // Expired
+                    env.ledger().with_mut(|l| l.timestamp += 86_400 + 1);
+                    client.get_invoice(&id); // triggers expiration
+                }
+            }
+
+            let terminal = client.get_invoice(&id);
+            let terminal_status = terminal.status.clone();
+            assert!(
+                status_ordinal(&terminal_status) >= 4,
+                "trial {}: expected terminal state, got {:?}",
+                trial,
+                terminal_status
+            );
+
+            // Try random actions — state must remain terminal
+            for _ in 0..5 {
+                let action = lcg(&mut seed) % 4;
+                match action {
+                    0 => {
+                        let _ = client.try_mark_funded(&id, &pool);
+                    }
+                    1 => {
+                        let _ = client.try_mark_paid(&id, &pool);
+                    }
+                    2 => {
+                        let _ = client.try_mark_defaulted(&id, &pool);
+                    }
+                    _ => {
+                        let _ = client.try_cancel_invoice(&id, &sme);
+                    }
+                }
+                let inv = client.get_invoice(&id);
+                assert_eq!(
+                    inv.status, terminal_status,
+                    "trial {}: terminal state {:?} changed to {:?}",
+                    trial, terminal_status, inv.status
+                );
+            }
+        }
+    }
+
+    // Property 3: From Funded, only Paid or Defaulted are reachable
+    #[test]
+    fn test_prop_funded_determinism() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let mut seed: u64 = 0xABBA_BABA_0000_0003;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for trial in 0..30u64 {
+            let (client, _admin, pool, sme) = setup(&env);
+            let due = env.ledger().timestamp() + 86_400;
+            let id = client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &1_000i128,
+                &due,
+                &String::from_str(&env, "d"),
+                &String::from_str(&env, "h"),
+            );
+
+            client.mark_funded(&id, &pool);
+            assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Funded);
+
+            // cancel_invoice must fail on Funded
+            let cancel_result = client.try_cancel_invoice(&id, &sme);
+            assert!(
+                cancel_result.is_err(),
+                "trial {}: cancel_invoice should fail on Funded",
+                trial
+            );
+            assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Funded);
+
+            // mark_funded must fail on already Funded
+            let double_fund = client.try_mark_funded(&id, &pool);
+            assert!(
+                double_fund.is_err(),
+                "trial {}: mark_funded should fail on Funded",
+                trial
+            );
+
+            // Now try the valid path (Paid or Defaulted)
+            let goto = lcg(&mut seed) % 2;
+            match goto {
+                0 => {
+                    client.mark_paid(&id, &pool);
+                    assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
+                }
+                _ => {
+                    let grace: u32 = client.get_grace_period();
+                    env.ledger()
+                        .with_mut(|l| l.timestamp = due + grace as u64 * 86_400 + 1);
+                    client.mark_defaulted(&id, &pool);
+                    assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+                }
+            }
+        }
+    }
+
+    // Property 4: Pending invoices expire after expiration duration
+    #[test]
+    fn test_prop_pending_expires() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let mut seed: u64 = 0xBAD_CAFE_0000_0004;
+        let lcg = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s
+        };
+
+        for _ in 0..20u64 {
+            let contract_id = env.register(InvoiceContract, ());
+            let client = InvoiceContractClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            let pool = Address::generate(&env);
+            let sme = Address::generate(&env);
+            let expiration_secs = lcg(&mut seed) % 100 + 1; // 1..=100 sec
+            client.initialize(&admin, &pool, &i128::MAX, &expiration_secs, &90u32);
+
+            let id = client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &1_000i128,
+                &(env.ledger().timestamp() + 10_000),
+                &String::from_str(&env, "d"),
+                &String::from_str(&env, "h"),
+            );
+
+            // Initially Pending
+            assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Pending);
+
+            // Jump past expiration
+            env.ledger()
+                .with_mut(|l| l.timestamp += expiration_secs + 1);
+
+            // Read triggers expiration
+            assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
+        }
     }
 }

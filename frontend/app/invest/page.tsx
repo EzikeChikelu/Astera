@@ -212,7 +212,7 @@ export default function InvestPage() {
             )}
 
             {/* Earnings calculator */}
-            <APYCalculator yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
+            <APYCalculator />
 
             {wallet.connected && position && selectedToken && (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">

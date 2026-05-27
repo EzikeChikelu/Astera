@@ -9,25 +9,25 @@ use std::panic;
 // Import contract clients
 mod invoice {
     soroban_sdk::contractimport!(
-        file = "../target/wasm32-unknown-unknown/release/invoice.wasm"
+        file = "../../target/wasm32-unknown-unknown/release/invoice.wasm"
     );
 }
 
 mod pool {
     soroban_sdk::contractimport!(
-        file = "../target/wasm32-unknown-unknown/release/pool.wasm"
+        file = "../../target/wasm32-unknown-unknown/release/pool.wasm"
     );
 }
 
 mod credit_score {
     soroban_sdk::contractimport!(
-        file = "../target/wasm32-unknown-unknown/release/credit_score.wasm"
+        file = "../../target/wasm32-unknown-unknown/release/credit_score.wasm"
     );
 }
 
 mod share {
     soroban_sdk::contractimport!(
-        file = "../target/wasm32-unknown-unknown/release/share.wasm"
+        file = "../../target/wasm32-unknown-unknown/release/share.wasm"
     );
 }
 
@@ -56,7 +56,7 @@ fn test_complete_invoice_lifecycle() {
     let share_client = share::Client::new(&env, &share_id);
 
     // Initialize contracts
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -141,10 +141,13 @@ fn test_default_with_grace_period() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
+
+    let grace_period = invoice_client.get_grace_period() as u64;
+    let grace_secs = grace_period * 86_400;
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
 
@@ -163,15 +166,15 @@ fn test_default_with_grace_period() {
     pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
     invoice_client.mark_funded(&inv_id, &pool_id);
 
-    // Move past due date but within grace period (default is 7 days)
-    env.ledger().with_mut(|l| l.timestamp = due_date + 3 * 86_400);
+    // Move past due date but within grace period
+    env.ledger().with_mut(|l| l.timestamp = due_date + grace_secs - 3600);
 
     // Note: Would fail here but we can't test panic without std in integration tests
     // Just verify we're within grace period
-    assert!(env.ledger().timestamp() < due_date + 7 * 86_400);
+    assert!(env.ledger().timestamp() < due_date + grace_secs);
 
     // Move past grace period
-    env.ledger().with_mut(|l| l.timestamp = due_date + 8 * 86_400);
+    env.ledger().with_mut(|l| l.timestamp = due_date + grace_secs + 1);
 
     // Should succeed now
     invoice_client.mark_defaulted(&inv_id, &pool_id);
@@ -211,7 +214,7 @@ fn test_multiple_invoices_yield_distribution() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -312,7 +315,7 @@ fn test_state_consistency() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -408,7 +411,7 @@ fn setup_pool(env: &Env) -> (
 
 fn invoice_client_init(env: &Env, invoice_id: &Address, admin: &Address, pool_id: &Address) {
     let invoice_client = invoice::Client::new(env, invoice_id);
-    invoice_client.initialize(admin, pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(admin, pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
 }
 
 /// Integration test: Collateral post and release on full repayment
@@ -434,7 +437,7 @@ fn test_collateral_post_and_release() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -516,7 +519,7 @@ fn test_collateral_seize_on_default() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -524,6 +527,9 @@ fn test_collateral_seize_on_default() {
         &String::from_str(&env, "POOL"),
     );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id_addr);
+
+    let grace_period = invoice_client.get_grace_period() as u64;
+    let grace_secs = grace_period * 86_400;
 
     pool_client.set_collateral_config(&admin, &1_000i128, &2_000u32);
 
@@ -543,7 +549,7 @@ fn test_collateral_seize_on_default() {
 
     // Advance past due date without repayment — mark as defaulted
     env.ledger()
-        .with_mut(|l| l.timestamp = due_date + 8 * 86_400);
+        .with_mut(|l| l.timestamp = due_date + grace_secs + 1);
     invoice_client.mark_defaulted(&1u64, &pool_id);
 
     let tt_before = pool_client.get_token_totals(&usdc_id);
@@ -577,7 +583,7 @@ fn test_credit_score_on_time_payment() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
@@ -601,7 +607,7 @@ fn test_credit_score_late_payment() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
@@ -623,7 +629,7 @@ fn test_credit_score_default_penalty() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 200_000u64;
     let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
@@ -645,7 +651,7 @@ fn test_payment_history_idempotency() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 200_000u64;
     let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
@@ -669,7 +675,7 @@ fn test_credit_score_multiple_invoices() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 300_000u64;
     let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
@@ -693,7 +699,7 @@ fn test_get_payment_history() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 300_000u64;
     let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
@@ -727,7 +733,7 @@ fn test_collateral_not_required_below_threshold() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -787,7 +793,7 @@ fn test_collateral_error_double_deposit() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -829,7 +835,7 @@ fn test_partial_repayment_lifecycle() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -903,7 +909,7 @@ fn test_reserve_builds_from_fees_and_covers_default() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -911,6 +917,9 @@ fn test_reserve_builds_from_fees_and_covers_default() {
         &String::from_str(&env, "POOL"),
     );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id_addr);
+
+    let grace_period = invoice_client.get_grace_period() as u64;
+    let grace_secs = grace_period * 86_400;
 
     pool_client.set_collateral_config(&admin, &1_000i128, &2_000u32);
 
@@ -969,7 +978,7 @@ fn test_reserve_builds_from_fees_and_covers_default() {
 
     // Advance past due date and mark as defaulted
     env.ledger()
-        .with_mut(|l| l.timestamp = due_date2 + 8 * 86_400);
+        .with_mut(|l| l.timestamp = due_date2 + grace_secs + 1);
     invoice_client.mark_defaulted(&2u64, &pool_id);
 
     let tt_before_seize = pool_client.get_token_totals(&usdc_id);
@@ -1039,7 +1048,7 @@ fn test_reserve_admin_controls() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64));
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
     share_client.initialize(
         &admin,
         &7u32,
@@ -1096,4 +1105,69 @@ fn test_reserve_admin_controls() {
     // Reserve ratio cannot exceed 10_000 bps
     let result = pool_client.try_set_reserve_ratio(&admin, &10_001u32);
     assert_eq!(result, Err(Ok(pool::Error::InvalidReserveRatio)));
+}
+
+/// Integration test: Past due but within grace period should NOT allow default
+#[test]
+fn test_within_grace_period_not_defaultable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
+
+    let grace_period = invoice_client.get_grace_period() as u64;
+    let grace_secs = grace_period * 86_400;
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+    );
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    // Advance to just past due date but within grace period
+    env.ledger()
+        .with_mut(|l| l.timestamp = due_date + grace_secs - 3600);
+    assert!(
+        env.ledger().timestamp() < due_date + grace_secs,
+        "should still be within grace period"
+    );
+
+    // Attempting to mark as defaulted should panic
+    let result = panic::catch_unwind(|| {
+        invoice_client.mark_defaulted(&inv_id, &pool_id);
+    });
+    assert!(result.is_err(), "mark_defaulted should panic within grace period");
 }

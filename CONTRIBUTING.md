@@ -209,6 +209,13 @@ cd contracts
 cargo test
 ```
 
+Fuzz harness smoke tests are also part of CI for the contract crates that support them:
+
+```bash
+cd contracts/invoice
+cargo test --test fuzz_tests --verbose
+```
+
 Build for deployment:
 
 ```bash
@@ -384,6 +391,7 @@ Before opening a PR, make sure you:
 - [ ] New public contract functions include tests
 - [ ] No secrets or `.env.local` committed
 - [ ] `CHANGELOG.md` updated under the `Unreleased` section if the change is user-facing
+- [ ] **Smart contract security checklist** completed (see `.github/pull_request_template.md`) if `contracts/` changed
 
 ### PR Description Template
 
