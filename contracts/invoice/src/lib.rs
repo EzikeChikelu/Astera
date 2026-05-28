@@ -1920,11 +1920,7 @@ impl InvoiceContract {
         if invoice.status != InvoiceStatus::Funded {
             return false;
         }
-        let grace_period_days: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GracePeriodDays)
-            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
         let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         let now = env.ledger().timestamp();
         if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
