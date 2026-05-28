@@ -4718,6 +4718,14 @@ mod test {
     }
 
     #[test]
+    fn test_calculate_reward_delta_large_values_succeed() {
+        let total_interest = 1_000_000_000_000_000_000i128;
+        let total_shares = 2_000_000_000_000i128;
+        let reward_delta = calculate_reward_delta(total_interest, total_shares).unwrap();
+        assert_eq!(reward_delta, 500_000_000_000_000_000i128);
+    }
+
+    #[test]
     fn test_seize_collateral_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
