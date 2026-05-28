@@ -1155,11 +1155,19 @@ impl FundingPool {
                 deposit_count: 0,
             });
 
+        // Normalise received amount to USDC equivalent using stored exchange rate
+        let rate_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExchangeRate(token.clone()))
+            .unwrap_or(10_000u32);
+        let usdc_received = (received * rate_bps as i128) / 10_000i128;
+
         // #233: enforce maximum single-investor concentration limit
         let config = get_config_cached(&env)?;
         if config.max_single_investor_bps < 10_000 {
-            let new_investor_total = investor_position.deposited + received;
-            let new_pool_total = tt.pool_value + received;
+            let new_investor_total = investor_position.deposited + usdc_received;
+            let new_pool_total = tt.pool_value + usdc_received;
             if new_pool_total > 0 {
                 let investor_share_bps =
                     ((new_investor_total as u128 * 10_000u128) / new_pool_total as u128) as u32;
@@ -1183,7 +1191,7 @@ impl FundingPool {
             .get(&share_token_key)
             .ok_or(PoolError::ShareTokenNotConfigured)?;
 
-        // Calculate shares (single external call)
+        // Calculate shares using USDC-equivalent deposit value
         let total_shares: i128 = env.invoke_contract(
             &share_token,
             &Symbol::new(&env, "total_supply"),
@@ -1191,13 +1199,13 @@ impl FundingPool {
         );
 
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
-            received
+            usdc_received
         } else {
-            (received * total_shares) / tt.pool_value
+            (usdc_received * total_shares) / tt.pool_value
         };
 
-        // Update pool value with received amount
-        tt.pool_value += received;
+        // Pool value is maintained in USDC terms for consistent multi-token accounting
+        tt.pool_value += usdc_received;
 
         // Batch write: update token totals
         env.storage().instance().set(&token_totals_key, &tt);
@@ -1208,8 +1216,8 @@ impl FundingPool {
         mint_args.push_back(shares_to_mint.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "mint"), mint_args);
 
-        // #233: update investor position for concentration tracking
-        investor_position.deposited += received;
+        // #233: update investor position — track in USDC terms to match pool_value
+        investor_position.deposited += usdc_received;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -1285,17 +1293,25 @@ impl FundingPool {
             Vec::new(&env),
         );
 
-        let amount = (shares * tt.pool_value) / total_shares;
+        // pool_value is USDC-denominated; compute USDC then convert to token amount
+        let usdc_amount = (shares * tt.pool_value) / total_shares;
+        let rate_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExchangeRate(token.clone()))
+            .unwrap_or(10_000u32);
+        let amount = (usdc_amount * 10_000i128) / rate_bps as i128;
+
         let available_liquidity = tt.pool_value - tt.total_deployed;
-        if available_liquidity < amount {
+        if available_liquidity < usdc_amount {
             return Err(PoolError::InvalidAmount);
         }
 
-        // #244: single-withdrawal cap (skip for admin)
+        // #244: single-withdrawal cap (skip for admin) — compare in USDC terms
         if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
             let max_single =
                 (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
-            if amount > max_single {
+            if usdc_amount > max_single {
                 return Err(PoolError::WithdrawalExceedsLimit);
             }
         }
@@ -1306,8 +1322,8 @@ impl FundingPool {
         burn_args.push_back(shares.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
 
-        // Update state SECOND - effects
-        tt.pool_value -= amount;
+        // Update USDC-denominated pool value SECOND - effects
+        tt.pool_value -= usdc_amount;
         env.storage().instance().set(&token_totals_key, &tt);
 
         // #244: record withdrawal timestamp
@@ -1318,7 +1334,7 @@ impl FundingPool {
             );
         }
 
-        // Transfer LAST - interaction
+        // Transfer actual token amount LAST - interaction
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
