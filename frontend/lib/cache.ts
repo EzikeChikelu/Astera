@@ -28,22 +28,22 @@ import type {
   InvoiceMetadata,
 } from './types';
 
-// SWR Configuration
-const SWR_CONFIG = {
-  refreshInterval: 30000, // 30 seconds
-  revalidateOnFocus: true,
-  revalidateOnReconnect: true,
-  dedupingInterval: 5000, // 5 seconds
+type SWRCacheEntry = {
+  refreshInterval: number;
+  revalidateOnFocus: boolean;
+  revalidateOnReconnect: boolean;
+  dedupingInterval: number;
 };
 
-const STALE_TIMES = {
-  poolConfig: 300000, // 5 minutes - changes infrequently (admin updates)
-  invoiceCount: 15000, // 15 seconds - changes with new invoices
-  invoice: 10000, // 10 seconds - status changes frequently
-  position: 15000, // 15 seconds - changes with deposits/commits
-  tokens: 60000, // 1 minute - whitelist changes rarely
-  tokenTotals: 20000, // 20 seconds - changes with deposits/deployments
-  fundedInvoice: 10000, // 10 seconds - status changes
+/** Per-resource SWR configuration. Import and spread into useSWR options. */
+export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
+  poolConfig: { refreshInterval: 300000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  invoiceCount: { refreshInterval: 15000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  invoice: { refreshInterval: 10000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  position: { refreshInterval: 15000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  tokens: { refreshInterval: 60000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  tokenTotals: { refreshInterval: 20000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  fundedInvoice: { refreshInterval: 10000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
 };
 
 // Error type for contract calls
@@ -73,8 +73,7 @@ async function fetcher<T>(fn: () => Promise<T>): Promise<T> {
 
 export function usePoolConfig() {
   return useSWR<PoolConfig, ContractError>('pool-config', () => fetcher(() => getPoolConfig()), {
-    ...SWR_CONFIG,
-    refreshInterval: STALE_TIMES.poolConfig,
+    ...CACHE_CONFIG.poolConfig,
   });
 }
 
@@ -85,8 +84,7 @@ export function useAcceptedTokens() {
     'accepted-tokens',
     () => fetcher(() => getAcceptedTokens()),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokens,
+      ...CACHE_CONFIG.tokens,
     },
   );
 }
@@ -95,8 +93,7 @@ export function useAcceptedTokens() {
 
 export function useInvoiceCount() {
   return useSWR<number, ContractError>('invoice-count', () => fetcher(() => getInvoiceCount()), {
-    ...SWR_CONFIG,
-    refreshInterval: STALE_TIMES.invoiceCount,
+    ...CACHE_CONFIG.invoiceCount,
   });
 }
 
@@ -107,8 +104,7 @@ export function useInvoice(id: number | null) {
     id !== null ? ['invoice', id] : null,
     () => fetcher(() => getInvoice(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
+      ...CACHE_CONFIG.invoice,
     },
   );
 }
@@ -120,8 +116,7 @@ export function useInvoiceMetadata(id: number | null) {
     id !== null ? ['invoice-metadata', id] : null,
     () => fetcher(() => getInvoiceMetadata(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
+      ...CACHE_CONFIG.invoice,
     },
   );
 }
@@ -133,8 +128,7 @@ export function useInvestorPosition(investor: string | null, token: string | nul
     investor && token ? ['position', investor, token] : null,
     () => fetcher(() => getInvestorPosition(investor!, token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.position,
+      ...CACHE_CONFIG.position,
     },
   );
 }
@@ -146,8 +140,7 @@ export function usePoolTokenTotals(token: string | null) {
     token ? ['token-totals', token] : null,
     () => fetcher(() => getPoolTokenTotals(token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokenTotals,
+      ...CACHE_CONFIG.tokenTotals,
     },
   );
 }
@@ -159,8 +152,7 @@ export function useFundedInvoice(invoiceId: number | null) {
     invoiceId !== null ? ['funded-invoice', invoiceId] : null,
     () => fetcher(() => getFundedInvoice(invoiceId!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.fundedInvoice,
+      ...CACHE_CONFIG.fundedInvoice,
     },
   );
 }
@@ -319,5 +311,5 @@ export function getPositionCacheKeys(investor?: string, token?: string) {
 // Export SWR provider config for app setup
 export const swrConfig = {
   provider: () => new Map(),
-  ...SWR_CONFIG,
+  ...CACHE_CONFIG.invoice,
 };
