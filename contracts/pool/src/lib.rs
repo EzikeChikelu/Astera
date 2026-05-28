@@ -659,6 +659,12 @@ fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
     ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
 }
 
+fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
+    tt.pool_value
+        .checked_sub(tt.total_deployed)
+        .ok_or(PoolError::AmountOverflow)
+}
+
 fn fund_invoice_request(
     env: &Env,
     config: &PoolConfig,
