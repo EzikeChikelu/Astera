@@ -54,10 +54,7 @@ impl DummyInvoice {
         env.storage().instance().set(&symbol_short!("pool"), &pool);
     }
     pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
-        let stored: Option<bool> = env
-            .storage()
-            .persistent()
-            .get(&symbol_short!("inv_def"));
+        let stored: Option<bool> = env.storage().persistent().get(&symbol_short!("inv_def"));
         stored.unwrap_or(false)
     }
     pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {

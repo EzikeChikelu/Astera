@@ -2218,37 +2218,37 @@ impl FundingPool {
                 return Err(PoolError::CollateralAlreadySettled);
             }
 
-        // Credit the seized collateral into the pool's token totals so investors benefit.
-        let token_totals_key = DataKey::TokenTotals(col.token.clone());
-        let mut tt: PoolTokenTotals = env
-            .storage()
-            .instance()
-            .get(&token_totals_key)
-            .unwrap_or_default();
+            // Credit the seized collateral into the pool's token totals so investors benefit.
+            let token_totals_key = DataKey::TokenTotals(col.token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
 
-        // The seized collateral reduces the effective loss: add it to pool_value and
-        // reduce total_deployed by the original principal (the invoice is now a loss).
-        tt.pool_value += col.amount;
-        tt.total_deployed -= record.principal;
-        env.storage().instance().set(&token_totals_key, &tt);
+            // The seized collateral reduces the effective loss: add it to pool_value and
+            // reduce total_deployed by the original principal (the invoice is now a loss).
+            tt.pool_value += col.amount;
+            tt.total_deployed -= record.principal;
+            env.storage().instance().set(&token_totals_key, &tt);
 
-        col.settled = true;
-        col.seized_at = now;
-        env.storage()
-            .persistent()
-            .set(&DataKey::CollateralDeposit(invoice_id), &col);
-        env.storage().persistent().extend_ttl(
-            &DataKey::CollateralDeposit(invoice_id),
-            COMPLETED_INVOICE_TTL,
-            COMPLETED_INVOICE_TTL,
-        );
+            col.settled = true;
+            col.seized_at = now;
+            env.storage()
+                .persistent()
+                .set(&DataKey::CollateralDeposit(invoice_id), &col);
+            env.storage().persistent().extend_ttl(
+                &DataKey::CollateralDeposit(invoice_id),
+                COMPLETED_INVOICE_TTL,
+                COMPLETED_INVOICE_TTL,
+            );
 
-        // #386: emit status-triggered seizure event (invoice was Defaulted).
-        env.events().publish(
-            (EVT, Symbol::new(&env, "col_seiz_default")),
-            (invoice_id, col.depositor, col.amount, admin, now),
-        );
-        Ok(())
+            // #386: emit status-triggered seizure event (invoice was Defaulted).
+            env.events().publish(
+                (EVT, Symbol::new(&env, "col_seiz_default")),
+                (invoice_id, col.depositor, col.amount, admin, now),
+            );
+            Ok(())
         })
     }
 
@@ -3350,10 +3350,7 @@ mod test {
             env.storage().instance().set(&symbol_short!("pool"), &pool);
         }
         pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
-            let stored: Option<bool> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::FundedInvoice(id));
+            let stored: Option<bool> = env.storage().persistent().get(&DataKey::FundedInvoice(id));
             stored.unwrap_or(false)
         }
         pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {
@@ -5207,14 +5204,7 @@ mod test {
         // Pool accrues yield via a funded invoice
         let due_date = env.ledger().timestamp() + 1_000_000;
         mint(&env, &usdc_id, &sme, 500);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &500,
-            &sme,
-            &due_date,
-            &usdc_id,
-        );
+        client.fund_invoice(&admin, &1u64, &500, &sme, &due_date, &usdc_id);
         env.ledger().with_mut(|l| l.timestamp += 1_000_000);
         let total_due = client.estimate_repayment(&1u64);
         client.repay_invoice(&1u64, &sme, &total_due);
@@ -5231,8 +5221,7 @@ mod test {
         // Bob should receive shares proportional to the exchange rate:
         // shares = deposit * total_shares / pool_value
         let total_shares_before_bob = 1000;
-        let expected_bob_shares =
-            (bob_deposit * total_shares_before_bob) / pool_value_after_yield;
+        let expected_bob_shares = (bob_deposit * total_shares_before_bob) / pool_value_after_yield;
         let bob_shares: i128 = env.invoke_contract(
             &share_token,
             &Symbol::new(&env, "balance"),
@@ -5377,7 +5366,8 @@ mod test {
         let days = 365u64;
         let elapsed_secs = days * 86400;
 
-        let compound_interest = calculate_interest(principal, yield_bps, elapsed_secs, true).unwrap();
+        let compound_interest =
+            calculate_interest(principal, yield_bps, elapsed_secs, true).unwrap();
 
         // Calculate using the old loop method for comparison
         let denominator = BPS_DENOM as u128 * SECS_PER_YEAR as u128;
@@ -5444,7 +5434,13 @@ mod test {
         };
         // The loop method accumulates integer-division rounding across iterations;
         // fixed_point_pow with O(log n) multiplications is more precise.
-        assert!(diff <= 10_000, "compound={} loop={} diff={}", compound, loop_interest, diff);
+        assert!(
+            diff <= 10_000,
+            "compound={} loop={} diff={}",
+            compound,
+            loop_interest,
+            diff
+        );
     }
 
     // ---- Issue #416: Reentrancy guard on all state-changing functions ----
@@ -5552,11 +5548,7 @@ mod test {
         // Directly push protocol revenue for testing
         env.as_contract(&pool_address, || {
             let tt_key = DataKey::TokenTotals(usdc_id.clone());
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&tt_key)
-                .unwrap_or_default();
+            let mut tt: PoolTokenTotals = env.storage().instance().get(&tt_key).unwrap_or_default();
             tt.protocol_revenue = 500;
             env.storage().instance().set(&tt_key, &tt);
         });
