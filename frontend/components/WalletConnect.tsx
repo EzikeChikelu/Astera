@@ -5,24 +5,25 @@ import { useStore, getStoredWalletAddress } from '@/lib/store';
 import toast from 'react-hot-toast';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
+import { useTranslations } from 'next-intl';
 
 type WalletStep = 'idle' | 'detecting' | 'requesting-access' | 'fetching-address';
-
-const STEP_LABELS: Record<WalletStep, string> = {
-  idle: 'Connect Wallet',
-  detecting: 'Detecting Freighter…',
-  'requesting-access': 'Approve in Freighter…',
-  'fetching-address': 'Fetching address…',
-};
 
 const MAX_RETRIES = 2;
 
 export default function WalletConnect() {
+  const t = useTranslations('Notifications.wallet');
   const { wallet, setWallet, disconnect } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
 
   const loading = step !== 'idle';
+  const stepLabels: Record<WalletStep, string> = {
+    idle: t('connect'),
+    detecting: t('detecting'),
+    'requesting-access': t('requestingAccess'),
+    'fetching-address': t('fetchingAddress'),
+  };
 
   // Auto-reconnect on mount if a wallet address was previously stored
   useEffect(() => {
@@ -43,7 +44,7 @@ export default function WalletConnect() {
 
         setWallet({ address, connected: true, network: 'testnet' });
       } catch {
-        // Silent failure — user can reconnect manually
+        // Silent failure - user can reconnect manually
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -56,7 +57,7 @@ export default function WalletConnect() {
 
       const { isConnected } = await freighter.isConnected();
       if (!isConnected) {
-        toast.error('Freighter not detected. Please install the browser extension and reload.');
+        toast.error(t('freighterMissing'));
         setStep('idle');
         return;
       }
@@ -70,13 +71,13 @@ export default function WalletConnect() {
       setStep('fetching-address');
       const { address, error: addrError } = await freighter.getAddress();
       if (addrError) {
-        toast.error('Could not retrieve wallet address. Please try again.');
+        toast.error(t('addressUnavailable'));
         setStep('idle');
         return;
       }
 
       setWallet({ address, connected: true, network: 'testnet' });
-      toast.success('Wallet connected successfully!');
+      toast.success(t('connected'));
       setRetryCount(0);
       setStep('idle');
     } catch (e) {
@@ -86,7 +87,7 @@ export default function WalletConnect() {
         // Brief delay before auto-retry
         setTimeout(() => connect(attempt + 1), 800);
       } else {
-        toast.error('Failed to connect wallet after multiple attempts. Please try again.');
+        toast.error(t('connectFailed'));
         setRetryCount(0);
         setStep('idle');
       }
@@ -109,7 +110,7 @@ export default function WalletConnect() {
           onClick={disconnect}
           className="text-sm text-brand-muted hover:text-white transition-colors"
         >
-          Disconnect
+          {t('disconnect')}
         </button>
       </div>
     );
@@ -124,7 +125,7 @@ export default function WalletConnect() {
         aria-busy={loading}
       >
         {loading && <LoadingSpinner size="sm" />}
-        {STEP_LABELS[step]}
+        {stepLabels[step]}
       </button>
 
       {retryCount > 0 && (
@@ -132,13 +133,13 @@ export default function WalletConnect() {
           onClick={handleRetry}
           className="text-xs text-brand-gold hover:text-brand-amber underline transition-colors"
         >
-          Retry
+          {t('retry')}
         </button>
       )}
 
       {loading && retryCount > 0 && (
         <p className="text-brand-muted text-xs">
-          Retry attempt {retryCount}/{MAX_RETRIES}…
+          {t('retryAttempt', { retryCount, maxRetries: MAX_RETRIES })}
         </p>
       )}
     </div>

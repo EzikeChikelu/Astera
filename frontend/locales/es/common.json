@@ -1,0 +1,113 @@
+{
+  "Dashboard": {
+    "title": "Panel de PYME",
+    "description": "Gestiona tus facturas tokenizadas",
+    "help": "Ayuda",
+    "newInvoice": "+ Nueva factura",
+    "connectWallet": "Conecta tu billetera",
+    "connectWalletDesc": "Conecta Freighter para ver y gestionar tus facturas.",
+    "stats": {
+      "totalVolume": "Volumen total",
+      "pending": "Pendiente",
+      "funded": "Financiada",
+      "paid": "Pagada"
+    },
+    "yourInvoices": "Tus facturas",
+    "searchPlaceholder": "Buscar por deudor o descripcion...",
+    "status": {
+      "all": "Todas",
+      "pending": "Pendiente",
+      "awaitingverification": "En espera de verificacion",
+      "verified": "Verificada",
+      "disputed": "En disputa",
+      "funded": "Financiada",
+      "paid": "Pagada",
+      "defaulted": "En mora"
+    },
+    "sort": {
+      "createdDesc": "Fecha de creacion (mas reciente)",
+      "createdAsc": "Fecha de creacion (mas antigua)",
+      "amountDesc": "Importe (mayor)",
+      "amountAsc": "Importe (menor)",
+      "dueAsc": "Vencimiento (mas cercano)",
+      "dueDesc": "Vencimiento (mas lejano)"
+    },
+    "noInvoices": "Aun no hay facturas.",
+    "createFirst": "Crea tu primera factura ->",
+    "noMatch": "Ninguna factura coincide con tus filtros.",
+    "clearFilters": "Limpiar filtros",
+    "loadMore": "Cargar mas facturas",
+    "loadingMore": "Cargando...",
+    "showing": "Mostrando {count} {count, plural, one {factura} other {facturas}}",
+    "allLoaded": "Todas las facturas cargadas - {count} en total",
+    "notifications": {
+      "loadError": "No se pudieron cargar las facturas. Verifica que los contratos esten desplegados."
+    }
+  },
+  "Notifications": {
+    "wallet": {
+      "connect": "Conectar billetera",
+      "detecting": "Detectando Freighter...",
+      "requestingAccess": "Aprueba en Freighter...",
+      "fetchingAddress": "Obteniendo direccion...",
+      "freighterMissing": "No se detecto Freighter. Instala la extension del navegador y recarga la pagina.",
+      "addressUnavailable": "No se pudo obtener la direccion de la billetera. Intentalo de nuevo.",
+      "connected": "Billetera conectada correctamente.",
+      "connectFailed": "No se pudo conectar la billetera despues de varios intentos. Intentalo de nuevo.",
+      "disconnect": "Desconectar",
+      "retry": "Reintentar",
+      "retryAttempt": "Intento {retryCount}/{maxRetries}...",
+      "disconnectedTitle": "Billetera desconectada",
+      "disconnectedDescription": "Tu billetera Freighter ya no esta conectada a este sitio. Vuelve a conectarla para continuar."
+    },
+    "toast": {
+      "dismiss": "Cerrar notificacion"
+    },
+    "panel": {
+      "button": "Notificaciones",
+      "buttonUnread": "Notificaciones ({count} sin leer)",
+      "dialog": "Panel de notificaciones",
+      "title": "Notificaciones",
+      "clearAll": "Borrar todo",
+      "empty": "No hay notificaciones."
+    }
+  },
+  "Invest": {
+    "title": "Invertir",
+    "description": "Deposita stablecoins aceptadas en el pool de Astera. Gana rendimiento respaldado por pagos reales de facturas. Retira en el mismo token que depositaste.",
+    "poolNotDeployed": "El pool aun no esta desplegado. Despliega los contratos para ver datos en vivo.",
+    "yourPosition": "Tu posicion",
+    "stats": {
+      "totalDeposited": "Total depositado",
+      "availableToWithdraw": "Disponible para retirar",
+      "currentlyDeployed": "Actualmente desplegado",
+      "totalEarned": "Total ganado"
+    },
+    "connectWallet": "Conecta tu billetera para invertir.",
+    "kycRequired": "Verificacion KYC requerida. Tu direccion aun no esta aprobada para depositar. Contacta al administrador del pool para completar la verificacion.",
+    "kycVerified": "KYC verificado - puedes depositar.",
+    "modes": {
+      "deposit": "deposito",
+      "withdraw": "retiro"
+    },
+    "stablecoin": "Stablecoin",
+    "noTokens": "No hay tokens configurados",
+    "amountLabel": "Importe ({token})",
+    "available": "Disponible: {amount} {token}",
+    "processing": "Procesando...",
+    "retry": "Reintentar transaccion",
+    "notes": {
+      "stablecoin": "Elige una stablecoin permitida; los depositos y retiros usan ese token.",
+      "repayment": "La financiacion y el pago de facturas usan el mismo token registrado para esa factura.",
+      "withdrawal": "Solo los fondos no desplegados se pueden retirar en cualquier momento."
+    }
+  },
+  "Navbar": {
+    "dashboard": "Panel",
+    "invest": "Invertir",
+    "analytics": "Analitica",
+    "portfolio": "Portafolio",
+    "newInvoice": "Nueva factura",
+    "toggleTheme": "Cambiar tema"
+  }
+}

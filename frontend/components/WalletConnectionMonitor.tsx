@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '@/lib/store';
 import { pushToast } from './Toast';
+import { useTranslations } from 'next-intl';
 
 /**
  * Background monitor that detects when the Freighter wallet has been
@@ -23,6 +24,7 @@ const POLL_INTERVAL_MS = 30_000;
 const DISCONNECT_TOAST_ID = 'wallet-disconnected';
 
 export default function WalletConnectionMonitor() {
+  const t = useTranslations('Notifications.wallet');
   const wallet = useStore((s) => s.wallet);
   const disconnectStore = useStore((s) => s.disconnect);
   // Track "was connected" so we only notify on the connected → disconnected edge.
@@ -71,9 +73,8 @@ export default function WalletConnectionMonitor() {
       pushToast({
         id: DISCONNECT_TOAST_ID,
         kind: 'warning',
-        title: 'Wallet disconnected',
-        description:
-          'Your Freighter wallet is no longer connected to this site. Reconnect to continue.',
+        title: t('disconnectedTitle'),
+        description: t('disconnectedDescription'),
         durationMs: 8000,
       });
     }

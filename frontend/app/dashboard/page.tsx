@@ -188,7 +188,7 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
-      toast.error('Failed to load invoices. Make sure contracts are deployed.');
+      toast.error(t('notifications.loadError'));
       console.error(e);
     } finally {
       setLoading(false);
