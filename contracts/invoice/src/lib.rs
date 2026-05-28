@@ -1270,12 +1270,7 @@ impl InvoiceContract {
         if invoice.status != InvoiceStatus::Funded {
             panic!("invoice is not funded");
         }
-        let global_grace: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GracePeriodDays)
-            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
-        let grace_period_days = invoice.grace_period_override.unwrap_or(global_grace);
+        let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
         let now = env.ledger().timestamp();
         let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         if now < default_at {
