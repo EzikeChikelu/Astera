@@ -332,6 +332,19 @@ jobs:
         working-directory: ./contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
+      - name: Test contract ID extraction
+        run: |
+          FAKE_HASH=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          VALID_CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          EXTRACTED=$(printf '%s\n%s\n%s\n' \
+            "build summary: $FAKE_HASH" \
+            "$VALID_CONTRACT_ID" \
+            "verbose hash $FAKE_HASH" | bash ./.github/scripts/extract-contract-id.sh)
+          if [ "$EXTRACTED" != "$VALID_CONTRACT_ID" ]; then
+            echo "Failed to extract only the deployment contract ID"
+            exit 1
+          fi
+
       - name: Configure Stellar CLI
         run: |
           stellar keys add deployer --secret-key "${{ secrets.TESTNET_DEPLOYER_KEY }}"
@@ -342,9 +355,13 @@ jobs:
           CONTRACT_ID=$(stellar contract deploy \
             --wasm target/wasm32-unknown-unknown/release/invoice.wasm \
             --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+            --network testnet 2>&1 | bash ./.github/scripts/extract-contract-id.sh || true)
+          if [ -z "$CONTRACT_ID" ]; then
+            echo "Failed to extract invoice contract ID from deployment output"
+            exit 1
+          fi
+          echo "::add-mask::$CONTRACT_ID"
           echo "INVOICE_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
 
       - name: Deploy Pool Contract
         id: deploy-pool
@@ -352,9 +369,13 @@ jobs:
           CONTRACT_ID=$(stellar contract deploy \
             --wasm target/wasm32-unknown-unknown/release/pool.wasm \
             --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+            --network testnet 2>&1 | bash ./.github/scripts/extract-contract-id.sh || true)
+          if [ -z "$CONTRACT_ID" ]; then
+            echo "Failed to extract pool contract ID from deployment output"
+            exit 1
+          fi
+          echo "::add-mask::$CONTRACT_ID"
           echo "POOL_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
 
       - name: Deploy Credit Score Contract
         id: deploy-credit
@@ -362,9 +383,13 @@ jobs:
           CONTRACT_ID=$(stellar contract deploy \
             --wasm target/wasm32-unknown-unknown/release/credit_score.wasm \
             --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+            --network testnet 2>&1 | bash ./.github/scripts/extract-contract-id.sh || true)
+          if [ -z "$CONTRACT_ID" ]; then
+            echo "Failed to extract credit score contract ID from deployment output"
+            exit 1
+          fi
+          echo "::add-mask::$CONTRACT_ID"
           echo "CREDIT_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
 
       - name: Summary
         run: |
