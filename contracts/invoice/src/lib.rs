@@ -54,6 +54,7 @@ const MAX_DESCRIPTION_LEN: u32 = 256;
 const MAX_DEBTOR_LEN: u32 = 64;
 const MAX_VERIFICATION_HASH_LEN: u32 = 256;
 const MAX_METADATA_URI_LEN: u32 = 256;
+const DEFAULT_MIN_DUE_DATE_WINDOW_SECS: u64 = SECS_PER_DAY;
 const DEFAULT_METADATA_IMAGE_URI: &str =
     "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
 const MAX_DUE_DATE_EXTENSION_SECS: u64 = SECS_PER_DAY * 90;
@@ -107,6 +108,10 @@ pub enum InvoiceError {
     NoPendingExtension = 17,
     // Cross-contract call to pool contract failed (network/host error, not a logic rejection)
     PoolCallFailed = 18,
+    EmptyDebtorName = 19,
+    EmptyDescription = 20,
+    InvalidVerificationHash = 21,
+    DueDateTooSoon = 22,
 }
 
 #[contracttype]
@@ -213,6 +218,7 @@ pub enum DataKey {
     Initialized,
     StorageStats,
     Paused,
+    MinDueDateWindowSecs,
     DailyInvoiceCount(Address),
     DailyInvoiceResetTime(Address),
     ProposedWasmHash,
@@ -277,8 +283,14 @@ fn validate_invoice_strings(
     description: &String,
     verification_hash: &String,
 ) {
-    if description.is_empty() || debtor.is_empty() || verification_hash.is_empty() {
-        panic_with_error!(env, InvoiceError::EmptyField);
+    if debtor.is_empty() {
+        panic_with_error!(env, InvoiceError::EmptyDebtorName);
+    }
+    if description.is_empty() {
+        panic_with_error!(env, InvoiceError::EmptyDescription);
+    }
+    if verification_hash.is_empty() {
+        panic_with_error!(env, InvoiceError::InvalidVerificationHash);
     }
     if description.len() > MAX_DESCRIPTION_LEN {
         panic_with_error!(env, InvoiceError::DescriptionTooLong);
@@ -436,6 +448,23 @@ fn validate_due_date(env: &Env, due_date: u64) {
     }
 }
 
+fn resolve_min_due_date_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDueDateWindowSecs)
+        .unwrap_or(DEFAULT_MIN_DUE_DATE_WINDOW_SECS)
+}
+
+fn validate_min_due_date_window(env: &Env, due_date: u64) {
+    let now = env.ledger().timestamp();
+    let min_due_date = now
+        .checked_add(resolve_min_due_date_window(env))
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
+    if due_date < min_due_date {
+        soroban_sdk::panic_with_error!(env, InvoiceError::DueDateTooSoon);
+    }
+}
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -485,6 +514,10 @@ impl InvoiceContract {
         env.storage().instance().set(
             &DataKey::DisputeResolutionWindow,
             &DEFAULT_DISPUTE_RESOLUTION_WINDOW,
+        );
+        env.storage().instance().set(
+            &DataKey::MinDueDateWindowSecs,
+            &DEFAULT_MIN_DUE_DATE_WINDOW_SECS,
         );
         env.storage()
             .instance()
@@ -765,8 +798,6 @@ impl InvoiceContract {
     ) -> u64 {
         owner.require_auth();
         require_not_paused(&env);
-        bump_instance(&env);
-
         validate_invoice_strings(&env, &debtor, &description, &verification_hash);
 
         if let Some(uri) = metadata_uri.as_ref() {
@@ -785,9 +816,7 @@ impl InvoiceContract {
         if amount > max_invoice_amount {
             panic!("invoice amount exceeds maximum");
         }
-        if due_date <= env.ledger().timestamp() {
-            panic!("due date must be in the future");
-        }
+        validate_min_due_date_window(&env, due_date);
         validate_due_date(&env, due_date);
 
         let outstanding = get_sme_outstanding(&env, &owner);
@@ -838,6 +867,8 @@ impl InvoiceContract {
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
         }
+
+        bump_instance(&env);
         daily_count += 1;
         env.storage().instance().set(&daily_count_key, &daily_count);
 
@@ -1678,6 +1709,36 @@ impl InvoiceContract {
             (EVT, Symbol::new(&env, "grace_period_updated")),
             (admin, old_days, days),
         );
+    }
+
+    pub fn set_min_due_date_window(env: Env, admin: Address, window_secs: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let old_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDueDateWindowSecs)
+            .unwrap_or(DEFAULT_MIN_DUE_DATE_WINDOW_SECS);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDueDateWindowSecs, &window_secs);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "due_window_updated")),
+            (admin, old_window, window_secs),
+        );
+    }
+
+    pub fn get_min_due_date_window(env: Env) -> u64 {
+        bump_instance(&env);
+        resolve_min_due_date_window(&env)
     }
 
     pub fn set_max_invoice_amount(env: Env, admin: Address, max_invoice_amount: i128) {
@@ -2851,7 +2912,7 @@ mod test {
             &String::from_str(&env, "hash"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyDescription)));
     }
 
     #[test]
@@ -2937,7 +2998,7 @@ mod test {
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyDebtorName)));
     }
 
     #[test]
@@ -2953,7 +3014,7 @@ mod test {
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, ""),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::InvalidVerificationHash)));
     }
 
     #[test]

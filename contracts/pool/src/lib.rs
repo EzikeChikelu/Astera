@@ -125,6 +125,10 @@ pub enum PoolError {
     NotDefaulted = 42,
     // #385: pool address stored in invoice contract does not match this pool
     InvoicePoolMismatch = 43,
+    // #333: share token must exist and be initialized before token registration
+    InvalidShareToken = 44,
+    // #335: duplicate invoice IDs in batch funding
+    DuplicateInvoiceId = 45,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -993,9 +997,19 @@ impl FundingPool {
         share_token: Address,
     ) -> Result<(), PoolError> {
         admin.require_auth();
-        bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+
+        // #367: Fetch and validate token decimals
+        let token_client = token::Client::new(&env, &token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != EXPECTED_DECIMALS {
+            return Err(PoolError::UnsupportedTokenDecimals);
+        }
+        let share_client = token::Client::new(&env, &share_token);
+        if share_client.try_decimals().is_err() {
+            return Err(PoolError::InvalidShareToken);
+        }
 
         let mut tokens: Vec<Address> = env
             .storage()
@@ -1009,12 +1023,7 @@ impl FundingPool {
             }
         }
 
-        // #367: Fetch and validate token decimals
-        let token_client = token::Client::new(&env, &token);
-        let token_decimals = token_client.decimals();
-        if token_decimals != EXPECTED_DECIMALS {
-            return Err(PoolError::UnsupportedTokenDecimals);
-        }
+        bump_instance(&env);
 
         tokens.push_back(token.clone());
         env.storage()
@@ -1839,11 +1848,8 @@ impl FundingPool {
         requests: Vec<FundingRequest>,
     ) -> Result<(), PoolError> {
         admin.require_auth();
-        bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-
-        Self::non_reentrant_start(&env);
 
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
@@ -1851,6 +1857,18 @@ impl FundingPool {
         if requests.len() > MAX_BATCH_SIZE {
             return Err(PoolError::BatchTooLarge);
         }
+        for i in 0..requests.len() {
+            let request_i = requests.get(i).ok_or(PoolError::StorageCorrupted)?;
+            for j in (i + 1)..requests.len() {
+                let request_j = requests.get(j).ok_or(PoolError::StorageCorrupted)?;
+                if request_i.invoice_id == request_j.invoice_id {
+                    return Err(PoolError::DuplicateInvoiceId);
+                }
+            }
+        }
+
+        bump_instance(&env);
+        Self::non_reentrant_start(&env);
 
         let config = get_config_cached(&env)?;
         let accepted_tokens: Vec<Address> = env
