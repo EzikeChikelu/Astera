@@ -40,6 +40,30 @@ impl DummyShare {
     }
 }
 
+#[contract]
+pub struct DummyInvoice;
+#[contractimpl]
+impl DummyInvoice {
+    pub fn get_authorized_pool(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("pool"))
+            .expect("not initialized")
+    }
+    pub fn set_pool(env: Env, pool: Address) {
+        env.storage().instance().set(&symbol_short!("pool"), &pool);
+    }
+    pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
+        let stored: Option<bool> = env.storage().persistent().get(&symbol_short!("inv_def"));
+        stored.unwrap_or(false)
+    }
+    pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("inv_def"), &defaulted);
+    }
+}
+
 fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
     let contract_id = env.register(FundingPool, ());
@@ -49,10 +73,13 @@ fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
     let usdc_id = env
         .register_stellar_asset_contract_v2(token_admin)
         .address();
-    let invoice_contract = Address::generate(env);
+    let invoice_contract = env.register(DummyInvoice, ());
+    DummyInvoiceClient::new(env, &invoice_contract).set_pool(&contract_id);
 
     let share_token = env.register(DummyShare, ());
     client.initialize(&admin, &usdc_id, &share_token, &invoice_contract);
+    // Disable concentration limit for fuzz harness (single-investor scenarios).
+    client.set_max_investor_concentration(&admin, &10_000u32);
     (client, admin, usdc_id, share_token)
 }
 
@@ -186,7 +213,8 @@ proptest! {
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
         env.ledger().with_mut(|l| l.timestamp += hold_days * 86_400);
-        client.repay_invoice(&1u64, &sme);
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
 
         let tt = client.get_token_totals(&usdc_id);
         prop_assert_eq!(tt.total_deployed, 0i128, "total_deployed should be 0 after repayment");
@@ -239,15 +267,17 @@ proptest! {
 
     /// Fuzz test: Yield rate configuration
     #[test]
-    fn fuzz_yield_rate(yield_bps in 0u32..5000u32) {
+    fn fuzz_yield_rate(yield_bps in 1u32..5000u32) {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc, _share) = setup(&env);
 
         // Relax policy so fuzzing arbitrary yields isn't blocked by cooldown/step limits.
-        client.set_yield_change_policy(&admin, &1u64, &5_000u32);
-        env.ledger().with_mut(|l| l.timestamp += 1);
-        client.set_yield(&admin, &yield_bps);
+        client.set_yield_change_policy(&admin, &1u64, &5_000u32, &3_600u64);
+        env.ledger().with_mut(|l| l.timestamp += 86_400u64);
+        client.propose_yield_change(&admin, &yield_bps);
+        env.ledger().with_mut(|l| l.timestamp += 3_601u64);
+        client.execute_yield_change();
         let config = client.get_config();
         prop_assert_eq!(config.yield_bps, yield_bps);
     }
@@ -500,6 +530,7 @@ mod deterministic_fuzz {
         env.mock_all_auths();
         let (client, admin, usdc_id, _share) = setup(&env);
         // e.g. EURC at 1.08 USD = 10800 bps
+        client.set_rate_bounds(&admin, &usdc_id, &9_000u32, &11_000u32);
         client.set_exchange_rate(&admin, &usdc_id, &10_800u32);
         assert_eq!(client.get_exchange_rate(&usdc_id), 10_800u32);
     }

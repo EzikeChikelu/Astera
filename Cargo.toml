@@ -1,13 +1,17 @@
 [workspace]
 members = [
     "contracts/invoice",
-    "contracts/pool",
+    "contracts/pool", 
     "contracts/credit_score",
     "contracts/share",
+    "contracts/governance",
+    "contracts/tests",
+    "benchmarks",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+criterion = "0.5"
 soroban-sdk = { version = "22.0.0" }
 
 [profile.release]

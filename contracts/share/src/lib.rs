@@ -1,5 +1,9 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
+};
+
+const EVT: Symbol = symbol_short!("share");
 
 #[contracttype]
 pub enum DataKey {
@@ -8,6 +12,7 @@ pub enum DataKey {
     Symbol,
     Decimals,
     Balance(Address),
+    Allowance(Address, Address),
     TotalSupply,
 }
 
@@ -25,6 +30,8 @@ impl ShareToken {
         env.storage().instance().set(&DataKey::Name, &name);
         env.storage().instance().set(&DataKey::Symbol, &symbol);
         env.storage().instance().set(&DataKey::TotalSupply, &0i128);
+        env.events()
+            .publish((EVT, symbol_short!("init")), (name, symbol, decimals));
     }
 
     pub fn mint(env: Env, to: Address, amount: i128) {
@@ -39,9 +46,12 @@ impl ShareToken {
             .set(&DataKey::Balance(to.clone()), &(balance + amount));
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let new_total = total + amount;
         env.storage()
             .instance()
-            .set(&DataKey::TotalSupply, &(total + amount));
+            .set(&DataKey::TotalSupply, &new_total);
+        env.events()
+            .publish((EVT, symbol_short!("mint")), (to, amount, new_total));
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) {
@@ -59,9 +69,12 @@ impl ShareToken {
             .set(&DataKey::Balance(from.clone()), &(balance - amount));
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let new_total = total - amount;
         env.storage()
             .instance()
-            .set(&DataKey::TotalSupply, &(total - amount));
+            .set(&DataKey::TotalSupply, &new_total);
+        env.events()
+            .publish((EVT, symbol_short!("burn")), (from, amount, new_total));
     }
 
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
@@ -75,12 +88,64 @@ impl ShareToken {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from), &(balance_from - amount));
+            .set(&DataKey::Balance(from.clone()), &(balance_from - amount));
 
         let balance_to = Self::balance(env.clone(), to.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to), &(balance_to + amount));
+            .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
+        env.events()
+            .publish((EVT, symbol_short!("transfer")), (from, to, amount));
+    }
+
+    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) {
+        owner.require_auth();
+        if amount < 0 {
+            panic!("amount must be non-negative");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+        env.events()
+            .publish((EVT, symbol_short!("approve")), (owner, spender, amount));
+    }
+
+    pub fn allowance(env: Env, owner: Address, spender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Allowance(owner, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        spender.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowed < amount {
+            panic!("allowance exceeded");
+        }
+        let balance_from = Self::balance(env.clone(), from.clone());
+        if balance_from < amount {
+            panic!("insufficient balance");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from.clone()), &(balance_from - amount));
+        let balance_to = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
+        env.storage().persistent().set(
+            &DataKey::Allowance(from.clone(), spender.clone()),
+            &(allowed - amount),
+        );
+        env.events().publish(
+            (EVT, symbol_short!("xfer_from")),
+            (spender, from, to, amount),
+        );
     }
 
     pub fn balance(env: Env, id: Address) -> i128 {
@@ -107,5 +172,266 @@ impl ShareToken {
 
     pub fn symbol(env: Env) -> String {
         env.storage().instance().get(&DataKey::Symbol).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    fn setup(env: &Env) -> (ShareTokenClient<'_>, Address) {
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(env, "Pool Shares"),
+            &String::from_str(env, "POOL"),
+        );
+        (client, admin)
+    }
+
+    #[test]
+    fn test_mint_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let to = Address::generate(&env);
+
+        client.mint(&to, &500i128);
+
+        assert_eq!(client.balance(&to), 500);
+        assert_eq!(client.total_supply(), 500);
+    }
+
+    #[test]
+    fn test_burn_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let holder = Address::generate(&env);
+
+        client.mint(&holder, &1_000i128);
+        client.burn(&holder, &400i128);
+
+        assert_eq!(client.balance(&holder), 600);
+        assert_eq!(client.total_supply(), 600);
+    }
+
+    #[test]
+    fn test_transfer_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        client.mint(&alice, &1_000i128);
+        client.transfer(&alice, &bob, &300i128);
+
+        assert_eq!(client.balance(&alice), 700);
+        assert_eq!(client.balance(&bob), 300);
+        assert_eq!(client.total_supply(), 1_000);
+    }
+
+    #[test]
+    fn test_initialize_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &6u32,
+            &String::from_str(&env, "Test Token"),
+            &String::from_str(&env, "TEST"),
+        );
+
+        assert_eq!(client.decimals(), 6u32);
+        assert_eq!(client.total_supply(), 0);
+    }
+
+    #[test]
+    fn test_mint_requires_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths — admin auth check must be satisfied
+        let (client, _admin) = setup(&env);
+        let to = Address::generate(&env);
+        let result = client.try_mint(&to, &100i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_burn_zero_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let holder = Address::generate(&env);
+        client.mint(&holder, &100i128);
+        client.burn(&holder, &0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_transfer_zero_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&alice, &100i128);
+        client.transfer(&alice, &bob, &0i128);
+    }
+
+    #[test]
+    fn test_initialize_sets_name_symbol_decimals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &6u32,
+            &String::from_str(&env, "Test Shares"),
+            &String::from_str(&env, "TST"),
+        );
+
+        assert_eq!(client.name(), String::from_str(&env, "Test Shares"));
+        assert_eq!(client.symbol(), String::from_str(&env, "TST"));
+        assert_eq!(client.decimals(), 6u32);
+        assert_eq!(client.total_supply(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_double_initialize_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Pool Shares"),
+            &String::from_str(&env, "POOL"),
+        );
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Pool Shares"),
+            &String::from_str(&env, "POOL"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient balance")]
+    fn test_burn_exceeds_balance_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let holder = Address::generate(&env);
+
+        client.mint(&holder, &100i128);
+        client.burn(&holder, &101i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient balance")]
+    fn test_transfer_exceeds_balance_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        client.mint(&alice, &50i128);
+        client.transfer(&alice, &bob, &51i128);
+    }
+
+    #[test]
+    fn test_transfer_to_self_leaves_balance_unchanged() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        client.mint(&alice, &200i128);
+        client.transfer(&alice, &alice, &100i128);
+
+        assert_eq!(client.balance(&alice), 200);
+        assert_eq!(client.total_supply(), 200);
+    }
+
+    #[test]
+    fn test_balance_of_unknown_address_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        assert_eq!(client.balance(&Address::generate(&env)), 0);
+    }
+
+    #[test]
+    fn test_total_supply_consistent_after_multi_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        client.mint(&alice, &1_000i128);
+        client.mint(&bob, &500i128);
+        assert_eq!(client.total_supply(), 1_500);
+
+        client.burn(&alice, &200i128);
+        assert_eq!(client.total_supply(), 1_300);
+
+        client.transfer(&alice, &bob, &300i128);
+        assert_eq!(client.total_supply(), 1_300);
+        assert_eq!(client.balance(&alice), 500);
+        assert_eq!(client.balance(&bob), 800);
+    }
+
+    #[test]
+    fn test_approve_and_transfer_from() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        client.mint(&owner, &1_000i128);
+        client.approve(&owner, &spender, &400i128);
+        client.transfer_from(&spender, &owner, &recipient, &250i128);
+
+        assert_eq!(client.balance(&owner), 750);
+        assert_eq!(client.balance(&recipient), 250);
+        assert_eq!(client.allowance(&owner, &spender), 150);
+        assert_eq!(client.total_supply(), 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "allowance exceeded")]
+    fn test_transfer_from_fails_exceeds_allowance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        client.mint(&owner, &1_000i128);
+        client.approve(&owner, &spender, &100i128);
+        client.transfer_from(&spender, &owner, &recipient, &101i128);
     }
 }

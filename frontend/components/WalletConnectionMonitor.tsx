@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useStore } from '@/lib/store';
+import { useStore, type AsteraStore } from '@/lib/store';
 import { pushToast } from './Toast';
 import { useTranslations } from 'next-intl';
 
@@ -44,7 +44,7 @@ export default function WalletConnectionMonitor() {
       if (!wasConnectedRef.current) return;
 
       try {
-        const freighter = await import('@stellar/freighter-api');
+        const freighter = await getFreighter();
         const [{ isAllowed, error: allowedError }, { address, error: addressError }] =
           await Promise.all([freighter.isAllowed(), freighter.getAddress()]);
 

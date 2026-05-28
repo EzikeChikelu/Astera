@@ -5,7 +5,8 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { HistoryEventSkeleton } from '@/components/Skeleton';
 import {
-  rpc,
+  rpcGetEvents,
+  rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   scValToNative,
@@ -17,6 +18,7 @@ import {
 const EXPLORER_BASE = 'https://stellar.expert/explorer/testnet';
 const PAGE_SIZE = 20;
 const EVENT_LIMIT = 200;
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
 
 type EventKind =
   | 'invoice_created'
@@ -187,7 +189,15 @@ function formatTs(ts: string): string {
 }
 
 function exportCSV(events: HistoryEvent[]) {
-  const header = ['Date', 'Type', 'Invoice ID', 'Amount (USD)', 'Interest (USD)', 'Address', 'Tx Hash'];
+  const header = [
+    'Date',
+    'Type',
+    'Invoice ID',
+    'Amount (USD)',
+    'Interest (USD)',
+    'Address',
+    'Tx Hash',
+  ];
   const rows = events.map((e) => [
     e.timestamp ? new Date(e.timestamp).toISOString() : '',
     KIND_LABELS[e.kind],
@@ -240,22 +250,63 @@ export default function HistoryPage() {
       else setLoadingMore(true);
 
       try {
-        const latest = await rpc.getLatestLedger();
-        const startLedger = Math.max(1, latest.sequence - 500_000);
+        let parsed: HistoryEvent[] = [];
+        let responseCursor: string | undefined;
 
-        const response = await rpc.getEvents({
-          ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
-          filters: [
-            {
-              type: 'contract',
-              contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID],
-            },
-          ],
-          limit: EVENT_LIMIT,
-        });
+        // Try indexer API first (Option A optimization from #240)
+        if (INDEXER_URL) {
+          try {
+            const params = new URLSearchParams({
+              limit: EVENT_LIMIT.toString(),
+              ...(nextCursor ? { cursor: nextCursor } : {}),
+            });
+            if (INVOICE_CONTRACT_ID) params.append('contract_id', INVOICE_CONTRACT_ID);
+            if (POOL_CONTRACT_ID) params.append('contract_id', POOL_CONTRACT_ID);
 
-        const raw = response.events ?? [];
-        const parsed = parseEvents(raw, wallet.address);
+            const res = await fetch(`${INDEXER_URL}/events?${params.toString()}`);
+            if (res.ok) {
+              const data = await res.json();
+              const raw = (Array.isArray(data.events) ? data.events : []).map((e: unknown) => {
+                const evt = e as Record<string, unknown>;
+                return {
+                  contractId: evt.contractId,
+                  topic: evt.topic ?? [],
+                  value: evt.value,
+                  ledger: evt.ledgerSequence,
+                  ledgerClosedAt: evt.ledgerClosedAt,
+                  txHash: evt.txHash,
+                };
+              });
+              parsed = parseEvents(raw, wallet.address);
+            }
+          } catch (indexerErr) {
+            console.warn('[History] Indexer unavailable, falling back to Horizon:', indexerErr);
+          }
+        }
+
+        let fetchedCount = parsed.length;
+
+        // Fallback to Horizon RPC if indexer didn't work
+        if (parsed.length === 0) {
+          const latest = await rpcGetLatestLedger();
+          const startLedger = Math.max(1, latest.sequence - 500_000);
+
+          const response = await rpcGetEvents({
+            ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
+            filters: [
+              {
+                type: 'contract',
+                contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID].filter(Boolean) as string[],
+              },
+            ],
+            limit: EVENT_LIMIT,
+          });
+
+          const raw = response.events ?? [];
+          fetchedCount = raw.length;
+          responseCursor = response.cursor;
+          parsed = parseEvents(raw, wallet.address);
+        }
 
         if (append) {
           setEvents((prev) => [...prev, ...parsed]);
@@ -264,11 +315,7 @@ export default function HistoryPage() {
           setVisible(PAGE_SIZE);
         }
 
-        const responseCursor =
-          typeof response === 'object' && response !== null && 'cursor' in response
-            ? (response as { cursor?: string }).cursor
-            : undefined;
-        setHasMore(raw.length === EVENT_LIMIT && Boolean(responseCursor));
+        setHasMore(fetchedCount === EVENT_LIMIT && Boolean(responseCursor));
         setCursor(responseCursor);
       } catch (e) {
         toast.error('Failed to load transaction history. Make sure contracts are deployed.');
@@ -301,7 +348,7 @@ export default function HistoryPage() {
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-6">
+    <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-3xl mx-auto">
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -413,6 +460,4 @@ export default function HistoryPage() {
       </div>
     </div>
   );
-}
-  /* Added by bounty-bot */
 }

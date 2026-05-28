@@ -1,4 +1,5 @@
 import useSWR from 'swr';
+import { mutate } from 'swr';
 import useSWRMutation from 'swr/mutation';
 import {
   getInvoice,
@@ -27,27 +28,38 @@ import type {
   InvoiceMetadata,
 } from './types';
 
-// SWR Configuration
-const SWR_CONFIG = {
-  refreshInterval: 30000, // 30 seconds
-  revalidateOnFocus: true,
-  revalidateOnReconnect: true,
-  dedupingInterval: 5000, // 5 seconds
+type SWRCacheEntry = {
+  refreshInterval: number;
+  revalidateOnFocus: boolean;
+  revalidateOnReconnect: boolean;
+  dedupingInterval: number;
 };
 
-const STALE_TIMES = {
-  poolConfig: 60000, // 1 minute - doesn't change often
-  invoiceCount: 15000, // 15 seconds - changes with new invoices
-  invoice: 10000, // 10 seconds - status changes frequently
-  position: 15000, // 15 seconds - changes with deposits/commits
-  tokens: 60000, // 1 minute - whitelist changes rarely
-  tokenTotals: 20000, // 20 seconds - changes with deposits/deployments
-  fundedInvoice: 10000, // 10 seconds - status changes
+/** Per-data-type TTLs (milliseconds). Import and refer to these directly. */
+export const CACHE_TTL = {
+  poolConfig: 5 * 60_000,
+  invoiceStatus: 15_000,
+  creditScore: 60_000,
+  walletBalance: 30_000,
+} as const;
+
+/** Per-resource SWR configuration. Import and spread into useSWR options. */
+export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
+  poolConfig: { refreshInterval: CACHE_TTL.poolConfig, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.poolConfig },
+  invoiceCount: { refreshInterval: CACHE_TTL.invoiceStatus, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.invoiceStatus },
+  invoice: { refreshInterval: CACHE_TTL.invoiceStatus, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.invoiceStatus },
+  position: { refreshInterval: CACHE_TTL.invoiceStatus, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.invoiceStatus },
+  tokens: { refreshInterval: CACHE_TTL.creditScore, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.creditScore },
+  tokenTotals: { refreshInterval: CACHE_TTL.walletBalance, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.walletBalance },
+  fundedInvoice: { refreshInterval: CACHE_TTL.invoiceStatus, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: CACHE_TTL.invoiceStatus },
 };
 
 // Error type for contract calls
 class ContractError extends Error {
-  constructor(message: string, public code?: string) {
+  constructor(
+    message: string,
+    public code?: string,
+  ) {
     super(message);
     this.name = 'ContractError';
   }
@@ -68,14 +80,9 @@ async function fetcher<T>(fn: () => Promise<T>): Promise<T> {
 // ---- Pool Config Cache ----
 
 export function usePoolConfig() {
-  return useSWR<PoolConfig, ContractError>(
-    'pool-config',
-    () => fetcher(() => getPoolConfig()),
-    {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.poolConfig,
-    }
-  );
+  return useSWR<PoolConfig, ContractError>('pool-config', () => fetcher(() => getPoolConfig()), {
+    ...CACHE_CONFIG.poolConfig,
+  });
 }
 
 // ---- Accepted Tokens Cache ----
@@ -85,23 +92,17 @@ export function useAcceptedTokens() {
     'accepted-tokens',
     () => fetcher(() => getAcceptedTokens()),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokens,
-    }
+      ...CACHE_CONFIG.tokens,
+    },
   );
 }
 
 // ---- Invoice Count Cache ----
 
 export function useInvoiceCount() {
-  return useSWR<number, ContractError>(
-    'invoice-count',
-    () => fetcher(() => getInvoiceCount()),
-    {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoiceCount,
-    }
-  );
+  return useSWR<number, ContractError>('invoice-count', () => fetcher(() => getInvoiceCount()), {
+    ...CACHE_CONFIG.invoiceCount,
+  });
 }
 
 // ---- Single Invoice Cache ----
@@ -111,9 +112,8 @@ export function useInvoice(id: number | null) {
     id !== null ? ['invoice', id] : null,
     () => fetcher(() => getInvoice(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
-    }
+      ...CACHE_CONFIG.invoice,
+    },
   );
 }
 
@@ -124,9 +124,8 @@ export function useInvoiceMetadata(id: number | null) {
     id !== null ? ['invoice-metadata', id] : null,
     () => fetcher(() => getInvoiceMetadata(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
-    }
+      ...CACHE_CONFIG.invoice,
+    },
   );
 }
 
@@ -137,9 +136,8 @@ export function useInvestorPosition(investor: string | null, token: string | nul
     investor && token ? ['position', investor, token] : null,
     () => fetcher(() => getInvestorPosition(investor!, token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.position,
-    }
+      ...CACHE_CONFIG.position,
+    },
   );
 }
 
@@ -150,9 +148,8 @@ export function usePoolTokenTotals(token: string | null) {
     token ? ['token-totals', token] : null,
     () => fetcher(() => getPoolTokenTotals(token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokenTotals,
-    }
+      ...CACHE_CONFIG.tokenTotals,
+    },
   );
 }
 
@@ -163,9 +160,8 @@ export function useFundedInvoice(invoiceId: number | null) {
     invoiceId !== null ? ['funded-invoice', invoiceId] : null,
     () => fetcher(() => getFundedInvoice(invoiceId!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.fundedInvoice,
-    }
+      ...CACHE_CONFIG.fundedInvoice,
+    },
   );
 }
 
@@ -179,7 +175,7 @@ type MutationContext = {
 // Deposit mutation
 async function depositMutation(
   _: string,
-  { arg }: { arg: { investor: string; token: string; amount: bigint; signedXdr: string } }
+  { arg }: { arg: { investor: string; token: string; amount: bigint; signedXdr: string } },
 ) {
   const result = await submitTx(arg.signedXdr);
   return result;
@@ -192,26 +188,19 @@ export function useDeposit(investor: string, token: string) {
     string,
     { investor: string; token: string; amount: bigint; signedXdr: string },
     MutationContext
-  >(
-    'deposit',
-    depositMutation,
-    {
-      onSuccess: () => {
-        // Invalidate position and token totals after deposit
-        const positionKey = ['position', investor, token];
-        const totalsKey = ['token-totals', token];
-        // Note: SWR doesn't have direct invalidate method, 
-        // but calling mutate with undefined will trigger revalidation
-        // The keys will be automatically revalidated on next use
-      },
-    }
-  );
+  >('deposit', depositMutation, {
+    onSuccess: () => {
+      // Invalidate position and token totals after deposit
+      mutate(['position', investor, token]);
+      mutate(['token-totals', token]);
+    },
+  });
 }
 
 // Withdraw mutation
 async function withdrawMutation(
   _: string,
-  { arg }: { arg: { investor: string; token: string; amount: bigint; signedXdr: string } }
+  { arg }: { arg: { investor: string; token: string; amount: bigint; signedXdr: string } },
 ) {
   return submitTx(arg.signedXdr);
 }
@@ -228,7 +217,7 @@ export function useWithdraw(investor: string, token: string) {
 // Commit to invoice mutation
 async function commitMutation(
   _: string,
-  { arg }: { arg: { investor: string; invoiceId: number; signedXdr: string } }
+  { arg }: { arg: { investor: string; invoiceId: number; signedXdr: string } },
 ) {
   return submitTx(arg.signedXdr);
 }
@@ -243,26 +232,21 @@ export function useCommitToInvoice(investor: string, invoiceId: number) {
 }
 
 // Create invoice mutation
-async function createInvoiceMutation(
-  _: string,
-  { arg }: { arg: { signedXdr: string } }
-) {
+async function createInvoiceMutation(_: string, { arg }: { arg: { signedXdr: string } }) {
   return submitTx(arg.signedXdr);
 }
 
 export function useCreateInvoice() {
-  return useSWRMutation<
-    unknown,
-    ContractError,
-    string,
-    { signedXdr: string }
-  >('create-invoice', createInvoiceMutation);
+  return useSWRMutation<unknown, ContractError, string, { signedXdr: string }>(
+    'create-invoice',
+    createInvoiceMutation,
+  );
 }
 
 // Mark defaulted mutation
 async function markDefaultedMutation(
   _: string,
-  { arg }: { arg: { admin: string; invoiceId: number; signedXdr: string } }
+  { arg }: { arg: { admin: string; invoiceId: number; signedXdr: string } },
 ) {
   return submitTx(arg.signedXdr);
 }
@@ -279,7 +263,7 @@ export function useMarkDefaulted(admin: string, invoiceId: number) {
 // Init co-funding mutation
 async function initCoFundingMutation(
   _: string,
-  { arg }: { arg: { admin: string; invoiceId: number; signedXdr: string } }
+  { arg }: { arg: { admin: string; invoiceId: number; signedXdr: string } },
 ) {
   return submitTx(arg.signedXdr);
 }
@@ -294,53 +278,46 @@ export function useInitCoFunding(admin: string, invoiceId: number) {
 }
 
 // Set yield mutation
-async function setYieldMutation(
-  _: string,
-  { arg }: { arg: { admin: string; signedXdr: string } }
-) {
+async function setYieldMutation(_: string, { arg }: { arg: { admin: string; signedXdr: string } }) {
   return submitTx(arg.signedXdr);
 }
 
 export function useSetYield(admin: string) {
-  return useSWRMutation<
-    unknown,
-    ContractError,
-    string,
-    { admin: string; signedXdr: string }
-  >('set-yield', setYieldMutation);
+  return useSWRMutation<unknown, ContractError, string, { admin: string; signedXdr: string }>(
+    'set-yield',
+    setYieldMutation,
+  );
 }
 
 // ---- Cache Invalidation Helpers ----
 
 // Helper to revalidate all invoice-related cache
 export function getInvoiceCacheKeys(invoiceId?: number) {
-  const keys: (string | (string | number)[])[] = [
-    'invoice-count',
-  ];
-  
+  const keys: (string | (string | number)[])[] = ['invoice-count'];
+
   if (invoiceId !== undefined) {
     keys.push(['invoice', invoiceId]);
     keys.push(['invoice-metadata', invoiceId]);
     keys.push(['funded-invoice', invoiceId]);
   }
-  
+
   return keys;
 }
 
 // Helper to revalidate all position-related cache
 export function getPositionCacheKeys(investor?: string, token?: string) {
   const keys: (string | (string | number)[])[] = [];
-  
+
   if (investor && token) {
     keys.push(['position', investor, token]);
     keys.push(['token-totals', token]);
   }
-  
+
   return keys;
 }
 
 // Export SWR provider config for app setup
 export const swrConfig = {
   provider: () => new Map(),
-  ...SWR_CONFIG,
+  ...CACHE_CONFIG.invoice,
 };

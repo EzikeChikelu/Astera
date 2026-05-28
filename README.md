@@ -40,18 +40,34 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 
 ---
 
-## Setup
+## Getting Started
+
+Start with the guide that matches how you want to work:
+
+- [Local Development with Docker Compose](docs/local-development.md)
+- [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
+- [Testnet Deployment Guide](docs/deployment.md)
+- [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
 
 ### Rapid Local Development (Docker Compose)
-We provide a one-command setup using Docker Compose that spins up the Stellar local network, the Next.js frontend, a contracts development environment, and mock services.
+
+We provide a Docker Compose workflow for the Stellar local network, the Next.js
+frontend, a contracts development shell, mock services, and the optional local
+indexer.
 
 ```bash
-docker-compose up -d
+docker compose up --build
 ```
-After running this command:
+
+After the stack is ready:
+
 - **Frontend** is available at http://localhost:3000
-- **Stellar RPC** is available at http://localhost:8000
+- **Stellar Horizon/RPC** is available at http://localhost:8000
 - **Mock Services** are available at http://localhost:4000
+
+Read the full [local development guide](docs/local-development.md) before the
+first run. It explains the required frontend env file, manual contract workflow,
+common failures, and reset commands.
 
 ---
 
@@ -193,6 +209,8 @@ For production deployment, see the comprehensive [Mainnet Deployment Guide](docs
 
 For upgrade runbooks and migration safety checks, see the [Contract Upgrade Guide](docs/contract-upgrade-guide.md).
 
+For safely testing contract upgrades before deployment, see the [Upgrade Dry-Run Guide](docs/upgrade-dry-run.md).
+
 **⚠️ Important:** Mainnet deployment involves real assets. Complete all security audits and testing before deploying to production.
 
 ---
@@ -233,3 +251,23 @@ Branch protection for `main` should be configured so that:
 To apply, in GitHub: **Settings → Branches → Branch protection rules → Add rule** for
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions from developers of all experience levels! Whether you're fixing bugs, improving documentation, adding features, or participating in the Wave Program, your work helps advance tokenized RWA solutions on Stellar.
+
+**Getting started:**
+- Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
+- Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
+- See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+
+For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+- **Task:** Add SME onboarding verification — prevent duplicate SME accounts
+- **Reward:** $10
+- **Source:** GitHub-Paid
+- **Date:** 2026-04-27

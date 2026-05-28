@@ -2,7 +2,7 @@
 
 ## Overview
 
-Astera is a Real World Assets (RWA) financing platform on Stellar blockchain that enables Small and Medium Enterprises (SMEs) to tokenize unpaid invoices and connect with community investors through Soroban smart contracts. The system comprises four coordinated contracts: an Invoice Contract managing the lifecycle of tokenized invoices, a Pool Contract handling investor deposits and liquidity, a Credit Score Contract building on-chain credit history, and a Share Token Contract for managing pool share distribution.
+Astera is a Real World Assets (RWA) financing platform on Stellar blockchain that enables Small and Medium Enterprises (SMEs) to tokenize unpaid invoices and connect with community investors through Soroban smart contracts. The system comprises five coordinated contracts: an Invoice Contract managing the lifecycle of tokenized invoices, a Pool Contract handling investor deposits and liquidity, a Credit Score Contract building on-chain credit history, a Share Token Contract for managing pool share distribution, and a Governance Contract for share-weighted proposal voting.
 
 The platform operates on the core principle that invoices become RWA tokens, a liquidity pool funded by investors provides capital to SMEs, and automatic repayment + yield distribution closes the loop between all parties.
 
@@ -20,6 +20,7 @@ The platform operates on the core principle that invoices become RWA tokens, a l
 - **Pool Contract** (`contracts/pool/src/lib.rs`): Written in Rust, compiles to WebAssembly
 - **Credit Score Contract** (`contracts/credit_score/src/lib.rs`): Written in Rust, compiles to WebAssembly
 - **Share Token Contract** (`contracts/share/src/lib.rs`): Written in Rust, compiles to WebAssembly
+- **Governance Contract** (`contracts/governance/src/lib.rs`): Written in Rust, compiles to WebAssembly
 
 ### Frontend
 - **Framework**: Next.js 15 with TypeScript
@@ -62,6 +63,9 @@ contracts/
 ├── share/
 │   ├── Cargo.toml           # Share token contract crate
 │   └── src/lib.rs           # Share token contract implementation (simple share token)
+├── governance/
+│   ├── Cargo.toml           # Governance contract crate
+│   └── src/lib.rs           # Share-weighted governance proposal lifecycle
 ├── tests/
 │   └── integration_tests.rs  # Cross-contract integration tests (373 lines)
 └── Dockerfile               # Contract build environment
@@ -156,7 +160,6 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `GracePeriodDays` → Number of days (default 7) before marked-as-defaulted invoices can trigger
 - `DailyInvoiceCount(Address)` → Rate limiting counter per creator
 - `DailyInvoiceResetTime(Address)` → Timestamp for rate limit reset
-- `DailyInvoiceLimit` → Admin-configurable per-address daily invoice cap
 
 **Invoice Status Enum**:
 - `Pending` — Created, awaiting optional oracle verification
@@ -187,7 +190,7 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `unpaused` (admin) — Contract unpaused
 - `upgraded` (admin, timestamp) — Contract code upgraded
 
-**Rate Limiting**: Defaults to 10 invoices per address per day, but the admin can now tune that cap with `set_daily_invoice_limit(limit)`. Counters still reset on a rolling 24-hour window based on ledger timestamp.
+**Rate Limiting**: Max 10 invoices per address per day (counter resets daily based on timestamp)
 
 **Upgrade Mechanism**: Implements `propose_upgrade(admin, wasm_hash)` + `execute_upgrade(admin)` with 24-hour timelock
 
@@ -209,8 +212,6 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 **Key State Variables** (stored via `DataKey` enum):
 - `Config` → PoolConfig: admin, invoice_contract, yield_bps, factoring_fee_bps, compound_interest flag
 - `AcceptedTokens` → Vec<Address> of whitelisted stablecoin contract addresses
-- `ExchangeRate(Address)` → Current admin-set USD-normalized rate per accepted token
-- `ExchangeRateBounds(Address)` → Min/max guardrails that exchange-rate updates must respect
 - `TokenTotals(Address)` → Per-token aggregates: pool_value, total_deployed, total_paid_out, total_fee_revenue
 - `FundedInvoice(u64)` → Record of funded invoice: sme, token, principal, funded_at, factoring_fee, due_date, repaid flag
 - `ShareToken(Address)` → Address of share token contract for each accepted token
@@ -224,6 +225,10 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `yield_bps: u32` — Annual percentage yield in basis points (default 800 = 8%, max 5000 = 50%)
 - `factoring_fee_bps: u32` — Platform fee in basis points (default 0)
 - `compound_interest: bool` — Simple (false) vs compound (true) interest calculation
+- `proposed_yield_bps: u32` — Pending yield change proposal (#227)
+- `yield_proposal_at: u64` — Timestamp when yield change was proposed (#227)
+- `yield_timelock_secs: u64` — Delay before yield change takes effect (default 172800 = 48h) (#227)
+- `max_single_investor_bps: u32` — Max concentration per investor in bps (default 2000 = 20%, 10000 = disabled) (#233)
 
 **PoolTokenTotals Struct** (per token):
 - `pool_value: i128` — Total liquidity available or deployed
@@ -252,12 +257,6 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - **Simple Interest**: `interest = principal × (yield_bps / 10000) × (elapsed_seconds / 31536000)`
 - **Compound Interest**: Applied daily, calculated with iteration over day boundaries
 - Default: 8% APY simple interest (800 basis points)
-- Implementation detail: the current contract uses checked intermediate arithmetic so oversized principals or durations fail predictably instead of overflowing silently.
-
-**Exchange Rate Validation**:
-- `set_rate_bounds(token, min_bps, max_bps)` defines the allowed update range for each accepted token.
-- `set_exchange_rate(token, rate_bps)` now rejects values outside those bounds.
-- A live oracle integration is still planned as a future enhancement rather than an active dependency in the current contract.
 
 **Storage Architecture** (ADR-0004):
 - Instance storage: Config, AcceptedTokens, TokenTotals, ShareToken references, stats
@@ -278,8 +277,13 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `repaid` (invoice_id, principal, interest) — Invoice repaid
 - `add_token` (admin, token) — Token whitelisted
 - `rm_token` (admin, token) — Token removed from whitelist
-- `set_yield` (admin, yield_bps) — Yield rate changed
+- `yield_prop` (admin, current_bps, proposed_bps, effective_at) — Yield change proposed (#227)
+- `yield_chg` (old_bps, new_bps) — Yield changed after timelock (#227)
+- `yield_cncl` (admin) — Yield proposal cancelled (#227)
+- `set_y_pol` (admin, cooldown, max_change, timelock) — Yield policy updated (#227)
 - `set_comp` (admin, compound) — Interest type changed
+- `conc_excd` (investor, current_bps, limit_bps) — Concentration limit exceeded warning (#233)
+- `set_conc` (admin, max_bps) — Concentration limit updated (#233)
 - `upgraded` (admin, timestamp) — Contract code upgraded
 
 **Upgrade Mechanism**: Same as Invoice Contract (24-hour timelock)
@@ -299,7 +303,7 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 
 **Key State Variables**:
 - `CreditScore(Address)` → Credit score data for each SME
-- `PaymentHistory(Address)` → Count of payment records
+- `PaymentHistory(Address)` → Count of retained records in the rolling payment history window
 - `PaymentRecordIdx(Address, u32)` → Individual payment records with index
 - `InvoiceProcessed(u64)` → Flag tracking which invoices have been processed
 - `Admin` → Admin address
@@ -371,6 +375,68 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - When deposit: `shares_to_mint = (amount × total_shares) / pool_value`
 - When withdraw: `amount_to_return = (shares × pool_value) / total_shares`
 - On first deposit: shares = amount (1:1 initial ratio)
+
+---
+
+### 5. Governance Contract (`contracts/governance/src/lib.rs`)
+
+**Purpose**: Provides a lightweight share-weighted governance layer for protocol parameters and administrative actions.
+
+**Responsibilities**:
+- Create proposals targeting protocol contracts or governance actions
+- Weight votes by current share-token balance
+- Enforce quorum and supermajority thresholds before execution
+- Track proposal history and lifecycle state for the UI
+
+**Key State Variables**:
+- `Config` -> GovernanceConfig: admin, share token, voting window, quorum, pass threshold, execution delay
+- `Proposal(u64)` -> Proposal record with proposer, target contract, calldata, tallies, and status
+- `ProposalCount` -> Sequential proposal ID counter
+- `Vote((proposal_id, voter))` -> One-vote-per-address guard
+
+**Status Flow**:
+- `Active` -> Proposal open for voting
+- `Passed` / `Rejected` -> Voting closed and tallied
+- `Executed` -> Proposal executed after timelock
+- `Cancelled` -> Proposal withdrawn by proposer or admin
+
+---
+
+### 6. Event Indexer (`indexer/`)
+
+**Purpose**: Index Stellar Horizon events for fast historical queries and analytics.
+
+**Responsibilities**:
+- Subscribe to Stellar Horizon event streams for Astera contract events
+- Parse and store events in a SQLite database
+- Expose a REST API for the frontend to query historical data
+- Support cursor-based pagination for efficient queries
+
+**Architecture Decision**: Option B (Self-hosted Mini Indexer) was chosen over Option A (Hosted Indexer) to give the project full control over event data and enable custom querying.
+
+**Key Files**:
+- `indexer/src/index.ts` — Main event polling loop
+- `indexer/src/parser.ts` — Parse Horizon events into structured records
+- `indexer/src/db.ts` — SQLite storage with better-sqlite3
+- `indexer/src/api.ts` — Express REST API (port 3001)
+
+**API Endpoints**:
+- `GET /health` — Health check
+- `GET /events?contract_id=...&event_type=...&limit=50&offset=0` — Query events with filters
+- `GET /events/contract/:contractId` — Get events for a specific contract
+- `GET /events/type/:eventType` — Get events by type
+- `GET /ledger/latest` — Get latest indexed ledger
+
+**Environment Variables**:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Stellar Horizon endpoint |
+| `CONTRACT_IDS` | (empty) | Comma-separated contract IDs to index |
+| `POLLING_INTERVAL_MS` | `5000` | Polling interval in milliseconds |
+| `API_PORT` | `3001` | API server port |
+| `DB_PATH` | `./indexer.db` | SQLite database path |
+
+**Docker Service**: Added to `docker-compose.yml` as `indexer` service.
 
 ---
 
@@ -1431,106 +1497,6 @@ env.events().publish((EVT, symbol_short!("set_comp")), (admin, compound));
 env.events().publish((EVT, symbol_short!("cleanup")), invoice_id);
 env.events().publish((EVT, symbol_short!("upg_prop")), (admin, hash, execute_timestamp));
 env.events().publish((EVT, symbol_short!("upgraded")), (admin, timestamp));
-```
-
----
-
-## Mermaid Reference Diagrams
-
-The following diagrams are provided as contributor-oriented visual references for the main contract interaction flows.
-
-### 1. Invoice Lifecycle State Machine
-This diagram shows the major invoice states and the calls that move an invoice between them.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending : create_invoice()
-    Pending --> AwaitingVerification : oracle configured
-    Pending --> Cancelled : cancel_invoice()
-    Pending --> Expired : expiration window elapsed
-    AwaitingVerification --> Verified : verify_invoice(approved)
-    AwaitingVerification --> Disputed : verify_invoice(rejected)
-    Disputed --> Verified : resolve_dispute(approved)
-    Disputed --> Defaulted : resolve_dispute(rejected)
-    Verified --> Funded : mark_funded()
-    Funded --> Paid : mark_paid()/repay_invoice()
-    Funded --> Defaulted : mark_defaulted()
-    Paid --> [*]
-    Defaulted --> [*]
-    Cancelled --> [*]
-    Expired --> [*]
-```
-
-### 2. Investment Flow Sequence Diagram
-This diagram shows how investor deposits travel through the frontend, pool contract, and share token contract.
-
-```mermaid
-sequenceDiagram
-    participant Investor
-    participant Frontend
-    participant Pool as Pool Contract
-    participant Share as Share Token
-
-    Investor->>Frontend: Submit deposit(token, amount)
-    Frontend->>Pool: deposit(investor, token, amount)
-    Pool->>Pool: validate token, KYC, pause state
-    Pool->>Share: mint(investor, shares_to_mint)
-    Pool-->>Frontend: deposit complete
-    Frontend-->>Investor: updated balance and share state
-```
-
-### 3. Invoice Funding Flow Sequence Diagram
-This diagram shows how pool liquidity is deployed to an invoice and disbursed to the SME.
-
-```mermaid
-sequenceDiagram
-    participant Admin
-    participant Pool as Pool Contract
-    participant Invoice as Invoice Contract
-    participant SME
-
-    Admin->>Pool: fund_invoice(invoice_id, principal, sme, due_date, token)
-    Pool->>Pool: validate liquidity, collateral, token acceptance
-    Pool->>SME: transfer principal
-    Pool->>Invoice: mark_funded(invoice_id)
-    Invoice-->>Pool: funded state recorded
-    Pool-->>Admin: funding complete
-```
-
-### 4. Repayment Flow Sequence Diagram
-This diagram shows how repayment updates pool accounting and feeds the credit-history path.
-
-```mermaid
-sequenceDiagram
-    participant SME
-    participant Pool as Pool Contract
-    participant Credit as Credit Score Contract
-    participant Investors
-
-    SME->>Pool: repay_invoice(invoice_id, amount)
-    Pool->>Pool: calculate interest + fee
-    Pool->>Pool: update funded invoice and token totals
-    Pool->>Credit: record payment history
-    Pool-->>Investors: earnings reflected in share value
-    Pool-->>SME: repayment accepted
-```
-
-### 5. Cross-Contract Dependency Diagram
-This diagram shows the high-level dependency graph across the main contracts and the frontend.
-
-```mermaid
-flowchart LR
-    Frontend[Frontend]
-    Invoice[Invoice Contract]
-    Pool[Pool Contract]
-    Credit[Credit Score Contract]
-    Share[Share Token Contract]
-
-    Frontend --> Invoice
-    Frontend --> Pool
-    Pool --> Invoice
-    Pool --> Share
-    Pool --> Credit
 ```
 
 ---

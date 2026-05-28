@@ -5,7 +5,9 @@ export type InvoiceStatus =
   | 'Disputed'
   | 'Funded'
   | 'Paid'
-  | 'Defaulted';
+  | 'Defaulted'
+  | 'Cancelled'
+  | 'Expired';
 
 /** On-chain view from `get_metadata` (SEP-oriented display fields). */
 export interface InvoiceMetadata {
@@ -32,6 +34,12 @@ export interface Invoice {
   fundedAt: number;
   paidAt: number;
   poolContract: string;
+  verificationHash?: string;
+  metadataUri?: string | null;
+  oracleVerified?: boolean;
+  disputeReason?: string;
+  disputedAt?: number;
+  gracePeriodOverride?: number | null;
 }
 
 export interface InvestorPosition {
@@ -48,6 +56,12 @@ export interface PoolConfig {
   yieldBps: number;
   factoringFeeBps: number;
   compoundInterest: boolean;
+  // #227: yield timelock
+  proposedYieldBps: number;
+  yieldProposalAt: number;
+  yieldTimelockSecs: number;
+  // #233: max single-investor concentration
+  maxSingleInvestorBps: number;
 }
 
 export interface PoolTokenTotals {
@@ -55,6 +69,31 @@ export interface PoolTokenTotals {
   totalDeployed: bigint;
   totalPaidOut: bigint;
   totalFeeRevenue: bigint;
+}
+
+export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';
+
+export interface GovernanceProposal {
+  id: number;
+  proposer: string;
+  description: string;
+  targetContract: string;
+  functionName: string;
+  calldata: string;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  status: ProposalStatus;
+  createdAt: number;
+  votingEndsAt: number;
+  executionDelay: number;
+}
+
+export interface InvoiceTtlWarning {
+  id: number;
+  status: InvoiceStatus;
+  expiryLedger: number;
+  remainingDays: number;
+  severity: 'low' | 'medium' | 'high';
 }
 
 export interface FundedInvoice {
@@ -76,3 +115,16 @@ export type WalletState = {
   connected: boolean;
   network: string;
 };
+
+export interface CollateralConfig {
+  threshold: bigint;
+  collateralBps: number;
+}
+
+export interface CollateralDeposit {
+  invoiceId: number;
+  depositor: string;
+  token: string;
+  amount: bigint;
+  settled: boolean;
+}

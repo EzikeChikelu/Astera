@@ -1,7 +1,7 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import CreditScore from '@/components/CreditScore';
+import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 
 describe('CreditScore', () => {
   it('shows the base 300 score and building label when no invoices exist', () => {
@@ -30,5 +30,45 @@ describe('CreditScore', () => {
   it('surfaces the total invoice count in the summary line', () => {
     render(<CreditScore paid={2} funded={1} defaulted={1} totalVolume={0n} />);
     expect(screen.getByText(/Based on 4 invoice\(s\)/)).toBeInTheDocument();
+  });
+
+  it('renders the collapsed improvement panel by default', () => {
+    render(<CreditScore paid={3} funded={0} defaulted={2} totalVolume={0n} />);
+    expect(screen.getByText('Improve your score')).toBeInTheDocument();
+    expect(screen.queryByText('Current Stats vs. Recommendations')).not.toBeInTheDocument();
+  });
+
+  it('expands the improvement panel when toggled', () => {
+    render(<CreditScore paid={3} funded={0} defaulted={2} totalVolume={0n} />);
+    fireEvent.click(screen.getByText('Improve your score'));
+    expect(screen.getByText('Current Stats vs. Recommendations')).toBeInTheDocument();
+  });
+
+  it('shows at least 3 actionable recommendations when expanded', () => {
+    render(<CreditScore paid={3} funded={0} defaulted={2} totalVolume={0n} />);
+    fireEvent.click(screen.getByText('Improve your score'));
+    expect(screen.getByText('On-time payments')).toBeInTheDocument();
+    expect(screen.getByText('Defaults')).toBeInTheDocument();
+    expect(screen.getByText('Payment speed')).toBeInTheDocument();
+    expect(screen.getByText('Invoice volume')).toBeInTheDocument();
+  });
+
+  it('shows the next milestone when not at the top tier', () => {
+    render(<CreditScore paid={3} funded={0} defaulted={2} totalVolume={0n} />);
+    fireEvent.click(screen.getByText('Improve your score'));
+    expect(screen.getByText(/Next Milestone:/)).toBeInTheDocument();
+  });
+
+  it('shows points to next tier in progress bar', () => {
+    render(<CreditScore paid={3} funded={0} defaulted={2} totalVolume={0n} />);
+    expect(screen.getByText(/pts to/)).toBeInTheDocument();
+  });
+
+  it('renders CreditScoreSkeleton with pulse animation', () => {
+    const { container } = render(<CreditScoreSkeleton />);
+    const root = container.firstChild as HTMLElement;
+    expect(root).toHaveClass('animate-pulse');
+    const skeletons = container.querySelectorAll('[role="status"]');
+    expect(skeletons.length).toBeGreaterThan(4);
   });
 });
