@@ -6,8 +6,35 @@
 // - Anyone: view functions (get_credit_score)
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env, String, Symbol, Vec,
 };
+
+/// #396: Typed error codes for the credit-score contract.
+/// All error codes are stable — do not re-number existing entries.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CreditScoreError {
+    /// Contract has already been initialised.
+    AlreadyInitialized = 1,
+    /// Caller is not the contract admin.
+    Unauthorized = 2,
+    /// Contract is paused; state-changing calls are blocked.
+    ContractPaused = 3,
+    /// This invoice has already been recorded in the credit score.
+    InvoiceAlreadyProcessed = 4,
+    /// Score thresholds are not strictly decreasing.
+    InvalidThresholds = 5,
+    /// Late-payment threshold is outside the valid 1–365 day range.
+    InvalidLateThreshold = 6,
+    /// Payment history limit must be greater than zero.
+    PaymentHistoryLimitZero = 7,
+    /// Upgrade timelock has not yet elapsed.
+    UpgradeTimelockNotExpired = 8,
+    /// No upgrade has been proposed.
+    NoUpgradeProposed = 9,
+}
 
 /// Semantic version of this credit-score contract (#237).
 #[contracttype]
@@ -241,7 +268,7 @@ fn require_not_paused(env: &Env) {
         .get::<DataKey, bool>(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, CreditScoreError::ContractPaused);
     }
 }
 
@@ -272,7 +299,7 @@ fn load_scoring_config(env: &Env) -> ScoringConfig {
 fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
     let max_history = max_payment_history(env);
     if max_history == 0 {
-        panic!("payment history limit must be positive");
+        panic_with_error!(env, CreditScoreError::PaymentHistoryLimitZero);
     }
 
     let history_len: u32 = env
@@ -447,7 +474,7 @@ fn calculate_average_payment_days(paid_on_time: u32, paid_late: u32, total_late_
 impl CreditScoreContract {
     pub fn initialize(env: Env, admin: Address, invoice_contract: Address, pool_contract: Address) {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            panic_with_error!(&env, CreditScoreError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -665,7 +692,7 @@ impl CreditScoreContract {
             .persistent()
             .has(&DataKey::InvoiceProcessed(invoice_id))
         {
-            panic!("invoice already processed");
+            panic_with_error!(&env, CreditScoreError::InvoiceAlreadyProcessed);
         }
 
         let status = if paid_at <= due_date {
@@ -725,7 +752,7 @@ impl CreditScoreContract {
             .persistent()
             .has(&DataKey::InvoiceProcessed(invoice_id))
         {
-            panic!("invoice already processed");
+            panic_with_error!(&env, CreditScoreError::InvoiceAlreadyProcessed);
         }
 
         let defaulted_at = env.ledger().timestamp();
@@ -847,7 +874,7 @@ impl CreditScoreContract {
             && thresholds.good > thresholds.fair
             && thresholds.fair > BASE_SCORE)
         {
-            panic!("invalid score thresholds: must be strictly decreasing");
+            panic_with_error!(&env, CreditScoreError::InvalidThresholds);
         }
         let old = Self::get_score_thresholds(&env);
         env.storage()
@@ -965,7 +992,7 @@ impl CreditScoreContract {
         admin.require_auth();
         Self::require_admin(&env, &admin);
         if !(1..=365).contains(&days) {
-            panic!("threshold must be between 1 and 365 days");
+            panic_with_error!(&env, CreditScoreError::InvalidLateThreshold);
         }
         env.storage()
             .persistent()
@@ -986,7 +1013,7 @@ impl CreditScoreContract {
         Self::require_admin(&env, &admin);
         require_not_paused(&env);
         if max_history == 0 {
-            panic!("payment history limit must be positive");
+            panic_with_error!(&env, CreditScoreError::PaymentHistoryLimitZero);
         }
         env.storage()
             .instance()
@@ -1030,7 +1057,7 @@ impl CreditScoreContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != &stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(env, CreditScoreError::Unauthorized);
         }
     }
 
@@ -1059,7 +1086,7 @@ impl CreditScoreContract {
             .expect("no upgrade proposed");
         let now = env.ledger().timestamp();
         if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
-            panic!("upgrade timelock not expired");
+            panic_with_error!(&env, CreditScoreError::UpgradeTimelockNotExpired);
         }
         let wasm_hash: BytesN<32> = env
             .storage()
@@ -1263,7 +1290,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "invoice already processed")]
     fn test_cannot_process_same_invoice_twice() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1283,7 +1309,7 @@ mod test {
             &(due_date - 1000),
         );
 
-        client.record_payment(
+        let result = client.try_record_payment(
             &pool,
             &1,
             &sme,
@@ -1291,6 +1317,7 @@ mod test {
             &due_date,
             &(due_date - 1000),
         );
+        assert_eq!(result, Err(Ok(CreditScoreError::InvoiceAlreadyProcessed)));
     }
 
     #[test]
@@ -1360,21 +1387,20 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "invalid score thresholds")]
     fn test_set_invalid_score_thresholds() {
         let env = Env::default();
         env.mock_all_auths();
 
         let (client, admin, _invoice, _pool) = setup(&env);
 
-        // Try to set invalid thresholds (not strictly decreasing)
         let invalid_thresholds = ScoreThresholds {
             excellent: 700,
             very_good: 750, // Invalid: greater than excellent
             good: 650,
             fair: 600,
         };
-        client.set_score_thresholds(&admin, &invalid_thresholds);
+        let result = client.try_set_score_thresholds(&admin, &invalid_thresholds);
+        assert_eq!(result, Err(Ok(CreditScoreError::InvalidThresholds)));
     }
 
     #[test]
@@ -1929,28 +1955,27 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_credit_pause_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _inv, _pool) = setup(&env);
         let intruder = Address::generate(&env);
-        client.pause(&intruder);
+        let result = client.try_pause(&intruder);
+        assert_eq!(result, Err(Ok(CreditScoreError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_credit_unpause_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _inv, _pool) = setup(&env);
         client.pause(&admin);
         let intruder = Address::generate(&env);
-        client.unpause(&intruder);
+        let result = client.try_unpause(&intruder);
+        assert_eq!(result, Err(Ok(CreditScoreError::Unauthorized)));
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_record_payment_while_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1958,11 +1983,12 @@ mod test {
         let (client, admin, _inv, pool) = setup(&env);
         let sme = Address::generate(&env);
         client.pause(&admin);
-        client.record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+        let result =
+            client.try_record_payment(&pool, &1, &sme, &1_000i128, &200_000u64, &150_000u64);
+        assert_eq!(result, Err(Ok(CreditScoreError::ContractPaused)));
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_record_default_while_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1970,7 +1996,8 @@ mod test {
         let (client, admin, _inv, pool) = setup(&env);
         let sme = Address::generate(&env);
         client.pause(&admin);
-        client.record_default(&pool, &1, &sme, &1_000i128, &100_000u64);
+        let result = client.try_record_default(&pool, &1, &sme, &1_000i128, &100_000u64);
+        assert_eq!(result, Err(Ok(CreditScoreError::ContractPaused)));
     }
 
     #[test]
@@ -2329,31 +2356,31 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "threshold must be between 1 and 365 days")]
     fn test_set_late_threshold_rejects_zero() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _inv, _pool) = setup(&env);
-        client.set_late_threshold(&admin, &0);
+        let result = client.try_set_late_threshold(&admin, &0);
+        assert_eq!(result, Err(Ok(CreditScoreError::InvalidLateThreshold)));
     }
 
     #[test]
-    #[should_panic(expected = "threshold must be between 1 and 365 days")]
     fn test_set_late_threshold_rejects_over_365() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _inv, _pool) = setup(&env);
-        client.set_late_threshold(&admin, &366);
+        let result = client.try_set_late_threshold(&admin, &366);
+        assert_eq!(result, Err(Ok(CreditScoreError::InvalidLateThreshold)));
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
     fn test_set_late_threshold_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _inv, _pool) = setup(&env);
         let intruder = Address::generate(&env);
-        client.set_late_threshold(&intruder, &45);
+        let result = client.try_set_late_threshold(&intruder, &45);
+        assert_eq!(result, Err(Ok(CreditScoreError::Unauthorized)));
     }
 
     #[test]
