@@ -28,6 +28,38 @@ import type {
   GovernanceProposal,
 } from './types';
 
+// ── Contract ID validation (#380) ─────────────────────────────────────────────
+
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+const STELLAR_CONTRACT_RE = /^C[A-Z2-7]{55}$/;
+
+function assertContractId(contractId: string | undefined, name: string): void {
+  if (!contractId) {
+    throw new ConfigError(`${name} contract ID is not configured. Check your .env file.`);
+  }
+  if (!STELLAR_CONTRACT_RE.test(contractId)) {
+    throw new ConfigError(
+      `${name} contract ID "${contractId}" is not a valid Stellar contract address.`,
+    );
+  }
+}
+
+// Validate required contract IDs at module load time (browser only — build/SSR
+// may intentionally run without deployed contracts, consistent with assertEnvValid).
+if (typeof window !== 'undefined') {
+  assertContractId(INVOICE_CONTRACT_ID || undefined, 'Invoice');
+  assertContractId(POOL_CONTRACT_ID || undefined, 'Pool');
+  if (GOVERNANCE_CONTRACT_ID) {
+    assertContractId(GOVERNANCE_CONTRACT_ID, 'Governance');
+  }
+}
+
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
 // Set NEXT_PUBLIC_USE_MOCK=true to read from the local json-server instead of
 // making live Soroban RPC calls. Useful for frontend-only development when no
