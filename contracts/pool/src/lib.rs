@@ -683,6 +683,18 @@ fn fund_invoice_request(
         return Err(PoolError::StorageCorrupted);
     }
 
+    // Ensure sufficient liquidity (cash = NAV - deployed).
+    let token_totals_key = DataKey::TokenTotals(request.token.clone());
+    let mut tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&token_totals_key)
+        .unwrap_or_default();
+    let available_liquidity = available_liquidity(&tt)?;
+    if available_liquidity < request.principal {
+        return Err(PoolError::InsufficientLiquidity);
+    }
+
     // Verify the token is accepted.
     let mut token_ok = false;
     for i in 0..accepted_tokens.len() {
@@ -694,21 +706,6 @@ fn fund_invoice_request(
     }
     if !token_ok {
         return Err(PoolError::TokenNotAccepted);
-    }
-
-    // Ensure sufficient liquidity (cash = NAV - deployed).
-    let token_totals_key = DataKey::TokenTotals(request.token.clone());
-    let mut tt: PoolTokenTotals = env
-        .storage()
-        .instance()
-        .get(&token_totals_key)
-        .unwrap_or_default();
-    let available_liquidity = tt
-        .pool_value
-        .checked_sub(tt.total_deployed)
-        .ok_or(PoolError::AmountOverflow)?;
-    if available_liquidity < request.principal {
-        return Err(PoolError::InsufficientLiquidity);
     }
 
     let now = env.ledger().timestamp();
