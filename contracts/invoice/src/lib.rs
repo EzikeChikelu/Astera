@@ -49,6 +49,7 @@ const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7;
 const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 90;
 const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
+const MAX_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 365 * 10; // 10 years
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
 const MAX_DESCRIPTION_LEN: u32 = 256;
 const MAX_DEBTOR_LEN: u32 = 64;
@@ -108,10 +109,8 @@ pub enum InvoiceError {
     NoPendingExtension = 17,
     // Cross-contract call to pool contract failed (network/host error, not a logic rejection)
     PoolCallFailed = 18,
-    EmptyDebtorName = 19,
-    EmptyDescription = 20,
-    InvalidVerificationHash = 21,
-    DueDateTooSoon = 22,
+    // Overflow in arithmetic operation (expiration timestamp, etc.)
+    ArithmeticOverflow = 19,
 }
 
 #[contracttype]
@@ -254,7 +253,11 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
         .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
 
     let now = env.ledger().timestamp();
-    if now <= invoice.created_at.saturating_add(expiration_duration_secs) {
+    let expires_at = match invoice.created_at.checked_add(expiration_duration_secs) {
+        Some(ts) => ts,
+        None => return invoice, // overflow: expiration beyond u64::MAX → can never fire
+    };
+    if now <= expires_at {
         return invoice;
     }
 
@@ -486,6 +489,9 @@ impl InvoiceContract {
         }
         if expiration_duration_secs == 0 {
             panic!("expiration duration must be non-zero");
+        }
+        if expiration_duration_secs > MAX_EXPIRATION_DURATION_SECS {
+            panic_with_error!(&env, InvoiceError::ArithmeticOverflow);
         }
         if grace_period_days > 90 {
             panic!("grace period cannot exceed 90 days");
@@ -1647,7 +1653,11 @@ impl InvoiceContract {
             .get(&DataKey::ExpirationDurationSecs)
             .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
         let now = env.ledger().timestamp();
-        if now <= inv.created_at.saturating_add(expiration_duration_secs) {
+        let expires_at = match inv.created_at.checked_add(expiration_duration_secs) {
+            Some(ts) => ts,
+            None => return false, // overflow: expiration beyond u64::MAX → can never fire
+        };
+        if now <= expires_at {
             return false;
         }
         let mut expired_inv = inv;
@@ -1812,6 +1822,9 @@ impl InvoiceContract {
         }
         if expiration_duration_secs == 0 {
             panic!("expiration duration must be non-zero");
+        }
+        if expiration_duration_secs > MAX_EXPIRATION_DURATION_SECS {
+            panic_with_error!(&env, InvoiceError::ArithmeticOverflow);
         }
         env.storage()
             .instance()
@@ -2759,6 +2772,67 @@ mod test {
         );
         env.ledger().with_mut(|l| l.timestamp += 11);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
+    }
+
+    #[test]
+    fn test_set_expiration_duration_rejects_above_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
+
+        let result = client.try_set_expiration_duration(
+            &admin,
+            &(MAX_EXPIRATION_DURATION_SECS + 1),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_expiration_duration_allows_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
+
+        client.set_expiration_duration(&admin, &MAX_EXPIRATION_DURATION_SECS);
+        assert_eq!(
+            client.get_expiration_duration(),
+            MAX_EXPIRATION_DURATION_SECS
+        );
+    }
+
+    #[test]
+    fn test_initialize_rejects_expiration_duration_above_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+
+        let result = client.try_initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &(MAX_EXPIRATION_DURATION_SECS + 1),
+            &90u32,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_expiration_duration_default_is_below_max() {
+        assert!(DEFAULT_EXPIRATION_DURATION_SECS <= MAX_EXPIRATION_DURATION_SECS);
     }
 
     fn setup_with_grace(
