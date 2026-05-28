@@ -129,6 +129,8 @@ pub enum PoolError {
     InvalidShareToken = 44,
     // #335: duplicate invoice IDs in batch funding
     DuplicateInvoiceId = 45,
+    InvalidCollateralThreshold = 46,
+    InvalidCollateralBps = 47,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -2090,11 +2092,11 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        if threshold < 0 {
-            return Err(PoolError::InvalidThreshold);
+        if threshold <= 0 {
+            return Err(PoolError::InvalidCollateralThreshold);
         }
         if collateral_bps == 0 || collateral_bps > BPS_DENOM {
-            return Err(PoolError::InvalidThreshold);
+            return Err(PoolError::InvalidCollateralBps);
         }
         let cfg = CollateralConfig {
             threshold,
@@ -4110,7 +4112,7 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let result = client.try_set_collateral_config(&admin, &1_000i128, &10_001u32);
-        assert_eq!(result, Err(Ok(PoolError::InvalidThreshold)));
+        assert_eq!(result, Err(Ok(PoolError::InvalidCollateralBps)));
     }
 
     #[test]
@@ -4119,7 +4121,7 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let result = client.try_set_collateral_config(&admin, &1_000i128, &0u32);
-        assert_eq!(result, Err(Ok(PoolError::InvalidThreshold)));
+        assert_eq!(result, Err(Ok(PoolError::InvalidCollateralBps)));
     }
 
     #[test]
