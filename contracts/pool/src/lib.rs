@@ -4710,6 +4710,14 @@ mod test {
     }
 
     #[test]
+    fn test_calculate_reward_delta_overflow_returns_amount_overflow() {
+        assert_eq!(
+            calculate_reward_delta(i128::MAX, 1),
+            Err(PoolError::AmountOverflow)
+        );
+    }
+
+    #[test]
     fn test_seize_collateral_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
