@@ -59,6 +59,22 @@ describe('InvoiceCard', () => {
     expect(screen.getByText('Defaulted')).toBeInTheDocument();
   });
 
+  it('uses theme-aware Tailwind status classes for each invoice status', () => {
+    const expectedClasses: Record<string, string[]> = {
+      Pending: ['text-yellow-700', 'dark:text-yellow-400'],
+      Funded: ['text-blue-700', 'dark:text-blue-400'],
+      Paid: ['text-green-700', 'dark:text-green-400'],
+      Defaulted: ['text-red-700', 'dark:text-red-400'],
+    };
+
+    const { rerender } = render(<InvoiceCard id={1} metadata={makeMeta({ status: 'Pending' })} />);
+
+    for (const [status, classes] of Object.entries(expectedClasses)) {
+      rerender(<InvoiceCard id={1} metadata={makeMeta({ status })} />);
+      expect(screen.getByText(status)).toHaveClass(...classes);
+    }
+  });
+
   it('shows a days-left countdown for future due dates', () => {
     const meta = makeMeta({ dueDate: Math.floor(Date.now() / 1000) + 10 * 86_400 });
     render(<InvoiceCard id={1} metadata={meta} />);
