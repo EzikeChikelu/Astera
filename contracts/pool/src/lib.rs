@@ -125,6 +125,12 @@ pub enum PoolError {
     NotDefaulted = 42,
     // #385: pool address stored in invoice contract does not match this pool
     InvoicePoolMismatch = 43,
+    // #396: contract already initialised
+    AlreadyInitialized = 44,
+    // #396: contract is paused; state-changing calls are blocked
+    ContractPaused = 45,
+    // #396: reentrant call detected by the reentrancy guard
+    ReentrancyDetected = 46,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -429,7 +435,7 @@ fn require_not_paused(env: &Env) {
         .get::<DataKey, bool>(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, PoolError::ContractPaused);
     }
 }
 
@@ -785,7 +791,7 @@ impl FundingPool {
         invoice_contract: Address,
     ) {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            panic_with_error!(&env, PoolError::AlreadyInitialized);
         }
 
         let config = PoolConfig {
@@ -819,7 +825,7 @@ impl FundingPool {
         let token_client = token::Client::new(&env, &initial_token);
         let token_decimals = token_client.decimals();
         if token_decimals != EXPECTED_DECIMALS {
-            panic!("unsupported token decimals");
+            panic_with_error!(&env, PoolError::UnsupportedTokenDecimals);
         }
 
         env.storage().instance().set(&DataKey::Config, &config);
@@ -1227,7 +1233,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
-            (investor, received, shares_to_mint, env.ledger().timestamp()),
+            (investor, token, received, shares_to_mint, env.ledger().timestamp()),
         );
         Ok(())
     }
@@ -1342,7 +1348,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("withdraw")),
-            (investor, amount, shares, now),
+            (investor, token, amount, shares, now),
         );
         Ok(())
     }
@@ -3220,7 +3226,7 @@ impl FundingPool {
             .get::<DataKey, bool>(&key)
             .unwrap_or(false)
         {
-            panic!("reentrant call");
+            panic_with_error!(env, PoolError::ReentrancyDetected);
         }
         env.storage().instance().set(&key, &true);
     }
