@@ -56,7 +56,38 @@
     "loadMore": "Load more invoices",
     "loadingMore": "Loading more...",
     "showing": "Showing {count} {count, plural, one {invoice} other {invoices}}",
-    "allLoaded": "All invoices loaded · {count} total"
+    "allLoaded": "All invoices loaded · {count} total",
+    "notifications": {
+      "loadError": "Failed to load invoices. Make sure contracts are deployed."
+    }
+  },
+  "Notifications": {
+    "wallet": {
+      "connect": "Connect Wallet",
+      "detecting": "Detecting Freighter...",
+      "requestingAccess": "Approve in Freighter...",
+      "fetchingAddress": "Fetching address...",
+      "freighterMissing": "Freighter not detected. Please install the browser extension and reload.",
+      "addressUnavailable": "Could not retrieve wallet address. Please try again.",
+      "connected": "Wallet connected successfully!",
+      "connectFailed": "Failed to connect wallet after multiple attempts. Please try again.",
+      "disconnect": "Disconnect",
+      "retry": "Retry",
+      "retryAttempt": "Retry attempt {retryCount}/{maxRetries}...",
+      "disconnectedTitle": "Wallet disconnected",
+      "disconnectedDescription": "Your Freighter wallet is no longer connected to this site. Reconnect to continue."
+    },
+    "toast": {
+      "dismiss": "Dismiss notification"
+    },
+    "panel": {
+      "button": "Notifications",
+      "buttonUnread": "Notifications ({count} unread)",
+      "dialog": "Notifications panel",
+      "title": "Notifications",
+      "clearAll": "Clear all",
+      "empty": "No notifications yet."
+    }
   },
   "Invest": {
     "title": "Invest",
