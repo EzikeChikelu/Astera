@@ -409,7 +409,9 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
 }
 
 fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) -> u64 {
-    let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
+    let grace_period_secs = (grace_period_days as u64)
+        .checked_mul(SECS_PER_DAY)
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
     due_date
         .checked_add(grace_period_secs)
         .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow))

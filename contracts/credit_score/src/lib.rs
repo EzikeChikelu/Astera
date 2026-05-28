@@ -308,6 +308,14 @@ fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
     }
 }
 
+fn calculate_days_late(due_date: u64, paid_at: u64) -> i64 {
+    if paid_at > due_date {
+        ((paid_at - due_date - 1) as i64 / (24 * 60 * 60)) + 1
+    } else {
+        -((due_date - paid_at) as i64 / (24 * 60 * 60))
+    }
+}
+
 fn calculate_score_with_config(
     env: &Env,
     config: &ScoringConfig,
@@ -608,6 +616,29 @@ impl CreditScoreContract {
         credit_data
     }
 
+    fn record_invoice_outcome(
+        env: &Env,
+        invoice_id: u64,
+        sme: &Address,
+        amount: i128,
+        due_date: u64,
+        paid_at: u64,
+        status: PaymentStatus,
+        days_late: i64,
+    ) -> CreditScoreData {
+        let record = PaymentRecord {
+            invoice_id,
+            sme: sme.clone(),
+            amount,
+            due_date,
+            paid_at,
+            status,
+            days_late,
+        };
+
+        Self::commit_payment_record(env, sme, invoice_id, record)
+    }
+
     pub fn record_payment(
         env: Env,
         caller: Address,
@@ -645,22 +676,17 @@ impl CreditScoreContract {
             PaymentStatus::Defaulted
         };
 
-        let days_late: i64 = if paid_at > due_date {
-            ((paid_at - due_date - 1) as i64 / (24 * 60 * 60)) + 1
-        } else {
-            -((due_date - paid_at) as i64 / (24 * 60 * 60))
-        };
-        let record = PaymentRecord {
+        let days_late = calculate_days_late(due_date, paid_at);
+        let credit_data = Self::record_invoice_outcome(
+            &env,
             invoice_id,
-            sme: sme.clone(),
+            &sme,
             amount,
             due_date,
             paid_at,
-            status: status.clone(),
+            status.clone(),
             days_late,
-        };
-
-        let credit_data = Self::commit_payment_record(&env, &sme, invoice_id, record);
+        );
 
         env.events().publish(
             (EVT, symbol_short!("payment")),
@@ -703,22 +729,17 @@ impl CreditScoreContract {
         }
 
         let defaulted_at = env.ledger().timestamp();
-        let days_late = if defaulted_at > due_date {
-            ((defaulted_at - due_date - 1) as i64 / (24 * 60 * 60)) + 1
-        } else {
-            0
-        };
-        let record = PaymentRecord {
+        let days_late = calculate_days_late(due_date, defaulted_at);
+        let credit_data = Self::record_invoice_outcome(
+            &env,
             invoice_id,
-            sme: sme.clone(),
+            &sme,
             amount,
             due_date,
-            paid_at: defaulted_at,
-            status: PaymentStatus::Defaulted,
+            defaulted_at,
+            PaymentStatus::Defaulted,
             days_late,
-        };
-
-        let credit_data = Self::commit_payment_record(&env, &sme, invoice_id, record);
+        );
 
         env.events().publish(
             (EVT, symbol_short!("default")),
