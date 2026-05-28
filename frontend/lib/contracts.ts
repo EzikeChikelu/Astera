@@ -28,6 +28,21 @@ import type {
   GovernanceProposal,
 } from './types';
 
+// ── Contract ID validation (#399) ────────────────────────────────────────────
+
+function validateContractId(id: string, name: string): string {
+  if (!/^C[A-Z2-7]{55}$/.test(id)) {
+    throw new Error(`Invalid contract ID for ${name}: "${id}"`);
+  }
+  return id;
+}
+
+validateContractId(INVOICE_CONTRACT_ID, 'invoice');
+validateContractId(POOL_CONTRACT_ID, 'pool');
+if (GOVERNANCE_CONTRACT_ID) {
+  validateContractId(GOVERNANCE_CONTRACT_ID, 'governance');
+}
+
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
 // Set NEXT_PUBLIC_USE_MOCK=true to read from the local json-server instead of
 // making live Soroban RPC calls. Useful for frontend-only development when no
