@@ -2720,6 +2720,21 @@ mod test {
     }
 
     #[test]
+    fn test_default_warning_uses_invoice_override_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let id = 1u64;
+        client.set_invoice_grace_period(&admin, &id, &14u32);
+        let due = client.get_invoice(&id).due_date;
+
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (13 * SECS_PER_DAY) + (SECS_PER_DAY / 2));
+
+        assert!(client.check_default_warning(&id));
+    }
+
+    #[test]
     #[should_panic(expected = "exceeds maximum")]
     fn test_override_exceeds_max_days_panics() {
         let env = Env::default();
