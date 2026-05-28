@@ -3701,6 +3701,25 @@ mod test {
     }
 
     #[test]
+    fn test_fund_invoice_prioritizes_liquidity_before_token_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        let unknown_token = Address::generate(&env);
+
+        let result = client.try_fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &unknown_token,
+        );
+        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+    }
+
+    #[test]
     fn test_fund_invoice_duplicate_panics() {
         let env = Env::default();
         env.mock_all_auths();
