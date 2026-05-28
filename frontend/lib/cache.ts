@@ -35,15 +35,58 @@ type SWRCacheEntry = {
   dedupingInterval: number;
 };
 
+/** Per-data-type TTLs (milliseconds). Import and refer to these directly. */
+export const CACHE_TTL = {
+  poolConfig: 5 * 60_000,
+  invoiceStatus: 15_000,
+  creditScore: 60_000,
+  walletBalance: 30_000,
+} as const;
+
 /** Per-resource SWR configuration. Import and spread into useSWR options. */
 export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
-  poolConfig: { refreshInterval: 300000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  invoiceCount: { refreshInterval: 15000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  invoice: { refreshInterval: 10000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  position: { refreshInterval: 15000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  tokens: { refreshInterval: 60000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  tokenTotals: { refreshInterval: 20000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
-  fundedInvoice: { refreshInterval: 10000, revalidateOnFocus: true, revalidateOnReconnect: true, dedupingInterval: 5000 },
+  poolConfig: {
+    refreshInterval: CACHE_TTL.poolConfig,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.poolConfig,
+  },
+  invoiceCount: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  invoice: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  position: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  tokens: {
+    refreshInterval: CACHE_TTL.creditScore,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.creditScore,
+  },
+  tokenTotals: {
+    refreshInterval: CACHE_TTL.walletBalance,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.walletBalance,
+  },
+  fundedInvoice: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
 };
 
 // Error type for contract calls
@@ -278,6 +321,11 @@ export function useSetYield(admin: string) {
   return useSWRMutation<unknown, ContractError, string, { admin: string; signedXdr: string }>(
     'set-yield',
     setYieldMutation,
+    {
+      onSuccess: () => {
+        mutate('pool-config');
+      },
+    },
   );
 }
 

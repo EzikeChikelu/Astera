@@ -16,6 +16,7 @@ import {
   parseSimulationError,
 } from './stellar';
 import { TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc } from '@stellar/stellar-sdk';
+import { parseStellarAddress } from './types';
 import type {
   Invoice,
   InvoiceMetadata,
@@ -26,38 +27,24 @@ import type {
   CollateralConfig,
   CollateralDeposit,
   GovernanceProposal,
+  StellarAddress,
 } from './types';
 
-// ── Contract ID validation (#380) ─────────────────────────────────────────────
+// ── Contract ID validation (#399) ────────────────────────────────────────────
 
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConfigError';
+function validateContractId(id: string, name: string): string {
+  if (process.env.NODE_ENV === 'test') return id;
+  if (!id) return id;
+  if (!/^C[A-Z2-7]{55}$/.test(id)) {
+    throw new Error(`Invalid contract ID for ${name}: "${id}"`);
   }
+  return id;
 }
 
-const STELLAR_CONTRACT_RE = /^C[A-Z2-7]{55}$/;
-
-function assertContractId(contractId: string | undefined, name: string): void {
-  if (!contractId) {
-    throw new ConfigError(`${name} contract ID is not configured. Check your .env file.`);
-  }
-  if (!STELLAR_CONTRACT_RE.test(contractId)) {
-    throw new ConfigError(
-      `${name} contract ID "${contractId}" is not a valid Stellar contract address.`,
-    );
-  }
-}
-
-// Validate required contract IDs at module load time (browser only — build/SSR
-// may intentionally run without deployed contracts, consistent with assertEnvValid).
-if (typeof window !== 'undefined') {
-  assertContractId(INVOICE_CONTRACT_ID || undefined, 'Invoice');
-  assertContractId(POOL_CONTRACT_ID || undefined, 'Pool');
-  if (GOVERNANCE_CONTRACT_ID) {
-    assertContractId(GOVERNANCE_CONTRACT_ID, 'Governance');
-  }
+validateContractId(INVOICE_CONTRACT_ID, 'invoice');
+validateContractId(POOL_CONTRACT_ID, 'pool');
+if (GOVERNANCE_CONTRACT_ID) {
+  validateContractId(GOVERNANCE_CONTRACT_ID, 'governance');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -235,7 +222,7 @@ export async function getPoolConfig(): Promise<PoolConfig> {
 
   return {
     invoiceContract: raw.invoice_contract as string,
-    admin: raw.admin as string,
+    admin: raw.admin as StellarAddress,
     yieldBps: Number(raw.yield_bps),
     factoringFeeBps: Number(raw.factoring_fee_bps ?? 0),
     compoundInterest: Boolean(raw.compound_interest),
@@ -687,9 +674,15 @@ export async function fetchKycInvestors(): Promise<{
 
     // Map each unique depositor to their KYC status
     for (const [address, data] of Array.from(depositors.entries())) {
-      const isApproved = await getInvestorKyc(address);
+      let investorAddress: StellarAddress;
+      try {
+        investorAddress = parseStellarAddress(address);
+      } catch {
+        continue;
+      }
+      const isApproved = await getInvestorKyc(investorAddress);
       const investor: KycInvestor = {
-        address,
+        address: investorAddress,
         totalDeposited: data.total,
         firstSeenAt: data.firstSeen,
         isApproved,
@@ -722,7 +715,7 @@ export async function getKycRequired(): Promise<boolean> {
   return Boolean(scValToNative(result!.retval));
 }
 
-export async function getInvestorKyc(investor: string): Promise<boolean> {
+export async function getInvestorKyc(investor: StellarAddress): Promise<boolean> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
     'get_investor_kyc',
@@ -733,7 +726,10 @@ export async function getInvestorKyc(investor: string): Promise<boolean> {
   return Boolean(scValToNative(result!.retval));
 }
 
-export async function buildSetKycRequiredTx(admin: string, required: boolean): Promise<string> {
+export async function buildSetKycRequiredTx(
+  admin: StellarAddress,
+  required: boolean,
+): Promise<string> {
   const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -759,8 +755,8 @@ export async function buildSetKycRequiredTx(admin: string, required: boolean): P
 }
 
 export async function buildSetInvestorKycTx(
-  admin: string,
-  investor: string,
+  admin: StellarAddress,
+  investor: StellarAddress,
   approved: boolean,
 ): Promise<string> {
   const account = await getRpcAccount(admin);
