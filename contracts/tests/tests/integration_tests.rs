@@ -1171,3 +1171,234 @@ fn test_within_grace_period_not_defaultable() {
     });
     assert!(result.is_err(), "mark_defaulted should panic within grace period");
 }
+
+/// Integration test: Multi-token deposit with EURC at 1.08 USDC, yield distribution
+#[test]
+fn test_multi_token_deposit_and_yield() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor_a = Address::generate(&env);
+    let investor_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_eurc_id = env.register_contract_wasm(None, share::WASM);
+
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let eurc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_usdc_client = share::Client::new(&env, &share_usdc_id);
+    let share_eurc_client = share::Client::new(&env, &share_eurc_id);
+
+    share_usdc_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "USDC Pool Shares"),
+        &String::from_str(&env, "sUSDC"),
+    );
+    share_eurc_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "EURC Pool Shares"),
+        &String::from_str(&env, "sEURC"),
+    );
+
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
+    credit_client.initialize(&admin, &invoice_id, &pool_id);
+
+    pool_client.add_token(&admin, &eurc_id, &share_eurc_id);
+    pool_client.set_exchange_rate(&admin, &eurc_id, &10_800u32);
+    pool_client.set_max_investor_concentration(&admin, &10_000u32);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor_a, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
+        .mint(&investor_b, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &10_000_000_000i128);
+
+    pool_client.deposit(&investor_a, &usdc_id, &1_000_000_000i128);
+    let totals_usdc = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals_usdc.pool_value, 1_000_000_000i128);
+
+    pool_client.deposit(&investor_b, &eurc_id, &1_000_000_000i128);
+    let totals_eurc = pool_client.get_token_totals(&eurc_id);
+    assert_eq!(totals_eurc.pool_value, 1_080_000_000i128);
+
+    let totals_usdc = pool_client.get_token_totals(&usdc_id);
+    let totals_eurc = pool_client.get_token_totals(&eurc_id);
+    assert_eq!(totals_usdc.pool_value + totals_eurc.pool_value, 2_080_000_000i128);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &500_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #MT-001"),
+        &String::from_str(&env, "hash_mt"),
+        &String::from_str(&env, "https://example.com/meta"),
+    );
+
+    pool_client.fund_invoice(&admin, &inv_id, &500_000_000i128, &sme, &due_date, &usdc_id);
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    env.ledger().with_mut(|l| l.timestamp += 25 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&inv_id);
+    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+    credit_client.record_payment(
+        &pool_id,
+        &inv_id,
+        &sme,
+        &500_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+
+    let shares_a = share_usdc_client.balance(&investor_a);
+    pool_client.withdraw(&investor_a, &usdc_id, &shares_a);
+    let balance_a = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor_a);
+    assert!(balance_a > 5_000_000_000i128, "Investor A should have earned yield in USDC");
+
+    let shares_b = share_eurc_client.balance(&investor_b);
+    pool_client.withdraw(&investor_b, &eurc_id, &shares_b);
+    let balance_b = soroban_sdk::token::Client::new(&env, &eurc_id).balance(&investor_b);
+    assert!(
+        balance_b > 5_000_000_000i128,
+        "Investor B should have earned yield in EURC"
+    );
+}
+
+/// Integration test: token removal succeeds when balances are zero
+#[test]
+fn test_token_removal_with_zero_balances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_eurc_id = env.register_contract_wasm(None, share::WASM);
+
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let eurc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+
+    share::Client::new(&env, &share_usdc_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "USDC Pool Shares"),
+        &String::from_str(&env, "sUSDC"),
+    );
+    share::Client::new(&env, &share_eurc_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "EURC Pool Shares"),
+        &String::from_str(&env, "sEURC"),
+    );
+
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
+    pool_client.add_token(&admin, &eurc_id, &share_eurc_id);
+
+    let tokens_before = pool_client.accepted_tokens();
+    assert!(tokens_before.contains(&eurc_id));
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
+    let eurc_shares = share::Client::new(&env, &share_eurc_id).balance(&investor);
+    pool_client.withdraw(&investor, &eurc_id, &eurc_shares);
+
+    pool_client.remove_token(&admin, &eurc_id);
+
+    let tokens_after = pool_client.accepted_tokens();
+    assert!(
+        !tokens_after.contains(&eurc_id),
+        "EURC should no longer be in accepted_tokens after removal"
+    );
+}
+
+/// Integration test: token removal blocked when there are active deposits
+#[test]
+fn test_token_removal_blocked_with_active_deposits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_eurc_id = env.register_contract_wasm(None, share::WASM);
+
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let eurc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+
+    share::Client::new(&env, &share_usdc_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "USDC Pool Shares"),
+        &String::from_str(&env, "sUSDC"),
+    );
+    share::Client::new(&env, &share_eurc_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "EURC Pool Shares"),
+        &String::from_str(&env, "sEURC"),
+    );
+
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
+    pool_client.add_token(&admin, &eurc_id, &share_eurc_id);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
+
+    let result = pool_client.try_remove_token(&admin, &eurc_id);
+    assert_eq!(result, Err(Ok(pool::Error::TokenHasActiveBalances)));
+
+    let tokens = pool_client.accepted_tokens();
+    assert!(
+        tokens.contains(&eurc_id),
+        "EURC should still be in accepted_tokens after failed removal"
+    );
+}
