@@ -665,6 +665,13 @@ fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
         .ok_or(PoolError::AmountOverflow)
 }
 
+fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
+    total_interest
+        .checked_mul(REWARD_PRECISION)
+        .and_then(|value| value.checked_div(total_shares))
+        .ok_or(PoolError::AmountOverflow)
+}
+
 fn fund_invoice_request(
     env: &Env,
     config: &PoolConfig,
