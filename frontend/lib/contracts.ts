@@ -29,6 +29,21 @@ import type {
   GovernanceProposal,
   StellarAddress,
 } from './types';
+// Auto-generated contract bindings (single source of truth for the on-chain
+// ABI — methods, struct shapes and error codes). Regenerate with
+// `./scripts/gen-bindings.sh`; see CONTRIBUTING.md.
+import { Errors as InvoiceErrors } from '@/src/generated/invoice';
+import { Errors as CreditScoreErrors } from '@/src/generated/credit_score';
+
+// Re-export the generated contract clients and raw ABI types so SDK authors
+// and frontend code can consume them through this module instead of reaching
+// into the generated files directly.
+export { InvoiceContract, CreditScoreContract } from '@/src/generated';
+export type {
+  Invoice as InvoiceAbi,
+  InvoiceStatus as InvoiceStatusAbi,
+  InvoiceMetadata as InvoiceMetadataAbi,
+} from '@/src/generated/invoice';
 
 // ── Contract ID validation (#399) ────────────────────────────────────────────
 
@@ -898,6 +913,34 @@ export function getContractErrorMessage(raw: string): string {
     if (lower.includes(key)) return friendly;
   }
   return raw;
+}
+
+// Soroban surfaces contract errors as `Error(Contract, #<code>)`. The generated
+// bindings expose the authoritative code → variant-name mapping per contract,
+// so we resolve the variant name from the bindings and then reuse the
+// human-friendly text above. This keeps the error catalogue in sync with the
+// contract source automatically (issue #163 / bindings sync).
+type GeneratedErrorMap = Record<number, { message: string }>;
+
+const CONTRACT_ERROR_MAPS = {
+  invoice: InvoiceErrors as GeneratedErrorMap,
+  credit_score: CreditScoreErrors as GeneratedErrorMap,
+} as const;
+
+export type ContractName = keyof typeof CONTRACT_ERROR_MAPS;
+
+/**
+ * Resolves a numeric contract error code to a user-friendly message using the
+ * generated bindings as the source of truth for the variant name. Falls back to
+ * the raw variant name, then to a generic message if the code is unknown.
+ */
+export function getContractErrorByCode(contract: ContractName, code: number): string {
+  const variant = CONTRACT_ERROR_MAPS[contract]?.[code]?.message;
+  if (!variant) return `Unknown ${contract} error (#${code}).`;
+  // Variant names are PascalCase (e.g. "InvoiceNotFound"); turn them into a
+  // lookup key that matches CONTRACT_ERROR_MESSAGES' lowercased phrases.
+  const friendly = getContractErrorMessage(variant.replace(/([a-z])([A-Z])/g, '$1 $2'));
+  return friendly === variant.replace(/([a-z])([A-Z])/g, '$1 $2') ? variant : friendly;
 }
 
 // ---- Collateral ----
