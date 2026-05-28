@@ -406,6 +406,15 @@ fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) ->
         .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow))
 }
 
+fn resolve_invoice_grace_period_days(env: &Env, invoice: &Invoice) -> u32 {
+    let global_grace: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GracePeriodDays)
+        .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+    invoice.grace_period_override.unwrap_or(global_grace)
+}
+
 fn validate_due_date(env: &Env, due_date: u64) {
     let now = env.ledger().timestamp();
     let max_due_date = now
