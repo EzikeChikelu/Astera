@@ -4726,6 +4726,21 @@ mod test {
     }
 
     #[test]
+    fn test_calculate_reward_delta_multiple_large_inputs() {
+        let cases: [(i128, i128); 4] = [
+            (10_000_000_000_000i128, 10_000i128),
+            (1_000_000_000_000_000i128, 500_000i128),
+            (8_500_000_000_000_000_000i128, 3_000_000_000i128),
+            (90_000_000_000_000_000i128, 9_000_000i128),
+        ];
+        for (total_interest, total_shares) in cases {
+            let expected = (total_interest * REWARD_PRECISION) / total_shares;
+            let actual = calculate_reward_delta(total_interest, total_shares).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn test_seize_collateral_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
