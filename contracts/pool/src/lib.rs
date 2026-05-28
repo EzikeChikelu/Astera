@@ -511,10 +511,13 @@ fn u128_to_i128(value: u128) -> PoolResult<i128> {
 }
 
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
-    let fee = (principal as u128)
+    let numerator = (principal as u128)
         .checked_mul(factoring_fee_bps as u128)
-        .ok_or(PoolError::AmountOverflow)?
-        / BPS_DENOM as u128;
+        .ok_or(PoolError::AmountOverflow)?;
+    // Ceiling division: round up so that any non-zero fee rate on any
+    // non-zero principal yields at least 1 stroop.  Without this, small
+    // invoices where principal × fee_bps < BPS_DENOM always truncate to 0.
+    let fee = (numerator + BPS_DENOM as u128 - 1) / BPS_DENOM as u128;
     u128_to_i128(fee)
 }
 
@@ -5373,9 +5376,43 @@ mod test {
         );
 
         let funded = client.get_funded_invoice(&1u64).unwrap();
-        let expected_fee = (principal as u128 * fee_bps as u128) / BPS_DENOM as u128;
+        // Ceiling division: fee rounds up to 1 stroop
+        let numerator = principal as u128 * fee_bps as u128;
+        let expected_fee = (numerator + BPS_DENOM as u128 - 1) / BPS_DENOM as u128;
         assert_eq!(funded.factoring_fee, expected_fee as i128);
+        assert!(funded.factoring_fee > 0, "fee should be non-zero for any fee_bps > 0");
         // Fee must be ≤ principal for small amounts
+        assert!(funded.factoring_fee <= funded.principal);
+    }
+
+    #[test]
+    fn test_factoring_fee_tiny_invoice_rounds_up() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // 50 stroops (minimal amount) with 100 BPS (1%) fee
+        // (50 × 100) / 10_000 = 0 before fix → ceil gives 1 stroop
+        let principal: i128 = 50;
+        let fee_bps: u32 = 100;
+
+        client.set_factoring_fee(&admin, &fee_bps);
+        mint(&env, &usdc_id, &investor, 1000);
+        mint(&env, &usdc_id, &sme, 1000);
+        client.deposit(&investor, &usdc_id, &1000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 86400),
+            &usdc_id,
+        );
+
+        let funded = client.get_funded_invoice(&1u64).unwrap();
+        assert!(funded.factoring_fee > 0, "even minimal invoice should have non-zero fee");
         assert!(funded.factoring_fee <= funded.principal);
     }
 
