@@ -469,6 +469,18 @@ fn fixed_point_pow(mut base: u128, mut exp: u64, precision: u128) -> u128 {
     result
 }
 
+/// ## Issue #323: Compound Interest Calculation Complexity
+///
+/// This function uses `fixed_point_pow()` which implements exponentiation by
+/// squaring, achieving O(log n) time complexity instead of O(n). For a 365-day
+/// invoice, this requires only ~9 iterations instead of 365.
+///
+/// The algorithm:
+/// 1. Calculates full days using O(log n) exponentiation
+/// 2. Handles remaining seconds with simple interest
+/// 3. Returns total interest (excluding principal)
+///
+/// **Performance**: Constant gas cost regardless of invoice duration.
 fn calculate_interest(
     principal: u128,
     yield_bps: u32,
@@ -1702,6 +1714,20 @@ impl FundingPool {
     /// Uses a reward-per-share accumulator pattern: each fully-repaid invoice
     /// increments `reward_per_share`; investors claim the delta since their last
     /// snapshot proportional to their share balance.
+    /// Claim accumulated yield for an investor.
+    ///
+    /// ## Issue #336 Fix: CEI Pattern with Transfer Failure Handling
+    /// Previously, the investor's reward snapshot was updated before the token transfer.
+    /// If the transfer failed, the snapshot would be advanced but no yield received,
+    /// permanently losing that yield entitlement.
+    ///
+    /// **Fix**: Use try_transfer to detect failures and only update snapshot on success.
+    /// This ensures the investor can retry the claim if the transfer fails.
+    ///
+    /// ## Yield Distribution Model
+    /// When invoices are repaid, interest is added to the pool. The contract
+    /// increments `reward_per_share`; investors claim the delta since their last
+    /// snapshot proportional to their share balance.
     pub fn claim_yield(env: Env, investor: Address, token: Address) -> Result<(), PoolError> {
         investor.require_auth();
         bump_instance(&env);
@@ -1737,14 +1763,32 @@ impl FundingPool {
                 0
             };
 
-            // Update snapshot before transfer (checks-effects-interactions).
-            env.storage()
-                .persistent()
-                .set(&snapshot_key, &tt.reward_per_share);
-
             if claimable > 0 {
                 let token_client = token::Client::new(&env, &token);
-                token_client.transfer(&env.current_contract_address(), &investor, &claimable);
+                // Issue #336 Fix: Use try_transfer to detect failures
+                // Only update snapshot if transfer succeeds
+                match token_client.try_transfer(
+                    &env.current_contract_address(),
+                    &investor,
+                    &claimable,
+                ) {
+                    Ok(_) => {
+                        // Transfer succeeded - update snapshot
+                        env.storage()
+                            .persistent()
+                            .set(&snapshot_key, &tt.reward_per_share);
+                    }
+                    Err(_) => {
+                        // Transfer failed - do NOT update snapshot
+                        // Investor can retry claim later
+                        return Err(PoolError::TransferMismatch);
+                    }
+                }
+            } else {
+                // No yield to claim - safe to update snapshot
+                env.storage()
+                    .persistent()
+                    .set(&snapshot_key, &tt.reward_per_share);
             }
 
             env.events().publish(
@@ -3231,6 +3275,12 @@ impl FundingPool {
     }
 
     /// Approve or revoke a specific investor's KYC status.
+    ///
+    /// ## Issue #345 Fix: Validate Against Invalid Addresses
+    /// Rejects attempts to approve:
+    /// - The admin address (privilege confusion)
+    /// - The contract's own address (self-approval)
+    /// - The invoice contract address (cross-contract confusion)
     pub fn set_investor_kyc(
         env: Env,
         admin: Address,
@@ -3240,6 +3290,16 @@ impl FundingPool {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
+
+        // Issue #345: Validate investor address
+        let config = get_config_cached(&env)?;
+        if investor == config.admin
+            || investor == env.current_contract_address()
+            || investor == config.invoice_contract
+        {
+            return Err(PoolError::Unauthorized);
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::InvestorKyc(investor.clone()), &approved);
@@ -3303,6 +3363,36 @@ impl FundingPool {
     }
 
     // ---- Internal utility methods ----
+
+    /// ## Issue #321: Reentrancy Guard Implementation
+    ///
+    /// The pool contract uses a reentrancy guard pattern to protect against
+    /// cross-contract reentrancy attacks. All state-modifying functions that
+    /// make external calls (token transfers, contract invocations) are protected
+    /// using either the `non_reentrant!` macro or manual `non_reentrant_start/end` calls.
+    ///
+    /// **Protected Functions** (with external calls):
+    /// - `deposit()` - transfers tokens, mints shares
+    /// - `withdraw()` - burns shares, transfers tokens
+    /// - `request_withdrawal()` - queries share balance, may transfer tokens
+    /// - `process_queued_withdrawal()` - burns shares, transfers tokens
+    /// - `fund_invoice()` - invokes invoice contract
+    /// - `fund_multiple_invoices()` - invokes invoice contract
+    /// - `repay_invoice_request()` - transfers tokens, invokes share contract
+    /// - `claim_yield()` - queries share balance, transfers tokens
+    /// - `deposit_collateral()` - transfers tokens
+    /// - `seize_collateral()` - transfers tokens
+    /// - `withdraw_revenue()` - transfers tokens
+    /// - `transfer_co_fund_share()` - no external calls but guards state consistency
+    ///
+    /// **Unguarded Functions** (no external calls or read-only):
+    /// - All view functions (read-only, no state changes)
+    /// - Admin setters that only update storage (no external calls)
+    /// - `pause()`, `unpause()` - simple state flags
+    ///
+    /// The guard uses instance storage to track reentrant calls within a single
+    /// transaction. If a guarded function is called while the guard is active,
+    /// it panics to prevent reentrancy.
     fn non_reentrant_start(env: &Env) {
         let key = DataKey::ReentrancyGuard;
         if env

@@ -1078,7 +1078,9 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, IntoVal};
+    use soroban_sdk::{
+        testutils::Address as _, testutils::Events, testutils::Ledger, Env, IntoVal,
+    };
 
     fn setup(env: &Env) -> (CreditScoreContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(CreditScoreContract, ());
