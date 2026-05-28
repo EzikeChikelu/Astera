@@ -3720,6 +3720,36 @@ mod test {
     }
 
     #[test]
+    fn test_fund_invoice_returns_token_not_accepted_when_liquidity_exists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        let unknown_token = Address::generate(&env);
+        env.storage().instance().set(
+            &DataKey::TokenTotals(unknown_token.clone()),
+            &PoolTokenTotals {
+                pool_value: 5_000,
+                total_deployed: 0,
+                total_paid_out: 0,
+                total_fee_revenue: 0,
+                reward_per_share: 0,
+                protocol_revenue: 0,
+            },
+        );
+
+        let result = client.try_fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &unknown_token,
+        );
+        assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+    }
+
+    #[test]
     fn test_fund_invoice_duplicate_panics() {
         let env = Env::default();
         env.mock_all_auths();
