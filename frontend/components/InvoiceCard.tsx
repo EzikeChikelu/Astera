@@ -17,6 +17,13 @@ const statusLabel: Record<string, string> = {
   Defaulted: 'Defaulted',
 };
 
+const statusClass: Record<string, string> = {
+  Pending: 'bg-yellow-100 text-yellow-700 border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-400 dark:border-yellow-800/50',
+  Funded: 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-400 dark:border-blue-800/50',
+  Paid: 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/40 dark:text-green-400 dark:border-green-800/50',
+  Defaulted: 'bg-red-100 text-red-700 border-red-300 dark:bg-red-900/40 dark:text-red-400 dark:border-red-800/50',
+};
+
 export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
   const days = daysUntil(metadata.dueDate);
   const isOverdue = days < 0;
@@ -54,7 +61,9 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
           </div>
         </div>
         <span
-          className={`text-xs font-medium px-2.5 py-1 rounded-full flex-shrink-0 badge-${metadata.status.toLowerCase()}`}
+          className={`text-xs font-medium px-2.5 py-1 rounded-full flex-shrink-0 border ${
+            statusClass[metadata.status] ?? 'bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-900/40 dark:text-slate-400 dark:border-slate-800/50'
+          }`}
         >
           {statusLabel[metadata.status] ?? metadata.status}
         </span>
