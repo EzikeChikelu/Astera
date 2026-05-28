@@ -40,7 +40,13 @@ const MAX_INVOICES_PER_DAY: u32 = 10;
 const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7;
-const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
+// Both the global setter (set_grace_period) and the per-invoice setter
+// (set_invoice_grace_period) share the same 90-day maximum. 90 days is the
+// practical upper bound that gives admins meaningful per-invoice flexibility
+// while preventing indefinite extensions that would undermine protocol risk
+// models. Keeping both caps identical ensures per-invoice overrides can always
+// reach the global maximum — making the override meaningful.
+const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 90;
 const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
@@ -2759,7 +2765,36 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
-        client.set_invoice_grace_period(&admin, &1u64, &31u32);
+        // Cap is 90 days — 91 must panic
+        client.set_invoice_grace_period(&admin, &1u64, &91u32);
+    }
+
+    #[test]
+    fn test_set_invoice_grace_period_at_max_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        // Exactly 90 days must be accepted (same cap as set_grace_period)
+        client.set_invoice_grace_period(&admin, &1u64, &90u32);
+        assert_eq!(client.get_invoice_grace_period(&1u64), 90);
+    }
+
+    #[test]
+    #[should_panic(expected = "grace period cannot exceed 90 days")]
+    fn test_set_grace_period_exceeds_max_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        client.set_grace_period(&admin, &91u32);
+    }
+
+    #[test]
+    fn test_set_grace_period_at_max_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        client.set_grace_period(&admin, &90u32);
+        assert_eq!(client.get_grace_period(), 90);
     }
 
     // ── #436: empty string validation tests ──────────────────────────────────
