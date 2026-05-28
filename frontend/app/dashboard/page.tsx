@@ -64,6 +64,7 @@ function DashboardContent() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilters, setStatusFilters] = useState<StatusFilter[]>([]);
   const [sort, setSort] = useState<SortOption>('created-desc');
+  const [page, setPage] = useState(0);
   const [queryHydrated, setQueryHydrated] = useState(false);
   const { viewMode, setViewMode, hydrated: viewModeHydrated } = useDashboardViewMode();
 
@@ -117,12 +118,14 @@ function DashboardContent() {
     const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
+    const initialPage = Math.max(0, parseInt(params.get('page') ?? '0', 10) || 0);
 
     startTransition(() => {
       setSearch(q);
       setDebouncedSearch(q);
       setStatusFilters(initialStatuses);
       setSort(initialSortValue);
+      setPage(initialPage);
     });
   }, [queryHydrated]);
 
@@ -133,6 +136,12 @@ function DashboardContent() {
     return () => window.clearTimeout(handle);
   }, [search]);
 
+  // Reset to first page whenever filters or sort change
+  useEffect(() => {
+    if (queryHydrated) setPage(0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, statusFilters, sort]);
+
   useEffect(() => {
     if (!queryHydrated) return;
 
@@ -140,10 +149,11 @@ function DashboardContent() {
     if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
     if (statusFilters.length > 0) params.set('status', statusFilters.join(','));
     if (sort !== 'created-desc') params.set('sort', sort);
+    if (page > 0) params.set('page', String(page));
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [queryHydrated, pathname, router, debouncedSearch, sort, statusFilters]);
+  }, [queryHydrated, pathname, router, debouncedSearch, sort, statusFilters, page]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -328,6 +338,9 @@ function DashboardContent() {
   }, [invoices, debouncedSearch]);
 
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pagedItems = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
@@ -572,7 +585,7 @@ function DashboardContent() {
                 ) : (
                   <>
                     <div className="space-y-4">
-                      {filtered.map((inv) => (
+                      {pagedItems.map((inv) => (
                         <InvoiceCard
                           key={inv.invoice.id}
                           id={inv.invoice.id}
@@ -582,36 +595,54 @@ function DashboardContent() {
                       ))}
                     </div>
 
-                    {/* Load More / Pagination Controls */}
-                    {hasMore && (
-                      <div className="mt-6 text-center">
+                    {/* Pagination controls */}
+                    <div className="mt-6 flex flex-col items-center gap-3">
+                      <p className="text-xs text-brand-muted">
+                        {filtered.length > 0
+                          ? `Showing ${page * PAGE_SIZE + 1}–${Math.min((page + 1) * PAGE_SIZE, filtered.length)} of ${filtered.length} invoice${filtered.length !== 1 ? 's' : ''}`
+                          : ''}
+                        {totalOnChainCount > 0 &&
+                          ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
+                      </p>
+
+                      <div className="flex items-center gap-2">
                         <button
-                          onClick={loadMore}
-                          disabled={loadingMore}
-                          className="px-6 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-50"
+                          onClick={() => setPage((p) => Math.max(0, p - 1))}
+                          disabled={page === 0}
+                          className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          aria-label="Previous page"
+                        >
+                          ← Prev
+                        </button>
+
+                        <span className="px-3 py-2 text-sm text-brand-muted">
+                          Page {page + 1} / {totalPages}
+                        </span>
+
+                        <button
+                          onClick={async () => {
+                            const nextPage = page + 1;
+                            // If we need more data from the chain, load it first
+                            if (nextPage >= totalPages && hasMore) {
+                              await loadMore();
+                            }
+                            setPage(nextPage);
+                          }}
+                          disabled={page >= totalPages - 1 && !hasMore}
+                          className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          aria-label="Next page"
                         >
                           {loadingMore ? (
-                            <span className="flex items-center justify-center gap-2">
-                              <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
-                              {t('loadingMore')}
+                            <span className="flex items-center gap-1">
+                              <span className="w-3 h-3 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
+                              Loading…
                             </span>
                           ) : (
-                            t('loadMore')
+                            'Next →'
                           )}
                         </button>
-                        <p className="text-xs text-brand-muted mt-2">
-                          {t('showing', { count: invoices.length })}
-                          {totalOnChainCount > 0 &&
-                            ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
-                        </p>
                       </div>
-                    )}
-
-                    {!hasMore && invoices.length > 0 && (
-                      <p className="text-xs text-brand-muted text-center mt-4">
-                        {t('allLoaded', { count: invoices.length })}
-                      </p>
-                    )}
+                    </div>
                   </>
                 )}
               </div>

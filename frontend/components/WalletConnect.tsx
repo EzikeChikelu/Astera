@@ -18,6 +18,16 @@ const STEP_LABELS: Record<WalletStep, string> = {
 };
 
 const MAX_RETRIES = 2;
+const WALLET_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number = WALLET_TIMEOUT_MS): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Wallet operation timed out after 10 s')), ms),
+    ),
+  ]);
+}
 
 // Network mismatch detection function
 async function checkNetworkMismatch(): Promise<{
@@ -91,7 +101,7 @@ export default function WalletConnect() {
     try {
       const freighter = await getFreighter();
 
-      const { isConnected } = await freighter.isConnected();
+      const { isConnected } = await withTimeout(freighter.isConnected());
       if (!isConnected) {
         const msg = 'Freighter not detected. Please install the browser extension and reload.';
         setInlineError(msg);
@@ -101,13 +111,13 @@ export default function WalletConnect() {
       }
 
       setStep('requesting-access');
-      const { isAllowed } = await freighter.isAllowed();
+      const { isAllowed } = await withTimeout(freighter.isAllowed());
       if (!isAllowed) {
-        await freighter.setAllowed();
+        await withTimeout(freighter.setAllowed());
       }
 
       setStep('fetching-address');
-      const { address, error: addrError } = await freighter.getAddress();
+      const { address, error: addrError } = await withTimeout(freighter.getAddress());
       if (addrError || !address) {
         toast.error('Could not retrieve wallet address. Please try again.');
         setStep('idle');
@@ -132,12 +142,15 @@ export default function WalletConnect() {
       setStep('idle');
     } catch (e) {
       console.error('[WalletConnect] Connection error:', e);
-      if (attempt < MAX_RETRIES) {
+      const isTimeout = e instanceof Error && e.message.includes('timed out');
+      if (!isTimeout && attempt < MAX_RETRIES) {
         setRetryCount(attempt + 1);
         // Brief delay before auto-retry
         setTimeout(() => connect(attempt + 1), 800);
       } else {
-        const msg = 'Failed to connect wallet after multiple attempts. Please try again.';
+        const msg = isTimeout
+          ? 'Wallet connection timed out. Please check Freighter and try again.'
+          : 'Failed to connect wallet after multiple attempts. Please try again.';
         setInlineError(msg);
         toast.error(msg);
         setRetryCount(0);
