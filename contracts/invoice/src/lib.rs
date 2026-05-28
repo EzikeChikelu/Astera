@@ -1588,8 +1588,7 @@ impl InvoiceContract {
     // ── Existing view / setter methods (unchanged) ────────────────────────────
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
-        let inv = load_invoice(&env, id);
-        maybe_expire_pending_invoice(&env, inv)
+        load_invoice(&env, id)
     }
 
     pub fn get_multiple_invoices(env: Env, ids: Vec<u64>) -> Vec<Invoice> {
@@ -1597,14 +1596,13 @@ impl InvoiceContract {
         let mut invoices: Vec<Invoice> = Vec::new(&env);
         for i in 0..ids.len() {
             let inv = load_invoice(&env, ids.get(i).unwrap());
-            invoices.push_back(maybe_expire_pending_invoice(&env, inv));
+            invoices.push_back(inv);
         }
         invoices
     }
 
     pub fn get_metadata(env: Env, id: u64) -> InvoiceMetadata {
         let inv = load_invoice(&env, id);
-        let inv = maybe_expire_pending_invoice(&env, inv);
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);
         let image = env
@@ -2256,7 +2254,8 @@ mod test {
             &String::from_str(&env, "https://example.com/meta"),
         );
         env.ledger().with_mut(|l| l.timestamp += 2);
-        let inv = client.get_invoice(&id); // trigger expiration
+        assert!(client.check_expiration(&id));
+        let inv = client.get_invoice(&id);
         assert_eq!(inv.status, InvoiceStatus::Expired);
         let removed = client.cleanup_expired_storage(&admin, &soroban_sdk::vec![&env, id]);
         assert_eq!(removed, 1);
@@ -2751,7 +2750,7 @@ mod test {
     }
 
     #[test]
-    fn test_pending_invoice_expires_after_duration_on_read() {
+    fn test_get_invoice_does_not_expire_pending_invoice() {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);
@@ -2771,6 +2770,32 @@ mod test {
             &String::from_str(&env, "https://example.com/meta"),
         );
         env.ledger().with_mut(|l| l.timestamp += 11);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Pending);
+        assert_eq!(client.get_metadata(&id).status, InvoiceStatus::Pending);
+    }
+
+    #[test]
+    fn test_check_expiration_expires_pending_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let sme = Address::generate(&env);
+        client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        env.ledger().with_mut(|l| l.timestamp += 11);
+        assert!(client.check_expiration(&id));
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
     }
 
@@ -3416,7 +3441,7 @@ mod test {
                 _ => {
                     // Expired
                     env.ledger().with_mut(|l| l.timestamp += 86_400 + 1);
-                    client.get_invoice(&id); // triggers expiration
+                    client.check_expiration(&id);
                 }
             }
 
@@ -3563,7 +3588,8 @@ mod test {
             env.ledger()
                 .with_mut(|l| l.timestamp += expiration_secs + 1);
 
-            // Read triggers expiration
+            // Explicit expiration check transitions the invoice.
+            client.check_expiration(&id);
             assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Expired);
         }
     }

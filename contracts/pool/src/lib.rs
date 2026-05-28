@@ -810,6 +810,7 @@ fn fund_invoice_request(
         .active_funded_invoices
         .checked_add(1)
         .ok_or(PoolError::AmountOverflow)?;
+    env.storage().instance().set(&DataKey::StorageStats, stats);
 
     // Transfer principal to SME LAST - interaction
     // NAV is unchanged because the funded invoice becomes an asset.
@@ -1196,20 +1197,6 @@ impl FundingPool {
             }
         }
 
-        // Record balance before transfer (CEI: check-effects-interactions)
-        let token_client = token::Client::new(&env, &token);
-        let balance_before = token_client.balance(&env.current_contract_address());
-
-        // Transfer tokens
-        token_client.transfer(&investor, &env.current_contract_address(), &amount);
-
-        // Verify exact amount received (handles fee-on-transfer tokens)
-        let balance_after = token_client.balance(&env.current_contract_address());
-        let received = balance_after.wrapping_sub(balance_before);
-        if received != amount {
-            return Err(PoolError::TransferMismatch);
-        }
-
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token_key = DataKey::ShareToken(token.clone());
@@ -1233,13 +1220,13 @@ impl FundingPool {
                 deposit_count: 0,
             });
 
-        // Normalise received amount to USDC equivalent using stored exchange rate
+        // Normalise deposit amount to USDC equivalent using stored exchange rate
         let rate_bps: u32 = env
             .storage()
             .instance()
             .get(&DataKey::ExchangeRate(token.clone()))
             .unwrap_or(10_000u32);
-        let usdc_received = (received * rate_bps as i128) / 10_000i128;
+        let usdc_received = (amount * rate_bps as i128) / 10_000i128;
 
         // #233: enforce maximum single-investor concentration limit
         let config = get_config_cached(&env)?;
@@ -1300,6 +1287,18 @@ impl FundingPool {
         env.storage()
             .persistent()
             .set(&investor_pos_key, &investor_position);
+
+        // Transfer deposited stablecoin LAST - interaction.
+        let token_client = token::Client::new(&env, &token);
+        let balance_before = token_client.balance(&env.current_contract_address());
+        token_client.transfer(&investor, &env.current_contract_address(), &amount);
+
+        // Verify exact amount received (handles fee-on-transfer tokens).
+        let balance_after = token_client.balance(&env.current_contract_address());
+        let received = balance_after.wrapping_sub(balance_before);
+        if received != amount {
+            return Err(PoolError::TransferMismatch);
+        }
 
         Self::non_reentrant_end(&env);
 
@@ -3458,6 +3457,59 @@ mod test {
     }
 
     #[contract]
+    pub struct FailingMintShare;
+    #[contractimpl]
+    impl FailingMintShare {
+        pub fn total_supply(_env: Env) -> i128 {
+            0
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            0
+        }
+        pub fn mint(_env: Env, _to: Address, _amount: i128) {
+            panic!("mint failed");
+        }
+        pub fn burn(_env: Env, _from: Address, _amount: i128) {}
+    }
+
+    #[contract]
+    pub struct PanickingOutgoingToken;
+    #[contractimpl]
+    impl PanickingOutgoingToken {
+        pub fn decimals(_env: Env) -> u32 {
+            EXPECTED_DECIMALS
+        }
+        pub fn set_pool(env: Env, pool: Address) {
+            env.storage().instance().set(&symbol_short!("pool"), &pool);
+        }
+        pub fn set_balance(env: Env, to: Address, amount: i128) {
+            env.storage().persistent().set(&to, &amount);
+        }
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage().persistent().get(&id).unwrap_or(0)
+        }
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            let pool: Address = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("pool"))
+                .expect("pool not set");
+            if from == pool {
+                panic!("outgoing transfer failed");
+            }
+            let from_balance = Self::balance(env.clone(), from.clone());
+            let to_balance = Self::balance(env.clone(), to.clone());
+            if from_balance < amount {
+                panic!("insufficient balance");
+            }
+            env.storage()
+                .persistent()
+                .set(&from, &(from_balance - amount));
+            env.storage().persistent().set(&to, &(to_balance + amount));
+        }
+    }
+
+    #[contract]
     pub struct DummyCreditScoreContract;
     #[contractimpl]
     impl DummyCreditScoreContract {
@@ -3769,6 +3821,36 @@ mod test {
     }
 
     #[test]
+    fn test_deposit_mint_failure_does_not_take_stablecoin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register(FundingPool, ());
+        let client = FundingPoolClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let usdc_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let invoice_contract = env.register(DummyInvoice, ());
+        DummyInvoiceClient::new(&env, &invoice_contract).set_pool(&contract_id);
+        let failing_share = env.register(FailingMintShare, ());
+        client.initialize(&admin, &usdc_id, &failing_share, &invoice_contract);
+        client.set_max_investor_concentration(&admin, &10_000u32);
+
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+        let token_client = token::Client::new(&env, &usdc_id);
+        let balance_before = token_client.balance(&investor);
+
+        let result = client.try_deposit(&investor, &usdc_id, &1_000i128);
+        assert!(result.is_err());
+        assert_eq!(token_client.balance(&investor), balance_before);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 0);
+    }
+
+    #[test]
     fn test_withdraw_zero_shares_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3791,6 +3873,50 @@ mod test {
         // Attempt to withdraw more shares than owned
         let result = client.try_withdraw(&investor, &usdc_id, &1_000i128);
         assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_withdraw_transfer_failure_rolls_back_position() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register(FundingPool, ());
+        let client = FundingPoolClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let token = env.register(PanickingOutgoingToken, ());
+        let token_client = PanickingOutgoingTokenClient::new(&env, &token);
+        token_client.set_pool(&contract_id);
+        let invoice_contract = env.register(DummyInvoice, ());
+        DummyInvoiceClient::new(&env, &invoice_contract).set_pool(&contract_id);
+        let share_token = env.register(DummyShare, ());
+        client.initialize(&admin, &token, &share_token, &invoice_contract);
+        client.set_max_investor_concentration(&admin, &10_000u32);
+
+        let investor = Address::generate(&env);
+        token_client.set_balance(&investor, &1_000);
+        client.deposit(&investor, &token, &1_000);
+
+        let shares_before: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "balance"),
+            soroban_sdk::vec![&env, investor.clone().into_val(&env)],
+        );
+        let totals_before = client.get_token_totals(&token);
+        let pool_balance_before = token_client.balance(&contract_id);
+
+        let result = client.try_withdraw(&investor, &token, &500i128);
+        assert!(result.is_err());
+        let shares_after: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "balance"),
+            soroban_sdk::vec![&env, investor.clone().into_val(&env)],
+        );
+        let totals_after = client.get_token_totals(&token);
+        assert_eq!(shares_after, shares_before);
+        assert_eq!(totals_after.pool_value, totals_before.pool_value);
+        assert_eq!(token_client.balance(&contract_id), pool_balance_before);
+        assert_eq!(token_client.balance(&investor), 0);
     }
 
     #[test]
@@ -3830,6 +3956,45 @@ mod test {
             &usdc_id,
         );
         assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+    }
+
+    #[test]
+    fn test_fund_invoice_transfer_failure_rolls_back_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register(FundingPool, ());
+        let client = FundingPoolClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let token = env.register(PanickingOutgoingToken, ());
+        let token_client = PanickingOutgoingTokenClient::new(&env, &token);
+        token_client.set_pool(&contract_id);
+        let invoice_contract = env.register(DummyInvoice, ());
+        DummyInvoiceClient::new(&env, &invoice_contract).set_pool(&contract_id);
+        let share_token = env.register(DummyShare, ());
+        client.initialize(&admin, &token, &share_token, &invoice_contract);
+        client.set_max_investor_concentration(&admin, &10_000u32);
+
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        token_client.set_balance(&investor, &2_000);
+        client.deposit(&investor, &token, &2_000);
+
+        let result = client.try_fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 86_400),
+            &token,
+        );
+        assert!(result.is_err());
+        assert!(client.get_funded_invoice(&1u64).is_none());
+        assert_eq!(client.get_token_totals(&token).total_deployed, 0);
+        assert_eq!(client.get_storage_stats().active_funded_invoices, 0);
+        assert_eq!(token_client.balance(&contract_id), 2_000);
+        assert_eq!(token_client.balance(&sme), 0);
     }
 
     #[test]
