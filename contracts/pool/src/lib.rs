@@ -683,6 +683,8 @@ fn fund_invoice_request(
         return Err(PoolError::StorageCorrupted);
     }
 
+    // Fail fast on liquidity before scanning token allowlist.
+    // This keeps unsuccessful requests cheap when the pool cannot fund them.
     // Ensure sufficient liquidity (cash = NAV - deployed).
     let token_totals_key = DataKey::TokenTotals(request.token.clone());
     let mut tt: PoolTokenTotals = env
