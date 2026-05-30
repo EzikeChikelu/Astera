@@ -70,3 +70,52 @@ jobs:
           path: .upgrade-dry-run/
           retention-days: 30
 
+  # Regenerate the committed TypeScript contract bindings and fail if they are
+  # out of sync with the current contract source. See CONTRIBUTING.md
+  # ("Regenerating contract bindings") and scripts/gen-bindings.sh.
+  generate-bindings:
+    name: Generate contract bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            contracts
+
+      # Pin the CLI version so generated output is byte-for-byte reproducible.
+      # Bump this together with a regeneration commit when upgrading the CLI.
+      - name: Cache stellar-cli binary
+        id: cache-stellar-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/stellar
+          key: stellar-cli-${{ runner.os }}-22.6.0
+
+      - name: Install stellar-cli
+        if: steps.cache-stellar-cli.outputs.cache-hit != 'true'
+        run: cargo install stellar-cli --version 22.6.0 --locked
+
+      # NOTE: 'pool' is omitted until its contract build is fixed (its PoolError
+      # enum exceeds Soroban's 50-case contract-spec limit). scripts/gen-bindings.sh
+      # already includes pool by default — add it back here once it compiles.
+      - name: Regenerate TypeScript bindings
+        run: ./scripts/gen-bindings.sh invoice credit_score
+
+      - name: Fail if generated bindings are out of sync
+        run: |
+          if ! git diff --exit-code frontend/src/generated/; then
+            echo "::error::Generated contract bindings are out of date." \
+                 "Run ./scripts/gen-bindings.sh and commit frontend/src/generated/."
+            exit 1
+          fi
+

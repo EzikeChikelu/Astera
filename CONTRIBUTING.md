@@ -721,6 +721,58 @@ Then restart the frontend dev server: `npm run dev`
 
 ---
 
+## 🔗 Regenerating Contract Bindings
+
+The frontend consumes auto-generated TypeScript bindings for the Soroban
+contracts. They live in [`frontend/src/generated/`](frontend/src/generated/) and
+are produced from the compiled contract WASM by
+`stellar contract bindings typescript`. They are committed to the repo and **CI
+fails if they drift from the contract source**, so regenerate and commit them
+whenever you change a contract's public interface (methods, parameters, return
+types, structs, or error enums).
+
+### When to regenerate
+
+- You added/removed/renamed a public contract function.
+- You changed a function's parameters or return type.
+- You modified a `#[contracttype]` struct/enum or a `#[contracterror]` enum.
+
+### How to regenerate
+
+```bash
+# One-time: make sure the WASM target and the Stellar CLI are installed.
+rustup target add wasm32-unknown-unknown
+cargo install stellar-cli --version 22.6.0 --locked   # version is pinned in CI
+
+# From the repository root: rebuilds the WASM and regenerates all bindings.
+./scripts/gen-bindings.sh
+
+# Or regenerate a single contract:
+./scripts/gen-bindings.sh invoice
+
+# Review and commit the result.
+git add frontend/src/generated/
+git commit -m "chore(bindings): regenerate contract bindings"
+```
+
+The script builds each contract to `target/wasm32-unknown-unknown/release/`,
+runs the CLI, and copies the generated module to
+`frontend/src/generated/<contract>.ts`. **Do not edit the generated files by
+hand** — they are overwritten on every run and excluded from ESLint/Prettier.
+
+> **Note:** keep the Stellar CLI version in sync with the one pinned in
+> `.github/workflows/contracts.yml`. A different CLI version can change the
+> generated output and break the CI sync check.
+
+> **Known issue (`pool`):** `./scripts/gen-bindings.sh` includes `pool` by
+> default, but the pool contract currently fails to build because its
+> `PoolError` enum exceeds Soroban's 50-case limit for contract-spec error
+> enums. Until that is fixed, the CI bindings job and the generated barrel only
+> cover `invoice` and `credit_score`; pass those explicitly
+> (`./scripts/gen-bindings.sh invoice credit_score`) to skip `pool` locally.
+
+---
+
 ## 🔐 Security Checklist
 
 **Before submitting a PR with smart contract changes, review and check off the following security items.** This checklist helps catch common vulnerabilities and ensures code quality.
