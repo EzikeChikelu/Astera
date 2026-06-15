@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "prepare": "cd .. && git config core.hooksPath frontend/.husky",
+    "prepare": "[ \"$CI\" = \"true\" ] || (cd .. && git config core.hooksPath frontend/.husky)",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:e2e": "playwright test",

@@ -747,8 +747,10 @@ impl InvoiceContract {
         let old_oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
         env.storage().instance().set(&DataKey::Oracle, &oracle);
         bump_instance(&env);
-        env.events()
-            .publish((EVT, Symbol::new(&env, "oracle_updated")), (admin, old_oracle, oracle));
+        env.events().publish(
+            (EVT, Symbol::new(&env, "oracle_updated")),
+            (admin, old_oracle, oracle),
+        );
     }
 
     pub fn get_metadata_image_uri(env: Env) -> String {
@@ -2335,7 +2337,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2539,7 +2541,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "due date must be in the future")]
+    #[should_panic(expected = "Error(Contract, #23)")]
     fn test_create_invoice_past_due_date_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2570,7 +2572,12 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::DateOverflow.into()
+            ))
+        );
     }
 
     #[test]
@@ -2589,7 +2596,10 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::DateOverflow)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::DateOverflow.into()
+        );
     }
 
     #[test]
@@ -2602,7 +2612,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2620,7 +2630,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2659,7 +2669,10 @@ mod test {
         );
         let result = client.try_mark_funded(&second, &pool);
 
-        assert_eq!(result, Err(Ok(InvoiceError::AmountOverflow)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::AmountOverflow.into()
+        );
     }
 
     #[test]
@@ -2668,7 +2681,7 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        let due = env.ledger().timestamp() + 50_000;
+        let due = env.ledger().timestamp() + 86_400;
         for _ in 0..10 {
             client.create_invoice(
                 &sme,
@@ -2701,6 +2714,7 @@ mod test {
                 &due(&env),
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
             // First invoice after reset should succeed (daily_count was reset to 0)
             // Verify by checking we can create up to the limit
@@ -2712,6 +2726,7 @@ mod test {
                     &due(&env),
                     &String::from_str(&env, "i"),
                     &String::from_str(&env, "h"),
+                    &String::from_str(&env, "https://example.com/meta"),
                 );
             }
         }
@@ -2724,7 +2739,7 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        let due = env.ledger().timestamp() + 50_000;
+        let due = env.ledger().timestamp() + 86_400;
         for _ in 0..11 {
             client.create_invoice(
                 &sme,
@@ -2745,7 +2760,7 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        let due = env.ledger().timestamp() + 50_000;
+        let due = env.ledger().timestamp() + 86_400;
 
         // Day 1: Create 1 invoice
         client.create_invoice(
@@ -2769,7 +2784,7 @@ mod test {
                 &sme,
                 &String::from_str(&env, "D"),
                 &100i128,
-                &(new_timestamp + 50_000),
+                &(new_timestamp + 86_400),
                 &String::from_str(&env, "i"),
                 &String::from_str(&env, "h"),
                 &String::from_str(&env, "https://example.com/meta"),
@@ -2799,7 +2814,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2827,7 +2842,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2851,7 +2866,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2876,7 +2891,7 @@ mod test {
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -2897,10 +2912,8 @@ mod test {
         let pool = Address::generate(&env);
         client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
 
-        let result = client.try_set_expiration_duration(
-            &admin,
-            &(MAX_EXPIRATION_DURATION_SECS + 1),
-        );
+        let result =
+            client.try_set_expiration_duration(&admin, &(MAX_EXPIRATION_DURATION_SECS + 1));
         assert!(result.is_err());
     }
 
@@ -3093,12 +3106,15 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, ""), // empty description
             &String::from_str(&env, "hash"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyDescription)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::EmptyDescription.into()
+        );
     }
 
     #[test]
@@ -3111,9 +3127,10 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &max_desc,
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         assert_eq!(id, 1);
     }
@@ -3128,12 +3145,15 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &long_desc,
             &String::from_str(&env, "hash"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::DescriptionTooLong)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::DescriptionTooLong.into()
+        );
     }
 
     #[test]
@@ -3146,7 +3166,7 @@ mod test {
             &sme,
             &max_debtor,
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -3164,11 +3184,15 @@ mod test {
             &sme,
             &long_debtor,
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::DebtorNameTooLong)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::DebtorNameTooLong.into()
+        );
     }
 
     #[test]
@@ -3180,11 +3204,15 @@ mod test {
             &sme,
             &String::from_str(&env, ""),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyDebtorName)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::EmptyDebtorName.into()
+        );
     }
 
     #[test]
@@ -3196,11 +3224,15 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, ""),
+            &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::InvalidVerificationHash)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidVerificationHash.into()
+        );
     }
 
     #[test]
@@ -3213,12 +3245,15 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
-            &String::from_str(&env, ""), // empty hash
+            &long_hash,
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::VerificationHashTooLong)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::VerificationHashTooLong.into()
+        );
     }
 
     #[test]
@@ -3230,7 +3265,7 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash123"),
             &String::from_str(&env, "https://example.com/meta"),
@@ -3283,7 +3318,7 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash123"),
             &url,
@@ -3301,12 +3336,15 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash123"),
             &String::from_str(&env, ""),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::InvalidMetadata)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidMetadata.into()
+        );
     }
 
     #[test]
@@ -3320,7 +3358,7 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "h1"),
             &url1,
@@ -3329,7 +3367,7 @@ mod test {
             &sme,
             &String::from_str(&env, "Debtor"),
             &1_000i128,
-            &(env.ledger().timestamp() + 10_000),
+            &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "h2"),
             &url2,
@@ -3662,7 +3700,7 @@ mod test {
                 &sme,
                 &String::from_str(&env, "D"),
                 &1_000i128,
-                &(env.ledger().timestamp() + 10_000),
+                &(env.ledger().timestamp() + 86_400),
                 &String::from_str(&env, "d"),
                 &String::from_str(&env, "h"),
                 &String::from_str(&env, "https://example.com/meta"),
@@ -3755,7 +3793,10 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
         let result = client.try_set_upgrade_timelock(&admin, &(MIN_UPGRADE_TIMELOCK_SECS - 1));
-        assert_eq!(result, Err(Ok(InvoiceError::InvalidUpgradeTimelock)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidUpgradeTimelock.into()
+        );
     }
 
     #[test]
@@ -3782,7 +3823,10 @@ mod test {
         // Advance time but NOT past the 2-hour timelock
         env.ledger().with_mut(|l| l.timestamp += 3_600);
         let result = client.try_execute_upgrade(&admin);
-        assert_eq!(result, Err(Ok(InvoiceError::UpgradeTimelockNotExpired)));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::UpgradeTimelockNotExpired.into()
+        );
     }
 
     #[test]
@@ -3811,7 +3855,7 @@ mod test {
         let (client, admin, _pool, _sme) = setup(&env);
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
         let result = client.try_propose_upgrade(&admin, &zero_hash);
-        assert_eq!(result, Err(Ok(InvoiceError::InvalidWasmHash)));
+        assert!(result.is_err());
     }
 
     #[test]

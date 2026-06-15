@@ -237,7 +237,7 @@ export default function HistoryPage() {
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
 
   const filteredEvents = useMemo(() => {
-    let filtered = kindFilter === 'all' ? events : events.filter((e) => e.kind === kindFilter);
+    const filtered = kindFilter === 'all' ? events : events.filter((e) => e.kind === kindFilter);
     return filtered.sort((a, b) => {
       const cmp = a.ledger - b.ledger;
       return sortDir === 'desc' ? -cmp : cmp;
@@ -386,7 +386,7 @@ export default function HistoryPage() {
         {events.length > 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <div className="flex flex-wrap gap-1.5">
-              {(['all', ...Object.keys(KIND_LABELS) as EventKind[]] as const).map((k) => (
+              {(['all', ...(Object.keys(KIND_LABELS) as EventKind[])] as const).map((k) => (
                 <button
                   key={k}
                   onClick={() => setKindFilter(k)}
