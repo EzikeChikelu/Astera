@@ -40,6 +40,9 @@ frontend/public/fallback-*.js
 node_modules/
 target/
 
+# Upgrade dry-run build artifacts
+.upgrade-dry-run/
+
 # Contract test snapshots (generated)
 contracts/**/test_snapshots/
 
