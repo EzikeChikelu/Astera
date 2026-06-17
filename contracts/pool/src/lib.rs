@@ -496,6 +496,13 @@ fn fixed_point_pow(mut base: u128, mut exp: u64, precision: u128) -> u128 {
     result
 }
 
+fn div_round_half_up(numerator: u128, denominator: u128) -> PoolResult<u128> {
+    numerator
+        .checked_add(denominator / 2)
+        .ok_or(PoolError::AmountOverflow)
+        .map(|rounded| rounded / denominator)
+}
+
 /// ## Issue #323: Compound Interest Calculation Complexity
 ///
 /// This function uses `fixed_point_pow()` which implements exponentiation by
@@ -520,7 +527,7 @@ fn calculate_interest(
             .checked_mul(yield_bps as u128)
             .and_then(|value| value.checked_mul(elapsed_secs as u128))
             .ok_or(PoolError::AmountOverflow)?;
-        return Ok(numerator / denominator);
+        return div_round_half_up(numerator, denominator);
     }
     let elapsed_days = elapsed_secs / 86400;
     let mut amount = principal;
@@ -530,18 +537,18 @@ fn calculate_interest(
             .checked_add(daily_rate_num)
             .ok_or(PoolError::AmountOverflow)?;
         let growth_factor = fixed_point_pow(num, elapsed_days, denominator);
-        amount = principal
+        let grown = principal
             .checked_mul(growth_factor)
-            .ok_or(PoolError::AmountOverflow)?
-            / denominator;
+            .ok_or(PoolError::AmountOverflow)?;
+        amount = div_round_half_up(grown, denominator)?;
     }
     let remaining_secs = elapsed_secs % 86400;
     if remaining_secs > 0 {
-        let accrued = amount
+        let numerator = amount
             .checked_mul(yield_bps as u128)
             .and_then(|value| value.checked_mul(remaining_secs as u128))
-            .ok_or(PoolError::AmountOverflow)?
-            / denominator;
+            .ok_or(PoolError::AmountOverflow)?;
+        let accrued = div_round_half_up(numerator, denominator)?;
         amount = amount
             .checked_add(accrued)
             .ok_or(PoolError::AmountOverflow)?;
@@ -2150,6 +2157,9 @@ impl FundingPool {
         Ok(())
     }
 
+    /// Repay an invoice. Interest due is calculated with round-half-up integer
+    /// division, so fractional stroops of yield are rounded to the nearest unit
+    /// instead of always being truncated away from investors.
     pub fn repay_invoice(
         env: Env,
         invoice_id: u64,
@@ -3829,6 +3839,41 @@ mod test {
     }
 
     #[test]
+    fn test_repay_invoice_interest_rounds_half_up() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 12_499;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_YEAR),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR);
+
+        let expected_interest: i128 = 1_000;
+        let total_due = client.estimate_repayment(&1u64);
+        assert_eq!(total_due, principal + expected_interest);
+
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, principal + expected_interest);
+        assert_eq!(tt.total_paid_out, principal + expected_interest);
+    }
+
+    #[test]
     fn test_factoring_fee_is_charged_and_tracked_separately() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3860,9 +3905,11 @@ mod test {
 
         env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
 
-        let expected_interest =
-            (principal as u128 * DEFAULT_YIELD_BPS as u128 * (30 * 86_400) as u128)
-                / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let expected_interest = div_round_half_up(
+            principal as u128 * DEFAULT_YIELD_BPS as u128 * (30 * 86_400) as u128,
+            BPS_DENOM as u128 * SECS_PER_YEAR as u128,
+        )
+        .unwrap();
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
         assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
