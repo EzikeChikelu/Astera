@@ -62,7 +62,7 @@ fn parse_pool_version() -> PoolContractVersion {
     }
 }
 
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum PoolError {
@@ -496,6 +496,17 @@ fn fixed_point_pow(mut base: u128, mut exp: u64, precision: u128) -> u128 {
     result
 }
 
+fn div_round_half_up(numerator: u128, denominator: u128) -> PoolResult<u128> {
+    if denominator == 0 {
+        return Err(PoolError::AmountOverflow);
+    }
+
+    numerator
+        .checked_add(denominator / 2)
+        .ok_or(PoolError::AmountOverflow)
+        .map(|rounded| rounded / denominator)
+}
+
 /// ## Issue #323: Compound Interest Calculation Complexity
 ///
 /// This function uses `fixed_point_pow()` which implements exponentiation by
@@ -520,35 +531,42 @@ fn calculate_interest(
             .checked_mul(yield_bps as u128)
             .and_then(|value| value.checked_mul(elapsed_secs as u128))
             .ok_or(PoolError::AmountOverflow)?;
-        return Ok(numerator / denominator);
+        return div_round_half_up(numerator, denominator);
     }
-    let elapsed_days = elapsed_secs / 86400;
-    let mut amount = principal;
+    let elapsed_days = elapsed_secs / SECS_PER_DAY;
+    let mut amount_numerator = principal
+        .checked_mul(denominator)
+        .ok_or(PoolError::AmountOverflow)?;
     if elapsed_days > 0 {
-        let daily_rate_num = yield_bps as u128 * 86400;
+        let daily_rate_num = yield_bps as u128 * SECS_PER_DAY as u128;
         let num = denominator
             .checked_add(daily_rate_num)
             .ok_or(PoolError::AmountOverflow)?;
         let growth_factor = fixed_point_pow(num, elapsed_days, denominator);
-        amount = principal
+        amount_numerator = principal
             .checked_mul(growth_factor)
-            .ok_or(PoolError::AmountOverflow)?
-            / denominator;
-    }
-    let remaining_secs = elapsed_secs % 86400;
-    if remaining_secs > 0 {
-        let accrued = amount
-            .checked_mul(yield_bps as u128)
-            .and_then(|value| value.checked_mul(remaining_secs as u128))
-            .ok_or(PoolError::AmountOverflow)?
-            / denominator;
-        amount = amount
-            .checked_add(accrued)
             .ok_or(PoolError::AmountOverflow)?;
     }
-    amount
-        .checked_sub(principal)
-        .ok_or(PoolError::AmountOverflow)
+    let remaining_secs = elapsed_secs % SECS_PER_DAY;
+    if remaining_secs > 0 {
+        let remaining_rate_num = (yield_bps as u128)
+            .checked_mul(remaining_secs as u128)
+            .ok_or(PoolError::AmountOverflow)?;
+        let accrued_numerator = amount_numerator
+            .checked_mul(remaining_rate_num)
+            .and_then(|value| value.checked_div(denominator))
+            .ok_or(PoolError::AmountOverflow)?;
+        amount_numerator = amount_numerator
+            .checked_add(accrued_numerator)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
+    let principal_numerator = principal
+        .checked_mul(denominator)
+        .ok_or(PoolError::AmountOverflow)?;
+    let interest_numerator = amount_numerator
+        .checked_sub(principal_numerator)
+        .ok_or(PoolError::AmountOverflow)?;
+    div_round_half_up(interest_numerator, denominator)
 }
 
 fn u128_to_i128(value: u128) -> PoolResult<i128> {
@@ -2150,6 +2168,9 @@ impl FundingPool {
         Ok(())
     }
 
+    /// Repay an invoice. Interest due is calculated with round-half-up integer
+    /// division, so fractional stroops of yield are rounded to the nearest unit
+    /// instead of always being truncated away from investors.
     pub fn repay_invoice(
         env: Env,
         invoice_id: u64,
@@ -3379,9 +3400,10 @@ impl FundingPool {
             return Err(PoolError::Unauthorized);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::InvestorKyc(investor.clone()), &KycStatus::Approved);
+        env.storage().persistent().set(
+            &DataKey::InvestorKyc(investor.clone()),
+            &KycStatus::Approved,
+        );
         env.events()
             .publish((EVT, symbol_short!("kyc_appr")), (admin, investor));
         Ok(())
@@ -3405,9 +3427,10 @@ impl FundingPool {
             return Err(PoolError::Unauthorized);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::InvestorKyc(investor.clone()), &KycStatus::Rejected);
+        env.storage().persistent().set(
+            &DataKey::InvestorKyc(investor.clone()),
+            &KycStatus::Rejected,
+        );
         env.events()
             .publish((EVT, symbol_short!("kyc_rej")), (admin, investor));
         Ok(())
@@ -3436,11 +3459,7 @@ impl FundingPool {
 
     /// Set the upgrade timelock duration in seconds (#338).
     /// Minimum: 3,600 s (1 h). Default: 86,400 s (24 h).
-    pub fn set_upgrade_timelock(
-        env: Env,
-        admin: Address,
-        secs: u64,
-    ) -> Result<(), PoolError> {
+    pub fn set_upgrade_timelock(env: Env, admin: Address, secs: u64) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -3589,149 +3608,185 @@ mod test {
         BytesN, Env, IntoVal,
     };
 
-    #[contract]
-    pub struct DummyShare;
-    #[contractimpl]
-    impl DummyShare {
-        pub fn total_supply(env: Env) -> i128 {
-            env.storage()
-                .instance()
-                .get(&symbol_short!("tot"))
-                .unwrap_or(0)
-        }
-        pub fn balance(env: Env, id: Address) -> i128 {
-            env.storage().persistent().get(&id).unwrap_or(0)
-        }
-        pub fn mint(env: Env, to: Address, amount: i128) {
-            let t = Self::total_supply(env.clone());
-            let b = Self::balance(env.clone(), to.clone());
-            env.storage()
-                .instance()
-                .set(&symbol_short!("tot"), &(t + amount));
-            env.storage().persistent().set(&to, &(b + amount));
-        }
-        pub fn burn(env: Env, from: Address, amount: i128) {
-            let t = Self::total_supply(env.clone());
-            let b = Self::balance(env.clone(), from.clone());
-            env.storage()
-                .instance()
-                .set(&symbol_short!("tot"), &(t - amount));
-            env.storage().persistent().set(&from, &(b - amount));
-        }
-    }
+    mod dummy_share_contract {
+        use super::*;
 
-    #[contract]
-    pub struct FailingMintShare;
-    #[contractimpl]
-    impl FailingMintShare {
-        pub fn total_supply(_env: Env) -> i128 {
-            0
-        }
-        pub fn balance(_env: Env, _id: Address) -> i128 {
-            0
-        }
-        pub fn mint(_env: Env, _to: Address, _amount: i128) {
-            panic!("mint failed");
-        }
-        pub fn burn(_env: Env, _from: Address, _amount: i128) {}
-    }
-
-    #[contract]
-    pub struct PanickingOutgoingToken;
-    #[contractimpl]
-    impl PanickingOutgoingToken {
-        pub fn decimals(_env: Env) -> u32 {
-            EXPECTED_DECIMALS
-        }
-        pub fn set_pool(env: Env, pool: Address) {
-            env.storage().instance().set(&symbol_short!("pool"), &pool);
-        }
-        pub fn set_balance(env: Env, to: Address, amount: i128) {
-            env.storage().persistent().set(&to, &amount);
-        }
-        pub fn balance(env: Env, id: Address) -> i128 {
-            env.storage().persistent().get(&id).unwrap_or(0)
-        }
-        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
-            let pool: Address = env
-                .storage()
-                .instance()
-                .get(&symbol_short!("pool"))
-                .expect("pool not set");
-            if from == pool {
-                panic!("outgoing transfer failed");
+        #[contract]
+        pub struct DummyShare;
+        #[contractimpl]
+        impl DummyShare {
+            pub fn decimals(_env: Env) -> u32 {
+                EXPECTED_DECIMALS
             }
-            let from_balance = Self::balance(env.clone(), from.clone());
-            let to_balance = Self::balance(env.clone(), to.clone());
-            if from_balance < amount {
-                panic!("insufficient balance");
+            pub fn total_supply(env: Env) -> i128 {
+                env.storage()
+                    .instance()
+                    .get(&symbol_short!("tot"))
+                    .unwrap_or(0)
             }
-            env.storage()
-                .persistent()
-                .set(&from, &(from_balance - amount));
-            env.storage().persistent().set(&to, &(to_balance + amount));
-        }
-    }
-
-    #[contract]
-    pub struct DummyCreditScoreContract;
-    #[contractimpl]
-    impl DummyCreditScoreContract {
-        pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
-            CreditScoreData {
-                sme,
-                score: 750,
-                total_invoices: 5,
-                paid_on_time: 5,
-                paid_late: 0,
-                defaulted: 0,
-                total_volume: 1_000_000_000,
-                average_payment_days: 1,
-                last_updated: env.ledger().timestamp(),
-                score_version: 1,
+            pub fn balance(env: Env, id: Address) -> i128 {
+                env.storage().persistent().get(&id).unwrap_or(0)
+            }
+            pub fn mint(env: Env, to: Address, amount: i128) {
+                let t = Self::total_supply(env.clone());
+                let b = Self::balance(env.clone(), to.clone());
+                env.storage()
+                    .instance()
+                    .set(&symbol_short!("tot"), &(t + amount));
+                env.storage().persistent().set(&to, &(b + amount));
+            }
+            pub fn burn(env: Env, from: Address, amount: i128) {
+                let t = Self::total_supply(env.clone());
+                let b = Self::balance(env.clone(), from.clone());
+                env.storage()
+                    .instance()
+                    .set(&symbol_short!("tot"), &(t - amount));
+                env.storage().persistent().set(&from, &(b - amount));
             }
         }
     }
+    pub use dummy_share_contract::DummyShare;
 
-    // #367: Test token with 6 decimals (non-standard)
-    #[contract]
-    pub struct DummyToken6Decimals;
-    #[contractimpl]
-    impl DummyToken6Decimals {
-        pub fn decimals(_env: Env) -> u32 {
-            6
+    mod failing_mint_share_contract {
+        use super::*;
+
+        #[contract]
+        pub struct FailingMintShare;
+        #[contractimpl]
+        impl FailingMintShare {
+            pub fn total_supply(_env: Env) -> i128 {
+                0
+            }
+            pub fn balance(_env: Env, _id: Address) -> i128 {
+                0
+            }
+            pub fn mint(_env: Env, _to: Address, _amount: i128) {
+                panic!("mint failed");
+            }
+            pub fn burn(_env: Env, _from: Address, _amount: i128) {}
         }
     }
+    pub use failing_mint_share_contract::FailingMintShare;
 
-    #[contract]
-    pub struct DummyInvoice;
-    #[contractimpl]
-    impl DummyInvoice {
-        pub fn get_authorized_pool(env: Env) -> Address {
-            env.storage()
-                .instance()
-                .get(&symbol_short!("pool"))
-                .expect("not initialized")
-        }
-        pub fn set_pool(env: Env, pool: Address) {
-            env.storage().instance().set(&symbol_short!("pool"), &pool);
-        }
-        pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
-            let stored: Option<bool> = env.storage().persistent().get(&DataKey::FundedInvoice(id));
-            stored.unwrap_or(false)
-        }
-        pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {
-            if defaulted {
+    mod panicking_outgoing_token_contract {
+        use super::*;
+
+        #[contract]
+        pub struct PanickingOutgoingToken;
+        #[contractimpl]
+        impl PanickingOutgoingToken {
+            pub fn decimals(_env: Env) -> u32 {
+                EXPECTED_DECIMALS
+            }
+            pub fn set_pool(env: Env, pool: Address) {
+                env.storage().instance().set(&symbol_short!("pool"), &pool);
+            }
+            pub fn set_balance(env: Env, to: Address, amount: i128) {
+                env.storage().persistent().set(&to, &amount);
+            }
+            pub fn balance(env: Env, id: Address) -> i128 {
+                env.storage().persistent().get(&id).unwrap_or(0)
+            }
+            pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+                let pool: Address = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("pool"))
+                    .expect("pool not set");
+                if from == pool {
+                    panic!("outgoing transfer failed");
+                }
+                let from_balance = Self::balance(env.clone(), from.clone());
+                let to_balance = Self::balance(env.clone(), to.clone());
+                if from_balance < amount {
+                    panic!("insufficient balance");
+                }
                 env.storage()
                     .persistent()
-                    .set(&DataKey::FundedInvoice(id), &true);
-            } else {
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::FundedInvoice(id), &false);
+                    .set(&from, &(from_balance - amount));
+                env.storage().persistent().set(&to, &(to_balance + amount));
             }
         }
     }
+    pub use panicking_outgoing_token_contract::{
+        PanickingOutgoingToken, PanickingOutgoingTokenClient,
+    };
+
+    mod dummy_credit_score_contract {
+        use super::*;
+
+        #[contract]
+        pub struct DummyCreditScoreContract;
+        #[contractimpl]
+        impl DummyCreditScoreContract {
+            pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
+                CreditScoreData {
+                    sme,
+                    score: 750,
+                    total_invoices: 5,
+                    paid_on_time: 5,
+                    paid_late: 0,
+                    defaulted: 0,
+                    total_volume: 1_000_000_000,
+                    average_payment_days: 1,
+                    last_updated: env.ledger().timestamp(),
+                    score_version: 1,
+                }
+            }
+        }
+    }
+    pub use dummy_credit_score_contract::DummyCreditScoreContract;
+
+    mod dummy_token_6_decimals_contract {
+        use super::*;
+
+        // #367: Test token with 6 decimals (non-standard)
+        #[contract]
+        pub struct DummyToken6Decimals;
+        #[contractimpl]
+        impl DummyToken6Decimals {
+            pub fn decimals(_env: Env) -> u32 {
+                6
+            }
+        }
+    }
+    pub use dummy_token_6_decimals_contract::DummyToken6Decimals;
+
+    mod dummy_invoice_contract {
+        use super::*;
+
+        #[contract]
+        pub struct DummyInvoice;
+        #[contractimpl]
+        impl DummyInvoice {
+            pub fn get_authorized_pool(env: Env) -> Address {
+                env.storage()
+                    .instance()
+                    .get(&symbol_short!("pool"))
+                    .expect("not initialized")
+            }
+            pub fn set_pool(env: Env, pool: Address) {
+                env.storage().instance().set(&symbol_short!("pool"), &pool);
+            }
+            pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
+                let stored: Option<bool> =
+                    env.storage().persistent().get(&DataKey::FundedInvoice(id));
+                stored.unwrap_or(false)
+            }
+            pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {
+                if defaulted {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::FundedInvoice(id), &true);
+                } else {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::FundedInvoice(id), &false);
+                }
+            }
+        }
+    }
+    pub use dummy_invoice_contract::{DummyInvoice, DummyInvoiceClient};
 
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
@@ -3829,6 +3884,41 @@ mod test {
     }
 
     #[test]
+    fn test_repay_invoice_interest_rounds_half_up() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 12_499;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_YEAR),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR);
+
+        let expected_interest: i128 = 1_000;
+        let total_due = client.estimate_repayment(&1u64);
+        assert_eq!(total_due, principal + expected_interest);
+
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, principal + expected_interest);
+        assert_eq!(tt.total_paid_out, principal + expected_interest);
+    }
+
+    #[test]
     fn test_factoring_fee_is_charged_and_tracked_separately() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3860,9 +3950,7 @@ mod test {
 
         env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
 
-        let expected_interest =
-            (principal as u128 * DEFAULT_YIELD_BPS as u128 * (30 * 86_400) as u128)
-                / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let expected_interest = 6_575_342i128;
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
         assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
@@ -3874,6 +3962,35 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    #[test]
+    fn test_compound_interest_rounds_once_for_days_and_remainder() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.set_compound_interest(&admin, &true);
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 90_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 90_000);
+
+        assert_eq!(client.estimate_repayment(&1u64), 1_000_228_313);
     }
 
     #[test]
@@ -4187,17 +4304,19 @@ mod test {
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
         let unknown_token = Address::generate(&env);
-        env.storage().instance().set(
-            &DataKey::TokenTotals(unknown_token.clone()),
-            &PoolTokenTotals {
-                pool_value: 5_000,
-                total_deployed: 0,
-                total_paid_out: 0,
-                total_fee_revenue: 0,
-                reward_per_share: 0,
-                protocol_revenue: 0,
-            },
-        );
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(
+                &DataKey::TokenTotals(unknown_token.clone()),
+                &PoolTokenTotals {
+                    pool_value: 5_000,
+                    total_deployed: 0,
+                    total_paid_out: 0,
+                    total_fee_revenue: 0,
+                    reward_per_share: 0,
+                    protocol_revenue: 0,
+                },
+            );
+        });
 
         let result = client.try_fund_invoice(
             &admin,
@@ -4770,7 +4889,7 @@ mod test {
         // Mark invoice defaulted via dummy invoice contract
         DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
 
-        client.seize_collateral(&admin, &1u64).unwrap();
+        client.seize_collateral(&admin, &1u64);
 
         // Record must still be queryable after seizure (90-day TTL applied)
         let col = client.get_collateral_deposit(&1u64);
@@ -5906,7 +6025,10 @@ mod test {
         let numerator = principal as u128 * fee_bps as u128;
         let expected_fee = (numerator + BPS_DENOM as u128 - 1) / BPS_DENOM as u128;
         assert_eq!(funded.factoring_fee, expected_fee as i128);
-        assert!(funded.factoring_fee > 0, "fee should be non-zero for any fee_bps > 0");
+        assert!(
+            funded.factoring_fee > 0,
+            "fee should be non-zero for any fee_bps > 0"
+        );
         // Fee must be ≤ principal for small amounts
         assert!(funded.factoring_fee <= funded.principal);
     }
@@ -5938,7 +6060,10 @@ mod test {
         );
 
         let funded = client.get_funded_invoice(&1u64).unwrap();
-        assert!(funded.factoring_fee > 0, "even minimal invoice should have non-zero fee");
+        assert!(
+            funded.factoring_fee > 0,
+            "even minimal invoice should have non-zero fee"
+        );
         assert!(funded.factoring_fee <= funded.principal);
     }
 
@@ -6013,6 +6138,11 @@ mod test {
         let precision = 10000u128;
         let result = fixed_point_pow(precision + 1, 0, precision);
         assert_eq!(result, precision);
+    }
+
+    #[test]
+    fn test_div_round_half_up_rejects_zero_denominator() {
+        assert_eq!(div_round_half_up(1, 0), Err(PoolError::AmountOverflow));
     }
 
     #[test]
@@ -6337,7 +6467,10 @@ mod test {
 
         client.set_kyc_required(&admin, &true);
         client.approve_investor_kyc(&admin, &investor);
-        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Approved);
+        assert_eq!(
+            client.get_investor_kyc_status(&investor),
+            KycStatus::Approved
+        );
         assert!(client.get_investor_kyc(&investor));
 
         mint(&env, &usdc_id, &investor, 1_000);
@@ -6354,7 +6487,10 @@ mod test {
 
         client.set_kyc_required(&admin, &true);
         client.reject_investor_kyc(&admin, &investor);
-        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Rejected);
+        assert_eq!(
+            client.get_investor_kyc_status(&investor),
+            KycStatus::Rejected
+        );
         assert!(!client.get_investor_kyc(&investor));
 
         mint(&env, &usdc_id, &investor, 1_000);
@@ -6370,7 +6506,10 @@ mod test {
         let investor = Address::generate(&env);
 
         client.set_kyc_required(&admin, &true);
-        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::NotRequested);
+        assert_eq!(
+            client.get_investor_kyc_status(&investor),
+            KycStatus::NotRequested
+        );
 
         mint(&env, &usdc_id, &investor, 1_000);
         let result = client.try_deposit(&investor, &usdc_id, &1_000);
@@ -6385,7 +6524,10 @@ mod test {
         let investor = Address::generate(&env);
 
         client.set_investor_kyc(&admin, &investor, &true);
-        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Approved);
+        assert_eq!(
+            client.get_investor_kyc_status(&investor),
+            KycStatus::Approved
+        );
         assert!(client.get_investor_kyc(&investor));
     }
 
@@ -6397,7 +6539,10 @@ mod test {
         let investor = Address::generate(&env);
 
         client.set_investor_kyc(&admin, &investor, &false);
-        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Rejected);
+        assert_eq!(
+            client.get_investor_kyc_status(&investor),
+            KycStatus::Rejected
+        );
         assert!(!client.get_investor_kyc(&investor));
     }
 
