@@ -69,6 +69,24 @@ export interface CreditScoreData {
   total_volume: i128;
 }
 
+export interface CreditScoreResponse {
+  average_payment_days: i64;
+  /** Config version currently active on the contract. */
+  config_version: u32;
+  defaulted: u32;
+  /** True when score_version != config_version — the score is stale. */
+  is_stale: boolean;
+  last_updated: u64;
+  paid_late: u32;
+  paid_on_time: u32;
+  score: u32;
+  /** Config version that was active when this score was last computed. */
+  score_version: u32;
+  sme: string;
+  total_invoices: u32;
+  total_volume: i128;
+}
+
 
 export interface ScoreCoreConfig {
   base_score: u32;
@@ -449,7 +467,7 @@ export interface Client {
      * Whether to automatically simulate the transaction when constructing the AssembledTransaction. Default: true
      */
     simulate?: boolean;
-  }) => Promise<AssembledTransaction<CreditScoreData>>
+  }) => Promise<AssembledTransaction<CreditScoreResponse>>
 
   /**
    * Construct and simulate a migration_version transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -894,7 +912,7 @@ export class Client extends ContractClient {
         record_payment: this.txFromJSON<null>,
         execute_upgrade: this.txFromJSON<null>,
         propose_upgrade: this.txFromJSON<null>,
-        get_credit_score: this.txFromJSON<CreditScoreData>,
+        get_credit_score: this.txFromJSON<CreditScoreResponse>,
         migration_version: this.txFromJSON<u32>,
         set_pool_contract: this.txFromJSON<null>,
         get_late_threshold: this.txFromJSON<i64>,

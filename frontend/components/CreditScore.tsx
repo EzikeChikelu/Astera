@@ -19,6 +19,7 @@ interface Props {
   totalVolume: bigint;
   paymentHistory?: PaymentRecord[];
   previousScore?: number;
+  isStale?: boolean;
 }
 
 const SCORE_TIERS = [
@@ -50,6 +51,7 @@ export default function CreditScore({
   totalVolume,
   paymentHistory = [],
   previousScore,
+  isStale = false,
 }: Props) {
   const total = paid + funded + defaulted;
   const [showImprovement, setShowImprovement] = useState(false);
@@ -158,6 +160,28 @@ export default function CreditScore({
 
   return (
     <div className="space-y-6">
+      {isStale && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl text-sm text-yellow-400">
+          <svg
+            className="w-4 h-4 mt-0.5 shrink-0"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+            />
+          </svg>
+          <span>
+            Score may be outdated — the scoring parameters were updated after this score was last
+            computed. It will refresh automatically on your next invoice payment.
+          </span>
+        </div>
+      )}
+
       {/* Score Overview Card */}
       <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
         <h2 className="text-lg font-semibold mb-6">On-Chain Credit Score</h2>
