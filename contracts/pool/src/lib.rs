@@ -172,6 +172,7 @@ const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
 // #244: withdrawal rate limiting — 10_000 bps (100%) and 0s = disabled by default
 const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
 const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
+const DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS: u32 = 30;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -201,6 +202,14 @@ pub struct WithdrawalRequest {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaitEstimate {
+    pub queue_position: u32,
+    pub capital_ahead: i128,
+    pub nearest_invoice_due_date: u64,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct PoolConfig {
     pub invoice_contract: Address,
@@ -225,6 +234,7 @@ pub struct PoolConfig {
     // #275: pool utilization guardrails (bps)
     pub max_utilization_bps: u32,
     pub utilization_warning_bps: u32,
+    pub max_withdrawal_queue_age_days: u32,
 }
 
 #[contracttype]
@@ -424,6 +434,7 @@ pub enum DataKey {
     MigrationVersion,
     /// Withdrawal queue for low-liquidity scenarios (#217)
     WithdrawalQueue(Address),
+    WithdrawalQueueCounter(Address),
     /// Withdrawal request data (#217)
     WithdrawalRequest(Address, u64), // (investor, request_id)
     /// #338: configurable upgrade timelock duration in seconds
@@ -928,6 +939,7 @@ impl FundingPool {
             // #275: utilization guardrails
             max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
+            max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -1546,8 +1558,8 @@ impl FundingPool {
             Self::non_reentrant_end(&env);
             return Err(PoolError::InvalidAmount);
         }
-        let amount = (shares * tt.pool_value) / total_shares;
-        let available_liquidity = tt.pool_value - tt.total_deployed;
+        let amount = Self::withdrawal_amount(shares, tt.pool_value, total_shares)?;
+        let available_liquidity = available_liquidity(&tt)?;
 
         let now = env.ledger().timestamp();
 
@@ -1596,21 +1608,13 @@ impl FundingPool {
     pub fn cancel_withdrawal_request(
         env: Env,
         investor: Address,
-        request_id: u64,
+        token: Address,
     ) -> Result<(), PoolError> {
         investor.require_auth();
         bump_instance(&env);
 
         non_reentrant!(&env, {
-            let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
-            let request: WithdrawalRequest = env
-                .storage()
-                .persistent()
-                .get(&request_key)
-                .ok_or(PoolError::WithdrawalRequestNotFound)?;
-
-            // Remove from queue
-            let queue_key = DataKey::WithdrawalQueue(request.token.clone());
+            let queue_key = DataKey::WithdrawalQueue(token.clone());
             let queue: Vec<WithdrawalRequest> = env
                 .storage()
                 .persistent()
@@ -1618,23 +1622,28 @@ impl FundingPool {
                 .unwrap_or(Vec::new(&env));
 
             let mut new_queue = Vec::new(&env);
+            let mut request_id = 0u64;
             for req in queue.iter() {
-                if !(req.investor == investor && req.request_id == request_id) {
+                if req.investor == investor {
+                    request_id = req.request_id;
+                } else {
                     new_queue.push_back(req);
                 }
             }
+            if request_id == 0 {
+                return Err(PoolError::WithdrawalRequestNotFound);
+            }
             env.storage().persistent().set(&queue_key, &new_queue);
 
-            // Remove individual request
+            let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().remove(&request_key);
 
             env.events()
-                .publish((EVT, symbol_short!("wd_cncl")), (investor, request_id));
+                .publish((EVT, symbol_short!("wd_cncl")), (investor, token, request_id));
             Ok(())
         })
     }
 
-    /// Get the current withdrawal queue for a token
     pub fn get_withdrawal_queue(env: Env, token: Address) -> Vec<WithdrawalRequest> {
         bump_instance(&env);
         let queue_key = DataKey::WithdrawalQueue(token);
@@ -1642,6 +1651,80 @@ impl FundingPool {
             .persistent()
             .get(&queue_key)
             .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn estimate_withdrawal_wait(env: Env, investor: Address, token: Address) -> WaitEstimate {
+        bump_instance(&env);
+        let queue_key = DataKey::WithdrawalQueue(token.clone());
+        let queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or(Vec::new(&env));
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token.clone()))
+            .unwrap_or_default();
+        let share_token: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareToken(token.clone()));
+        let total_shares = match share_token {
+            Some(share_token) => env.invoke_contract(
+                &share_token,
+                &Symbol::new(&env, "total_supply"),
+                Vec::new(&env),
+            ),
+            None => 0,
+        };
+
+        let mut queue_position = 0u32;
+        let mut capital_ahead = 0i128;
+        let mut position = 1u32;
+        for request in queue.iter() {
+            if request.investor == investor {
+                queue_position = position;
+                break;
+            }
+            if total_shares > 0 {
+                if let Ok(amount) =
+                    Self::withdrawal_amount(request.shares, tt.pool_value, total_shares)
+                {
+                    capital_ahead = capital_ahead.saturating_add(amount);
+                }
+            }
+            position = position.saturating_add(1);
+        }
+
+        let stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        let mut nearest_invoice_due_date = 0u64;
+        let mut invoice_id = 1u64;
+        while invoice_id <= stats.total_funded_invoices {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_id))
+            {
+                if record.token == token
+                    && record.repaid_amount < record.principal
+                    && (nearest_invoice_due_date == 0 || record.due_date < nearest_invoice_due_date)
+                {
+                    nearest_invoice_due_date = record.due_date;
+                }
+            }
+            invoice_id = invoice_id.saturating_add(1);
+        }
+
+        WaitEstimate {
+            queue_position,
+            capital_ahead,
+            nearest_invoice_due_date,
+        }
     }
 
     /// Process withdrawal immediately (helper function)
@@ -1654,18 +1737,12 @@ impl FundingPool {
         mut tt: PoolTokenTotals,
         share_token: Address,
     ) -> Result<(), PoolError> {
-        // Burn shares FIRST
-        let mut burn_args = Vec::new(env);
-        burn_args.push_back(investor.clone().into_val(env));
-        burn_args.push_back(shares.into_val(env));
-        let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
+        Self::burn_withdrawal_shares(env, &share_token, investor.clone(), shares);
 
-        // Update state
         tt.pool_value -= amount;
         let token_totals_key = DataKey::TokenTotals(token.clone());
         env.storage().instance().set(&token_totals_key, &tt);
 
-        // Transfer LAST
         let token_client = token::Client::new(env, &token);
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
@@ -1674,13 +1751,64 @@ impl FundingPool {
         Ok(())
     }
 
-    /// Generate unique request ID for withdrawal requests
     fn generate_request_id(env: &Env, token: &Address) -> u64 {
-        let counter_key = DataKey::WithdrawalQueue(token.clone());
+        let counter_key = DataKey::WithdrawalQueueCounter(token.clone());
         let current_count: u64 = env.storage().persistent().get(&counter_key).unwrap_or(0);
         let new_id = current_count + 1;
         env.storage().persistent().set(&counter_key, &new_id);
         new_id
+    }
+
+    fn withdrawal_amount(shares: i128, pool_value: i128, total_shares: i128) -> PoolResult<i128> {
+        if total_shares <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        shares
+            .checked_mul(pool_value)
+            .and_then(|value| value.checked_div(total_shares))
+            .ok_or(PoolError::AmountOverflow)
+    }
+
+    fn burn_withdrawal_shares(
+        env: &Env,
+        share_token: &Address,
+        investor: Address,
+        shares: i128,
+    ) {
+        let mut burn_args = Vec::new(env);
+        burn_args.push_back(investor.into_val(env));
+        burn_args.push_back(shares.into_val(env));
+        let _: () = env.invoke_contract(share_token, &Symbol::new(env, "burn"), burn_args);
+    }
+
+    fn settle_queued_withdrawal(
+        env: &Env,
+        token: &Address,
+        share_token: &Address,
+        request: &WithdrawalRequest,
+        shares_to_burn: i128,
+        amount: i128,
+    ) -> PoolResult<()> {
+        Self::burn_withdrawal_shares(
+            env,
+            share_token,
+            request.investor.clone(),
+            shares_to_burn,
+        );
+
+        let token_client = token::Client::new(env, token);
+        token_client.transfer(&env.current_contract_address(), &request.investor, &amount);
+
+        env.events().publish(
+            (EVT, symbol_short!("wd_part")),
+            (
+                request.investor.clone(),
+                amount,
+                shares_to_burn,
+                request.request_id,
+            ),
+        );
+        Ok(())
     }
 
     /// Process withdrawal queue after repayments (call from repay_invoice)
@@ -1700,15 +1828,21 @@ impl FundingPool {
             return Ok(());
         }
 
-        let mut processed = Vec::new(env);
-        let mut remaining_amount = available_amount;
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
             .get(&DataKey::TokenTotals(token.clone()))
             .unwrap_or_default();
+        let liquid = available_liquidity(&tt)?;
+        let mut remaining_amount = if available_amount < liquid {
+            available_amount
+        } else {
+            liquid
+        };
+        if remaining_amount <= 0 {
+            return Ok(());
+        }
 
-        // Compute total shares once for proportional withdrawals.
         let share_token_key = DataKey::ShareToken(token.clone());
         let share_token: Address = env
             .storage()
@@ -1720,50 +1854,119 @@ impl FundingPool {
             &Symbol::new(env, "total_supply"),
             Vec::new(env),
         );
+        if total_shares <= 0 {
+            return Ok(());
+        }
+
+        let config = get_config_cached(env)?;
+        let max_age_secs = (config.max_withdrawal_queue_age_days as u64) * SECS_PER_DAY;
+        let now = env.ledger().timestamp();
+        let valuation_pool_value = tt.pool_value;
+        let mut due_by_age = Vec::new(env);
+        let mut regular = Vec::new(env);
+        let mut total_due_shares: i128 = 0;
 
         for request in queue.iter() {
-            let request_amount = (request.shares * tt.pool_value) / total_shares;
-            if remaining_amount >= request_amount {
-                // Process this request
-                // `share_token` already resolved above.
-
-                // Burn shares
-                let mut burn_args = Vec::new(env);
-                burn_args.push_back(request.investor.clone().into_val(env));
-                burn_args.push_back(request.shares.into_val(env));
-                let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
-
-                // Update pool totals
-                tt.pool_value -= request_amount;
-                remaining_amount -= request_amount;
-
-                // Transfer tokens
-                let token_client = token::Client::new(env, &token);
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &request.investor,
-                    &request_amount,
-                );
-
-                // Remove individual request
-                let request_key =
-                    DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
-                env.storage().persistent().remove(&request_key);
-
-                env.events().publish(
-                    (EVT, symbol_short!("wd_full")),
-                    (request.investor, request_amount, request.shares),
-                );
+            let aged = max_age_secs > 0 && now >= request.requested_at.saturating_add(max_age_secs);
+            if aged {
+                total_due_shares = total_due_shares
+                    .checked_add(request.shares)
+                    .ok_or(PoolError::AmountOverflow)?;
+                due_by_age.push_back(request);
             } else {
-                // Can't process this request, keep it in queue
-                processed.push_back(request);
+                regular.push_back(request);
             }
         }
 
-        // Update queue with remaining unprocessed requests
-        env.storage().persistent().set(&queue_key, &processed);
+        if total_due_shares == 0 {
+            due_by_age = regular;
+            regular = Vec::new(env);
+            for request in due_by_age.iter() {
+                total_due_shares = total_due_shares
+                    .checked_add(request.shares)
+                    .ok_or(PoolError::AmountOverflow)?;
+            }
+        }
 
-        // Update token totals
+        let distributable_amount = remaining_amount;
+        let mut remaining_queue = Vec::new(env);
+        for request in due_by_age.iter() {
+            let available_for_request = distributable_amount
+                .checked_mul(request.shares)
+                .and_then(|value| value.checked_div(total_due_shares))
+                .ok_or(PoolError::AmountOverflow)?;
+            let request_amount =
+                Self::withdrawal_amount(request.shares, valuation_pool_value, total_shares)?;
+            let payout = if available_for_request > request_amount {
+                request_amount
+            } else {
+                available_for_request
+            };
+
+            if payout <= 0 {
+                remaining_queue.push_back(request);
+                continue;
+            }
+
+            let shares_to_burn = if payout == request_amount {
+                request.shares
+            } else {
+                payout
+                    .checked_mul(request.shares)
+                    .and_then(|value| value.checked_div(request_amount))
+                    .ok_or(PoolError::AmountOverflow)?
+            };
+
+            Self::settle_queued_withdrawal(
+                env,
+                &token,
+                &share_token,
+                &request,
+                shares_to_burn,
+                payout,
+            )?;
+            tt.pool_value = tt
+                .pool_value
+                .checked_sub(payout)
+                .ok_or(PoolError::AmountOverflow)?;
+            remaining_amount = remaining_amount
+                .checked_sub(payout)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            if shares_to_burn == request.shares {
+                let request_key =
+                    DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
+                env.storage().persistent().remove(&request_key);
+                env.events().publish(
+                    (EVT, symbol_short!("wd_full")),
+                    (request.investor, payout, request.shares),
+                );
+            } else {
+                let remaining_request = WithdrawalRequest {
+                    investor: request.investor.clone(),
+                    token: request.token.clone(),
+                    shares: request
+                        .shares
+                        .checked_sub(shares_to_burn)
+                        .ok_or(PoolError::AmountOverflow)?,
+                    requested_at: request.requested_at,
+                    request_id: request.request_id,
+                };
+                let request_key = DataKey::WithdrawalRequest(
+                    remaining_request.investor.clone(),
+                    remaining_request.request_id,
+                );
+                env.storage().persistent().set(&request_key, &remaining_request);
+                remaining_queue.push_back(remaining_request);
+            }
+        }
+
+        for request in regular.iter() {
+            remaining_queue.push_back(request);
+        }
+
+        env.storage().persistent().set(&queue_key, &remaining_queue);
+
         let token_totals_key = DataKey::TokenTotals(token);
         env.storage().instance().set(&token_totals_key, &tt);
 
@@ -2143,9 +2346,7 @@ impl FundingPool {
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
-            let available_amount = total_interest_i128
-                .checked_add(record.factoring_fee)
-                .ok_or(PoolError::AmountOverflow)?;
+            let available_amount = available_liquidity(&tt)?;
             if let Err(e) =
                 Self::process_withdrawal_queue(env, record.token.clone(), available_amount)
             {
@@ -2913,6 +3114,22 @@ impl FundingPool {
             (EVT, symbol_short!("set_wdlim")),
             (admin, max_bps, cooldown_secs),
         );
+        Ok(())
+    }
+
+    pub fn set_max_withdrawal_queue_age(
+        env: Env,
+        admin: Address,
+        days: u32,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.max_withdrawal_queue_age_days = days;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_wdage")), (admin, days));
         Ok(())
     }
 
@@ -5347,6 +5564,7 @@ mod test {
             withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
             max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
+            max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
         };
 
         assert_eq!(
@@ -6424,7 +6642,145 @@ mod test {
         assert!(request_id > 0);
 
         // cancel_withdrawal_request should succeed
-        client.cancel_withdrawal_request(&investor, &request_id);
+        client.cancel_withdrawal_request(&investor, &usdc_id);
+    }
+
+    #[test]
+    fn test_withdrawal_request_counter_preserves_queue() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &(env.ledger().timestamp() + 86400),
+            &usdc_id,
+        );
+
+        let request_id = client.request_withdrawal(&investor, &usdc_id, &5_000);
+        let queue = client.get_withdrawal_queue(&usdc_id);
+
+        assert_eq!(request_id, 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.get(0).unwrap().investor, investor);
+    }
+
+    #[test]
+    fn test_cancel_withdrawal_request_by_token_removes_pending_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &(env.ledger().timestamp() + 86400),
+            &usdc_id,
+        );
+
+        client.request_withdrawal(&investor, &usdc_id, &5_000);
+        client.cancel_withdrawal_request(&investor, &usdc_id);
+
+        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
+        assert_eq!(
+            client.try_cancel_withdrawal_request(&investor, &usdc_id),
+            Err(Ok(PoolError::WithdrawalRequestNotFound))
+        );
+    }
+
+    #[test]
+    fn test_estimate_withdrawal_wait_returns_position_and_due_date() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let due_date = env.ledger().timestamp() + 172800;
+
+        mint(&env, &usdc_id, &alice, 5_000);
+        mint(&env, &usdc_id, &bob, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&alice, &usdc_id, &5_000);
+        client.deposit(&bob, &usdc_id, &5_000);
+        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
+
+        client.request_withdrawal(&alice, &usdc_id, &2_000);
+        client.request_withdrawal(&bob, &usdc_id, &3_000);
+
+        let estimate = client.estimate_withdrawal_wait(&bob, &usdc_id);
+        assert_eq!(estimate.queue_position, 2);
+        assert_eq!(estimate.capital_ahead, 2_000);
+        assert_eq!(estimate.nearest_invoice_due_date, due_date);
+    }
+
+    #[test]
+    fn test_repayment_processes_withdrawal_queue_pro_rata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &bob, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&alice, &usdc_id, &10_000);
+        client.deposit(&bob, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &env.ledger().timestamp(),
+            &usdc_id,
+        );
+        client.fund_invoice(
+            &admin,
+            &2u64,
+            &10_000,
+            &sme,
+            &env.ledger().timestamp(),
+            &usdc_id,
+        );
+
+        client.request_withdrawal(&alice, &usdc_id, &10_000);
+        client.request_withdrawal(&bob, &usdc_id, &10_000);
+        client.repay_invoice(&2u64, &sme, &10_000);
+
+        let alice_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "balance"),
+            soroban_sdk::vec![&env, alice.clone().into_val(&env)],
+        );
+        let bob_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "balance"),
+            soroban_sdk::vec![&env, bob.clone().into_val(&env)],
+        );
+        let queue = client.get_withdrawal_queue(&usdc_id);
+
+        assert_eq!(alice_shares, 5_000);
+        assert_eq!(bob_shares, 5_000);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.get(0).unwrap().shares, 5_000);
+        assert_eq!(queue.get(1).unwrap().shares, 5_000);
     }
 
     #[test]
