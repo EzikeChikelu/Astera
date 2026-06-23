@@ -2790,10 +2790,7 @@ mod test {
         );
         let result = client.try_mark_funded(&second, &pool);
 
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            InvoiceError::AmountOverflow
-        );
+        assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
     }
 
     #[test]
