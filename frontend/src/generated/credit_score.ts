@@ -69,6 +69,24 @@ export interface CreditScoreData {
   total_volume: i128;
 }
 
+/**
+ * Response type for get_credit_score.
+ *
+ * Bundles the SME's CreditScoreData with the contract's currently active
+ * config_version. When `config_version > score.score_version` the stored
+ * score was computed under an older config and should be treated as stale.
+ */
+export interface CreditScoreResponse {
+  /** The SME's persisted credit-score record. */
+  score: CreditScoreData;
+  /**
+   * The scoring-config version that is currently active on-chain.
+   * Compare with `score.score_version` to detect staleness:
+   * `config_version > score.score_version` → score is stale.
+   */
+  config_version: u32;
+}
+
 
 export interface ScoreCoreConfig {
   base_score: u32;
@@ -433,6 +451,9 @@ export interface Client {
 
   /**
    * Construct and simulate a get_credit_score transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   *
+   * Returns both the SME's credit score data and the current config_version so
+   * callers can detect staleness without a second RPC call.
    */
   get_credit_score: ({sme}: {sme: string}, options?: {
     /**
@@ -449,7 +470,7 @@ export interface Client {
      * Whether to automatically simulate the transaction when constructing the AssembledTransaction. Default: true
      */
     simulate?: boolean;
-  }) => Promise<AssembledTransaction<CreditScoreData>>
+  }) => Promise<AssembledTransaction<CreditScoreResponse>>
 
   /**
    * Construct and simulate a migration_version transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -894,7 +915,7 @@ export class Client extends ContractClient {
         record_payment: this.txFromJSON<null>,
         execute_upgrade: this.txFromJSON<null>,
         propose_upgrade: this.txFromJSON<null>,
-        get_credit_score: this.txFromJSON<CreditScoreData>,
+        get_credit_score: this.txFromJSON<CreditScoreResponse>,
         migration_version: this.txFromJSON<u32>,
         set_pool_contract: this.txFromJSON<null>,
         get_late_threshold: this.txFromJSON<i64>,

@@ -132,6 +132,23 @@ pub struct CreditScoreData {
     pub score_version: u32,
 }
 
+/// Response type for [`CreditScoreContract::get_credit_score`].
+///
+/// Bundles the SME's current [`CreditScoreData`] together with the contract's
+/// active `config_version` (= `ScoringConfig::core::score_version`).  When
+/// `config_version > score.score_version` the stored score was computed under
+/// an older config and should be treated as stale by consumers.
+#[contracttype]
+#[derive(Clone)]
+pub struct CreditScoreResponse {
+    /// The SME's persisted credit-score record.
+    pub score: CreditScoreData,
+    /// The scoring-config version that is *currently* active on-chain.
+    /// Compare with `score.score_version` to detect staleness:
+    /// `config_version > score.score_version` → score is stale.
+    pub config_version: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoreCoreConfig {
@@ -752,8 +769,23 @@ impl CreditScoreContract {
         );
     }
 
-    pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
-        Self::get_or_create_credit_data(&env, &sme)
+    /// Returns the credit score for a given SME together with the current
+    /// scoring-config version, so callers can detect stale scores without a
+    /// second RPC round-trip.
+    ///
+    /// A score is considered stale when
+    /// `response.config_version > response.score.score_version`.  Consumers
+    /// (frontend, pool contract, third-party integrations) should surface a
+    /// "score may be outdated" warning in that case and re-fetch after the
+    /// next `record_payment` / `record_default` call recomputes the score
+    /// under the current config.
+    pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
+        let score = Self::get_or_create_credit_data(&env, &sme);
+        let config = load_scoring_config(&env);
+        CreditScoreResponse {
+            score,
+            config_version: config.core.score_version,
+        }
     }
 
     pub fn get_payment_history(env: Env, sme: Address) -> Vec<PaymentRecord> {

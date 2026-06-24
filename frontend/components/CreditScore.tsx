@@ -19,6 +19,9 @@ interface Props {
   totalVolume: bigint;
   paymentHistory?: PaymentRecord[];
   previousScore?: number;
+  /** When true, the displayed score was computed under a previous scoring config
+   * and may not reflect current point values. Show a staleness indicator. */
+  isStale?: boolean;
 }
 
 const SCORE_TIERS = [
@@ -50,6 +53,7 @@ export default function CreditScore({
   totalVolume,
   paymentHistory = [],
   previousScore,
+  isStale = false,
 }: Props) {
   const total = paid + funded + defaulted;
   const [showImprovement, setShowImprovement] = useState(false);
@@ -161,6 +165,34 @@ export default function CreditScore({
       {/* Score Overview Card */}
       <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
         <h2 className="text-lg font-semibold mb-6">On-Chain Credit Score</h2>
+
+        {/* Staleness warning: score was computed under a previous scoring config */}
+        {isStale && (
+          <div
+            role="alert"
+            aria-live="polite"
+            className="mb-4 flex items-start gap-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300"
+          >
+            <svg
+              className="mt-0.5 h-4 w-4 shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+              />
+            </svg>
+            <span>
+              Score may be outdated — the scoring formula has been updated since this score was last
+              computed. Submit or repay an invoice to refresh your score.
+            </span>
+          </div>
+        )}
 
         {/* Score display with change indicator */}
         <div className="text-center mb-8">
