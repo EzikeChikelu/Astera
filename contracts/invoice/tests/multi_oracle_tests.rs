@@ -5,7 +5,7 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
-use invoice::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
+use invoice::{InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus};
 
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30;
@@ -168,7 +168,6 @@ fn test_no_secondary_oracle_unknown_address_fails() {
 // ── Test 5: set_secondary_oracle restricted to admin ─────────────────────────
 
 #[test]
-#[should_panic(expected = "unauthorized")]
 fn test_set_secondary_oracle_restricted_to_admin() {
     let env = Env::default();
     env.mock_all_auths();
@@ -179,7 +178,13 @@ fn test_set_secondary_oracle_restricted_to_admin() {
     // Try to call set_secondary_oracle from a non-admin address
     let non_admin = Address::generate(&env);
     let secondary_oracle = Address::generate(&env);
-    client.set_secondary_oracle(&non_admin, &Some(secondary_oracle));
+    let result = client.try_set_secondary_oracle(&non_admin, &Some(secondary_oracle));
+    
+    // Assert error is Unauthorized
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        InvoiceError::Unauthorized.into()
+    );
 }
 
 // ── Test 6: set_secondary_oracle allows removal ──────────────────────────────
