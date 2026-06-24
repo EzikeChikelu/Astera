@@ -5,7 +5,9 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
-use invoice::{InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, VERIFICATION_TIMEOUT_SECS};
+use invoice::{
+    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, VERIFICATION_TIMEOUT_SECS,
+};
 
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30;

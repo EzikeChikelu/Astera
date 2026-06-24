@@ -179,7 +179,7 @@ fn test_set_secondary_oracle_restricted_to_admin() {
     let non_admin = Address::generate(&env);
     let secondary_oracle = Address::generate(&env);
     let result = client.try_set_secondary_oracle(&non_admin, &Some(secondary_oracle));
-    
+
     // Assert error is Unauthorized
     assert_eq!(
         result.unwrap_err().unwrap(),
