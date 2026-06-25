@@ -72,7 +72,7 @@ fn test_kyc_blocks_deposit_when_required() {
     mint(&env, &usdc_id, &investor, 1_000);
 
     let result = client.try_deposit(&investor, &usdc_id, &1_000);
-    assert_eq!(result, Err(Ok(PoolError::KycNotApproved)));
+    assert_eq!(result, Err(Ok(PoolError::KycNotRequested)));
 }
 
 #[test]
@@ -118,14 +118,14 @@ fn test_kyc_required_flag_toggle() {
 
     client.set_kyc_required(&admin, &true);
     let blocked = client.try_deposit(&investor, &usdc_id, &1_000);
-    assert_eq!(blocked, Err(Ok(PoolError::KycNotApproved)));
+    assert_eq!(blocked, Err(Ok(PoolError::KycNotRequested)));
 
     client.set_kyc_required(&admin, &false);
     client.deposit(&investor, &usdc_id, &1_000);
 
     client.set_kyc_required(&admin, &true);
     let blocked_again = client.try_deposit(&investor, &usdc_id, &1_000);
-    assert_eq!(blocked_again, Err(Ok(PoolError::KycNotApproved)));
+    assert_eq!(blocked_again, Err(Ok(PoolError::KycNotRequested)));
 }
 
 #[test]
