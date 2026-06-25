@@ -132,6 +132,23 @@ pub struct CreditScoreData {
     pub score_version: u32,
 }
 
+/// Response type for [`CreditScoreContract::get_credit_score`].
+///
+/// Bundles the SME's current [`CreditScoreData`] together with the contract's
+/// active `config_version` (= `ScoringConfig::core::score_version`).  When
+/// `config_version > score.score_version` the stored score was computed under
+/// an older config and should be treated as stale by consumers.
+#[contracttype]
+#[derive(Clone)]
+pub struct CreditScoreResponse {
+    /// The SME's persisted credit-score record.
+    pub score: CreditScoreData,
+    /// The scoring-config version that is *currently* active on-chain.
+    /// Compare with `score.score_version` to detect staleness:
+    /// `config_version > score.score_version` → score is stale.
+    pub config_version: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoreCoreConfig {

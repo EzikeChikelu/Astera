@@ -456,6 +456,9 @@ export interface Client {
 
   /**
    * Construct and simulate a get_credit_score transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   *
+   * Returns both the SME's credit score data and the current config_version so
+   * callers can detect staleness without a second RPC call.
    */
   get_credit_score: ({sme}: {sme: string}, options?: {
     /**
