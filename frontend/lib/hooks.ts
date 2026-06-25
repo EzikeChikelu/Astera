@@ -38,6 +38,7 @@ export function useAuthRefresh(address: string | null): void {
 
   useEffect(() => {
     if (!address) return;
+    const addr: string = address;
 
     function schedule() {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -52,7 +53,7 @@ export function useAuthRefresh(address: string | null): void {
       const delay = Math.max(0, refreshAt - Date.now());
 
       timerRef.current = setTimeout(async () => {
-        const result = await ensureAuthWithFreighter(address).catch(() => null);
+        const result = await ensureAuthWithFreighter(addr).catch(() => null);
         if (result && 'token' in result) {
           schedule();
         }
