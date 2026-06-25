@@ -145,9 +145,15 @@ fn test_transfer_from_reduces_allowance_exactly() {
 #[test]
 fn test_burn_requires_admin_auth() {
     let env = Env::default();
-    // No mock_all_auths — admin auth must be explicitly satisfied
+    env.mock_all_auths();
     let (client, _admin) = setup(&env);
     let holder = Address::generate(&env);
+
+    // Mint tokens to holder so the test isolates the auth check, not zero balance
+    client.mint(&holder, &100i128);
+
+    // Disable auth mocking — burn must fail because admin auth is not satisfied
+    env.set_auths(&[]);
     let result = client.try_burn(&holder, &100i128);
     assert!(result.is_err());
 }
@@ -161,7 +167,10 @@ fn test_transfer_requires_sender_auth() {
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
     let result = client.try_transfer(&alice, &bob, &100i128);
-    assert!(result.is_err(), "transfer must fail without sender authorization");
+    assert!(
+        result.is_err(),
+        "transfer must fail without sender authorization"
+    );
 }
 
 // ── Overflow safety ──────────────────────────────────────────────────────────
