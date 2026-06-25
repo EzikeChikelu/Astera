@@ -40,6 +40,10 @@ const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
 const MAX_INVOICES_PER_DAY: u32 = 10;
 const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
+// 25-hour TTL for the per-SME invoice timestamp Vec used by the sliding-window
+// rate limiter. One hour longer than the window so entries near the boundary
+// are never evicted before the next submission can filter them out.
+const SLIDING_WINDOW_TTL_LEDGERS: u32 = LEDGERS_PER_DAY + LEDGERS_PER_DAY / 24;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7;
 // Both the global setter (set_grace_period) and the per-invoice setter
 // (set_invoice_grace_period) share the same 90-day maximum. 90 days is the
@@ -241,6 +245,8 @@ pub enum DataKey {
     MinDueDateWindowSecs,
     DailyInvoiceCount(Address),
     DailyInvoiceResetTime(Address),
+    // #577: sliding-window rate limiter — stores Vec<u64> of per-SME invoice timestamps
+    InvoiceTimestamps(Address),
     ProposedWasmHash,
     UpgradeScheduledAt,
     GracePeriodDays,
@@ -352,9 +358,6 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn next_day_boundary(ts: u64) -> u64 {
-    (ts / SECS_PER_DAY + 1) * SECS_PER_DAY
-}
 
 fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
@@ -912,23 +915,38 @@ impl InvoiceContract {
             .get(&DataKey::DailyInvoiceLimit)
             .unwrap_or(MAX_INVOICES_PER_DAY);
         let now = env.ledger().timestamp();
-        let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
-        let next_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
-        let next_reset: u64 = env.storage().instance().get(&next_reset_key).unwrap_or(0);
-        let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
-        if now >= next_reset {
-            daily_count = 0;
-            env.storage()
-                .instance()
-                .set(&next_reset_key, &next_day_boundary(now));
+
+        // Sliding-window rate limiter: count only invoices created in the last
+        // SECS_PER_DAY seconds. This prevents the fixed-window midnight-boundary
+        // exploit where an SME could straddle a UTC day change and submit twice
+        // the daily quota within a few minutes (#577).
+        let ts_key = DataKey::InvoiceTimestamps(owner.clone());
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ts_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Retain only timestamps strictly within the 24-hour window.
+        let window_start = now.saturating_sub(SECS_PER_DAY);
+        let mut fresh: Vec<u64> = Vec::new(&env);
+        for i in 0..timestamps.len() {
+            let ts = timestamps.get(i).unwrap();
+            if ts > window_start {
+                fresh.push_back(ts);
+            }
         }
-        if daily_count >= daily_limit {
+
+        if fresh.len() >= daily_limit {
             panic!("daily invoice limit exceeded");
         }
 
         bump_instance(&env);
-        daily_count += 1;
-        env.storage().instance().set(&daily_count_key, &daily_count);
+        fresh.push_back(now);
+        env.storage().persistent().set(&ts_key, &fresh);
+        env.storage()
+            .persistent()
+            .extend_ttl(&ts_key, SLIDING_WINDOW_TTL_LEDGERS, SLIDING_WINDOW_TTL_LEDGERS);
 
         let count: u64 = env
             .storage()
@@ -2261,8 +2279,8 @@ impl InvoiceContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events, Ledger},
-        Env, IntoVal,
+        testutils::{Address as _, Ledger},
+        Env,
     };
 
     mod mock_pool_true {
@@ -2814,18 +2832,17 @@ mod test {
     }
 
     #[test]
-    fn test_daily_reset_anchored_to_day_boundary_no_drift() {
+    fn test_sliding_window_full_quota_available_after_24_hours() {
+        // Sliding window: invoices older than 86 400 s no longer count against
+        // the limit, so a full new quota is available after one window passes.
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
         let due = |env: &Env| env.ledger().timestamp() + 86_400;
-        // Simulate 7 daily resets (one week) to verify no drift
-        // This is sufficient to demonstrate the reset boundary logic works correctly
-        for day in 0..7 {
-            let ts = 1_000_000 + day * 86_400;
-            env.ledger().with_mut(|l| l.timestamp = ts as u64);
-            // Creating an invoice triggers the reset check
+
+        // Exhaust the daily limit at t=1_000_000.
+        for _ in 0..10 {
             client.create_invoice(
                 &sme,
                 &String::from_str(&env, "D"),
@@ -2835,20 +2852,67 @@ mod test {
                 &String::from_str(&env, "h"),
                 &String::from_str(&env, "https://example.com/meta"),
             );
-            // First invoice after reset should succeed (daily_count was reset to 0)
-            // Verify by checking we can create up to the limit (reduced to 3 for speed)
-            for _ in 1..3 {
-                client.create_invoice(
-                    &sme,
-                    &String::from_str(&env, "D"),
-                    &100i128,
-                    &due(&env),
-                    &String::from_str(&env, "i"),
-                    &String::from_str(&env, "h"),
-                    &String::from_str(&env, "https://example.com/meta"),
-                );
-            }
         }
+
+        // Advance exactly 86 401 s — window_start = 1_086_401 - 86_400 = 1_000_001,
+        // so all earlier timestamps (1_000_000) fall outside the window.
+        env.ledger().with_mut(|l| l.timestamp = 1_086_401);
+
+        // A full quota of 10 should be available again.
+        for _ in 0..10 {
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due(&env),
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "daily invoice limit exceeded")]
+    fn test_midnight_boundary_exploit_blocked() {
+        // #577: an SME that exhausts the quota just before UTC midnight must not
+        // be able to submit more invoices immediately after midnight crosses.
+        // The sliding window covers any 86 400 s span, not just a UTC calendar day.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Start 60 s before UTC midnight (ts = 86_340).
+        env.ledger().with_mut(|l| l.timestamp = 86_340);
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due = |env: &Env| env.ledger().timestamp() + 86_400;
+
+        // Batch 1: exhaust the full daily quota just before midnight.
+        for _ in 0..10 {
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due(&env),
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+                &String::from_str(&env, "https://example.com/meta"),
+            );
+        }
+
+        // Advance 60 s past midnight — still inside the 86 400 s window
+        // (window_start = 86_460 - 86_400 = 60; ts=86_340 > 60, so still counted).
+        env.ledger().with_mut(|l| l.timestamp = 86_460);
+
+        // The 11th invoice must be rejected even though the calendar day changed.
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &100i128,
+            &due(&env),
+            &String::from_str(&env, "i"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
     }
 
     #[test]
@@ -2874,14 +2938,16 @@ mod test {
 
     #[test]
     fn test_daily_reset_after_gap_provides_clean_window() {
-        // #368: SME who hasn't submitted for 5 days gets a clean 24-hour window on next submission
+        // SME who hasn't submitted for 5 days gets a clean 24-hour window:
+        // the 5-day-old timestamp is well outside the 86 400 s sliding window
+        // so a full new quota of 10 is available.
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 86_400;
 
-        // Day 1: Create 1 invoice
+        // Create 1 invoice at t=1_000_000.
         client.create_invoice(
             &sme,
             &String::from_str(&env, "D"),
@@ -2892,12 +2958,12 @@ mod test {
             &String::from_str(&env, "https://example.com/meta"),
         );
 
-        // Jump forward 5 days (432_000 seconds)
-        let new_timestamp = env.ledger().timestamp() + (5 * 86400u64);
+        // Jump forward 5 days (432_000 s): window_start = 1_432_000 - 86_400 = 1_345_600,
+        // the earlier timestamp 1_000_000 is outside the window.
+        let new_timestamp = env.ledger().timestamp() + (5 * 86_400u64);
         env.ledger().with_mut(|l| l.timestamp = new_timestamp);
 
-        // Day 6: Reset should have occurred; should be able to create 10 invoices (full daily limit)
-        // If the bug exists and reset_time wasn't set to now, this would fail
+        // Full quota of 10 must be available.
         for _ in 0..10 {
             client.create_invoice(
                 &sme,
