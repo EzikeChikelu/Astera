@@ -234,6 +234,34 @@ impl ScoreThresholds {
     }
 }
 
+/// Returned by `get_credit_score`. Includes the current config version alongside the
+/// stored score so callers can detect staleness in a single call without a separate
+/// `get_scoring_config()` round-trip.
+///
+/// `is_stale` is true when `score_version` (the config version active when the score
+/// was last computed) does not match `config_version` (the config version now active).
+/// A stale flag means the stored score was computed under different scoring parameters
+/// and should be treated as approximate until the SME's next payment is recorded.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreditScoreResponse {
+    pub sme: Address,
+    pub score: u32,
+    pub total_invoices: u32,
+    pub paid_on_time: u32,
+    pub paid_late: u32,
+    pub defaulted: u32,
+    pub total_volume: i128,
+    pub average_payment_days: i64,
+    pub last_updated: u64,
+    /// Config version that was active when this score was last computed.
+    pub score_version: u32,
+    /// Config version currently active on the contract.
+    pub config_version: u32,
+    /// True when `score_version != config_version` — the score is stale.
+    pub is_stale: bool,
+}
+
 #[contracttype]
 pub enum DataKey {
     CreditScore(Address),
@@ -752,8 +780,23 @@ impl CreditScoreContract {
         );
     }
 
-    pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
-        Self::get_or_create_credit_data(&env, &sme)
+    pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
+        let data = Self::get_or_create_credit_data(&env, &sme);
+        let config_version = load_scoring_config(&env).core.score_version;
+        CreditScoreResponse {
+            sme: data.sme,
+            score: data.score,
+            total_invoices: data.total_invoices,
+            paid_on_time: data.paid_on_time,
+            paid_late: data.paid_late,
+            defaulted: data.defaulted,
+            total_volume: data.total_volume,
+            average_payment_days: data.average_payment_days,
+            last_updated: data.last_updated,
+            score_version: data.score_version,
+            config_version,
+            is_stale: data.score_version != config_version,
+        }
     }
 
     pub fn get_payment_history(env: Env, sme: Address) -> Vec<PaymentRecord> {
@@ -2626,5 +2669,184 @@ mod test {
         let (client, admin, _invoice, _pool) = setup(&env);
         let valid_hash = BytesN::from_array(&env, &[7u8; 32]);
         client.propose_upgrade(&admin, &valid_hash);
+    }
+
+    // ── #573: config-version staleness detection ──────────────────────────────
+
+    #[test]
+    fn test_get_credit_score_returns_config_version() {
+        // get_credit_score must expose the current config version so consumers
+        // can detect staleness without a separate get_scoring_config() call.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let resp = client.get_credit_score(&sme);
+        // Default config starts at score_version = 1.
+        assert_eq!(
+            resp.config_version, 1,
+            "config_version should be 1 after init"
+        );
+        assert_eq!(
+            resp.score_version, 1,
+            "fresh SME score_version should equal config_version"
+        );
+        assert!(!resp.is_stale, "fresh score must not be stale");
+    }
+
+    #[test]
+    fn test_score_not_stale_after_payment_under_current_config() {
+        // A score computed under the current config is not stale.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &200_000u64,
+            &150_000u64,
+        );
+
+        let resp = client.get_credit_score(&sme);
+        assert_eq!(resp.score_version, resp.config_version);
+        assert!(
+            !resp.is_stale,
+            "score computed under current config must not be stale"
+        );
+    }
+
+    #[test]
+    fn test_score_flagged_stale_after_config_update() {
+        // After the scoring config is updated (score_version bumped), any SME whose
+        // score was computed under the old config must be flagged as stale.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        // Record a payment under config v1.
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &200_000u64,
+            &150_000u64,
+        );
+        let before = client.get_credit_score(&sme);
+        assert!(
+            !before.is_stale,
+            "score should be current before config change"
+        );
+        assert_eq!(before.score_version, 1);
+        assert_eq!(before.config_version, 1);
+
+        // Admin updates scoring config, bumping score_version to 2.
+        let mut new_config = client.get_scoring_config();
+        new_config.core.score_version = 2;
+        client.set_scoring_config(&admin, &new_config);
+
+        // The stored score was computed under v1 but the contract now runs v2.
+        let after = client.get_credit_score(&sme);
+        assert_eq!(
+            after.score_version, 1,
+            "score_version must reflect when score was computed"
+        );
+        assert_eq!(
+            after.config_version, 2,
+            "config_version must reflect current config"
+        );
+        assert!(
+            after.is_stale,
+            "score computed under v1 must be stale under v2 config"
+        );
+    }
+
+    #[test]
+    fn test_score_no_longer_stale_after_new_payment_under_new_config() {
+        // Once a new payment is recorded under the new config the score is current again.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        // Payment under v1.
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &200_000u64,
+            &150_000u64,
+        );
+
+        // Bump config to v2.
+        let mut new_config = client.get_scoring_config();
+        new_config.core.score_version = 2;
+        client.set_scoring_config(&admin, &new_config);
+
+        // Confirm stale.
+        assert!(client.get_credit_score(&sme).is_stale);
+
+        // New payment recorded under v2 — score is recomputed under the new config.
+        client.record_payment(
+            &pool,
+            &2,
+            &sme,
+            &1_000_000_000i128,
+            &200_000u64,
+            &150_000u64,
+        );
+
+        let resp = client.get_credit_score(&sme);
+        assert_eq!(
+            resp.score_version, 2,
+            "score_version must advance to new config version"
+        );
+        assert_eq!(resp.config_version, 2);
+        assert!(
+            !resp.is_stale,
+            "score recomputed under v2 must not be stale"
+        );
+    }
+
+    #[test]
+    fn test_new_sme_always_current_even_after_config_update() {
+        // An SME with no history has a synthetic initial record seeded from the
+        // current config, so their score_version always matches config_version.
+        //
+        // This relies on `get_or_create_credit_data` initialising new records with
+        // `score_version: scoring_config.core.score_version` (i.e. the version
+        // currently stored on-chain), not a hard-coded 1. If that ever changes,
+        // every new SME created after a config bump would incorrectly appear stale
+        // on first access.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        // Bump config to v2 before the SME ever appears.
+        let mut new_config = client.get_scoring_config();
+        new_config.core.score_version = 2;
+        client.set_scoring_config(&admin, &new_config);
+
+        let new_sme = Address::generate(&env);
+        let resp = client.get_credit_score(&new_sme);
+        // score_version == 2 here because get_or_create_credit_data seeds new
+        // records from the active scoring config, not from a constant.
+        assert_eq!(resp.config_version, 2);
+        assert_eq!(resp.score_version, 2);
+        assert!(!resp.is_stale);
     }
 }
