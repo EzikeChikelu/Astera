@@ -2825,6 +2825,12 @@ mod test {
     fn test_new_sme_always_current_even_after_config_update() {
         // An SME with no history has a synthetic initial record seeded from the
         // current config, so their score_version always matches config_version.
+        //
+        // This relies on `get_or_create_credit_data` initialising new records with
+        // `score_version: scoring_config.core.score_version` (i.e. the version
+        // currently stored on-chain), not a hard-coded 1. If that ever changes,
+        // every new SME created after a config bump would incorrectly appear stale
+        // on first access.
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2837,6 +2843,8 @@ mod test {
 
         let new_sme = Address::generate(&env);
         let resp = client.get_credit_score(&new_sme);
+        // score_version == 2 here because get_or_create_credit_data seeds new
+        // records from the active scoring config, not from a constant.
         assert_eq!(resp.config_version, 2);
         assert_eq!(resp.score_version, 2);
         assert!(!resp.is_stale);
