@@ -17,6 +17,7 @@ import {
   getInvoiceCount,
   getInvoiceMetadata,
   getFundedInvoice,
+  getCreditScoreStatus,
 } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
@@ -59,6 +60,7 @@ function DashboardContent() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isScoreStale, setIsScoreStale] = useState(false);
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -139,7 +141,7 @@ function DashboardContent() {
   // Reset to first page whenever filters or sort change
   useEffect(() => {
     if (queryHydrated) setPage(0);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, statusFilters, sort]);
 
   useEffect(() => {
@@ -264,6 +266,13 @@ function DashboardContent() {
     }
     loadInvoices();
   }, [wallet.connected, wallet.address, loadInvoices]);
+
+  useEffect(() => {
+    if (!wallet.address) return;
+    getCreditScoreStatus(wallet.address).then((result) => {
+      if (result) setIsScoreStale(result.isStale);
+    });
+  }, [wallet.address]);
 
   const stats = {
     total: invoices.length,
@@ -658,6 +667,7 @@ function DashboardContent() {
                   funded={stats.funded}
                   defaulted={stats.defaulted}
                   totalVolume={stats.totalVolume}
+                  isStale={isScoreStale}
                   paymentHistory={invoices
                     .filter(
                       (row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted',

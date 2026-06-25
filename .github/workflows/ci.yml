@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        contract: [invoice, credit_score]
+        contract: [invoice, credit_score, share]
     steps:
       - uses: actions/checkout@v6
 

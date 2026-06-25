@@ -4,6 +4,7 @@ import {
   rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
+  CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   NETWORK,
   simulateTx,
@@ -44,6 +45,7 @@ export type {
   InvoiceStatus as InvoiceStatusAbi,
   InvoiceMetadata as InvoiceMetadataAbi,
 } from '@/src/generated/invoice';
+export type { CreditScoreResponse } from '@/src/generated/credit_score';
 
 // ── Contract ID validation (#399) ────────────────────────────────────────────
 
@@ -1010,6 +1012,27 @@ export async function buildDepositCollateralTx(params: {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- Credit Score Contract ----
+
+export async function getCreditScoreStatus(
+  sme: string,
+): Promise<{ isStale: boolean; score: number } | null> {
+  if (!CREDIT_SCORE_CONTRACT_ID) return null;
+  try {
+    const sim = await simulateTx(
+      CREDIT_SCORE_CONTRACT_ID,
+      'get_credit_score',
+      [new Address(sme).toScVal()],
+      sme,
+    );
+    const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+    const data = scValToNative(result!.retval) as { score: number; is_stale: boolean };
+    return { isStale: Boolean(data.is_stale), score: Number(data.score) };
+  } catch {
+    return null;
+  }
 }
 
 // ---- Governance ----

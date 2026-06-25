@@ -36,7 +36,9 @@ fn setup_pool_env() -> (Env, FundingPoolClient<'static>, Address, Address) {
 
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let invoice_contract = Address::generate(&env);
 
     // Mint USDC for testing
@@ -79,7 +81,8 @@ fn bench_mark_paid(c: &mut Criterion) {
                 let due_date = env.ledger().timestamp() + 2_592_000;
                 let description = SorobanString::from_str(&env, "Invoice for services");
 
-                let invoice_id = client.create_invoice(&owner, &debtor, &amount, &due_date, &description);
+                let invoice_id =
+                    client.create_invoice(&owner, &debtor, &amount, &due_date, &description);
                 client.mark_funded(&invoice_id, &pool);
 
                 (env, client, invoice_id, pool)
@@ -98,7 +101,7 @@ fn bench_deposit(c: &mut Criterion) {
             || {
                 let (env, client, _admin, usdc_id) = setup_pool_env();
                 let investor = Address::generate(&env);
-                
+
                 // Mint USDC to investor
                 soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
                     .mint(&investor, &5_000_000_000);

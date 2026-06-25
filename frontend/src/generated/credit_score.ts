@@ -70,21 +70,26 @@ export interface CreditScoreData {
 }
 
 /**
- * Response type for get_credit_score.
+ * Returned by `get_credit_score`. Extends `CreditScoreData` with two additive
+ * fields so callers can detect staleness in a single call without a separate
+ * `get_scoring_config()` round-trip.
  *
- * Bundles the SME's CreditScoreData with the contract's currently active
- * config_version. When `config_version > score.score_version` the stored
- * score was computed under an older config and should be treated as stale.
+ * `is_stale` is `true` when `score_version` (config version active when the
+ * score was last computed) differs from `config_version` (currently active).
  */
 export interface CreditScoreResponse {
-  /** The SME's persisted credit-score record. */
-  score: CreditScoreData;
-  /**
-   * The scoring-config version that is currently active on-chain.
-   * Compare with `score.score_version` to detect staleness:
-   * `config_version > score.score_version` → score is stale.
-   */
+  average_payment_days: i64;
   config_version: u32;
+  defaulted: u32;
+  is_stale: boolean;
+  last_updated: u64;
+  paid_late: u32;
+  paid_on_time: u32;
+  score: u32;
+  score_version: u32;
+  sme: string;
+  total_invoices: u32;
+  total_volume: i128;
 }
 
 

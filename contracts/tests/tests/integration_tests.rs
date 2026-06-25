@@ -8,15 +8,11 @@ use std::panic;
 
 // Import contract clients
 mod invoice {
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/invoice.wasm"
-    );
+    soroban_sdk::contractimport!(file = "../../target/wasm32-unknown-unknown/release/invoice.wasm");
 }
 
 mod pool {
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/pool.wasm"
-    );
+    soroban_sdk::contractimport!(file = "../../target/wasm32-unknown-unknown/release/pool.wasm");
 }
 
 mod credit_score {
@@ -26,9 +22,7 @@ mod credit_score {
 }
 
 mod share {
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/share.wasm"
-    );
+    soroban_sdk::contractimport!(file = "../../target/wasm32-unknown-unknown/release/share.wasm");
 }
 
 /// Integration test: Complete invoice lifecycle with pool funding and credit scoring
@@ -48,7 +42,9 @@ fn test_complete_invoice_lifecycle() {
     let pool_id = env.register_contract_wasm(None, pool::WASM);
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let share_id = env.register_contract_wasm(None, share::WASM);
-    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
 
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let pool_client = pool::Client::new(&env, &pool_id);
@@ -56,13 +52,25 @@ fn test_complete_invoice_lifecycle() {
     let share_client = share::Client::new(&env, &share_id);
 
     // Initialize contracts
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
-    share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &30u64 * 86_400u64,
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
 
     // Mint tokens to investor and SME
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // Step 1: Investor deposits into pool
@@ -83,8 +91,15 @@ fn test_complete_invoice_lifecycle() {
     assert_eq!(inv_id, 1);
 
     // Step 3: Pool funds the invoice
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
-    
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+
     let invoice = invoice_client.get_invoice(&inv_id);
     assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
 
@@ -103,8 +118,15 @@ fn test_complete_invoice_lifecycle() {
     assert_eq!(invoice.status, invoice::InvoiceStatus::Paid);
 
     // Step 6: Record payment in credit score
-    credit_client.record_payment(&pool_id, &inv_id, &sme, &2_000_000_000i128, &due_date, &env.ledger().timestamp());
-    
+    credit_client.record_payment(
+        &pool_id,
+        &inv_id,
+        &sme,
+        &2_000_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+
     let credit_data = credit_client.get_credit_score(&sme);
     assert_eq!(credit_data.total_invoices, 1);
     assert_eq!(credit_data.paid_on_time, 1);
@@ -113,7 +135,7 @@ fn test_complete_invoice_lifecycle() {
     // Step 7: Investor withdraws with yield
     let shares = share_client.balance(&investor);
     pool_client.withdraw(&investor, &usdc_id, &shares);
-    
+
     let investor_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
     assert!(investor_balance > 5_000_000_000i128); // Should have earned yield
 }
@@ -134,22 +156,36 @@ fn test_default_with_grace_period() {
     let pool_id = env.register_contract_wasm(None, pool::WASM);
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let share_id = env.register_contract_wasm(None, share::WASM);
-    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
 
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let pool_client = pool::Client::new(&env, &pool_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
-    share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &30u64 * 86_400u64,
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
 
     let grace_period = invoice_client.get_grace_period() as u64;
     let grace_secs = grace_period * 86_400;
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
 
     pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
 
@@ -163,18 +199,27 @@ fn test_default_with_grace_period() {
         &String::from_str(&env, "hash123"),
     );
 
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
     invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Move past due date but within grace period
-    env.ledger().with_mut(|l| l.timestamp = due_date + grace_secs - 3600);
+    env.ledger()
+        .with_mut(|l| l.timestamp = due_date + grace_secs - 3600);
 
     // Note: Would fail here but we can't test panic without std in integration tests
     // Just verify we're within grace period
     assert!(env.ledger().timestamp() < due_date + grace_secs);
 
     // Move past grace period
-    env.ledger().with_mut(|l| l.timestamp = due_date + grace_secs + 1);
+    env.ledger()
+        .with_mut(|l| l.timestamp = due_date + grace_secs + 1);
 
     // Should succeed now
     invoice_client.mark_defaulted(&inv_id, &pool_id);
@@ -183,7 +228,7 @@ fn test_default_with_grace_period() {
 
     // Record default in credit score
     credit_client.record_default(&pool_id, &inv_id, &sme, &2_000_000_000i128, &due_date);
-    
+
     let credit_data = credit_client.get_credit_score(&sme);
     assert_eq!(credit_data.defaulted, 1);
     assert!(credit_data.score < 500);
@@ -207,20 +252,35 @@ fn test_multiple_invoices_yield_distribution() {
     let pool_id = env.register_contract_wasm(None, pool::WASM);
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let share_id = env.register_contract_wasm(None, share::WASM);
-    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
 
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let pool_client = pool::Client::new(&env, &pool_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
-    share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &30u64 * 86_400u64,
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor1, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor2, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme1, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme2, &10_000_000_000i128);
 
@@ -233,7 +293,7 @@ fn test_multiple_invoices_yield_distribution() {
 
     // Create and fund two invoices
     let due_date = env.ledger().timestamp() + 30 * 86_400;
-    
+
     let inv1 = invoice_client.create_invoice(
         &sme1,
         &String::from_str(&env, "Company A"),
@@ -242,7 +302,7 @@ fn test_multiple_invoices_yield_distribution() {
         &String::from_str(&env, "Invoice #001"),
         &String::from_str(&env, "hash1"),
     );
-    
+
     let inv2 = invoice_client.create_invoice(
         &sme2,
         &String::from_str(&env, "Company B"),
@@ -252,8 +312,22 @@ fn test_multiple_invoices_yield_distribution() {
         &String::from_str(&env, "hash2"),
     );
 
-    pool_client.fund_invoice(&admin, &inv1, &3_000_000_000i128, &sme1, &due_date, &usdc_id);
-    pool_client.fund_invoice(&admin, &inv2, &2_000_000_000i128, &sme2, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv1,
+        &3_000_000_000i128,
+        &sme1,
+        &due_date,
+        &usdc_id,
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &inv2,
+        &2_000_000_000i128,
+        &sme2,
+        &due_date,
+        &usdc_id,
+    );
 
     invoice_client.mark_funded(&inv1, &pool_id);
     invoice_client.mark_funded(&inv2, &pool_id);
@@ -268,8 +342,22 @@ fn test_multiple_invoices_yield_distribution() {
     invoice_client.mark_paid(&inv1, &pool_id);
     invoice_client.mark_paid(&inv2, &pool_id);
 
-    credit_client.record_payment(&pool_id, &inv1, &sme1, &3_000_000_000i128, &due_date, &env.ledger().timestamp());
-    credit_client.record_payment(&pool_id, &inv2, &sme2, &2_000_000_000i128, &due_date, &env.ledger().timestamp());
+    credit_client.record_payment(
+        &pool_id,
+        &inv1,
+        &sme1,
+        &3_000_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+    credit_client.record_payment(
+        &pool_id,
+        &inv2,
+        &sme2,
+        &2_000_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
 
     // Verify credit scores
     let credit1 = credit_client.get_credit_score(&sme1);
@@ -280,7 +368,7 @@ fn test_multiple_invoices_yield_distribution() {
     // Both investors withdraw proportionally
     let shares1 = share_client.balance(&investor1);
     let shares2 = share_client.balance(&investor2);
-    
+
     pool_client.withdraw(&investor1, &usdc_id, &shares1);
     pool_client.withdraw(&investor2, &usdc_id, &shares2);
 
@@ -308,19 +396,33 @@ fn test_state_consistency() {
     let pool_id = env.register_contract_wasm(None, pool::WASM);
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let share_id = env.register_contract_wasm(None, share::WASM);
-    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
 
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let pool_client = pool::Client::new(&env, &pool_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64, &7u32);
-    share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &30u64 * 86_400u64,
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
@@ -341,7 +443,14 @@ fn test_state_consistency() {
     assert_eq!(stats.total_invoices, 1);
     assert_eq!(stats.active_invoices, 1);
 
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
     invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Verify pool state consistency
@@ -370,8 +479,15 @@ fn test_state_consistency() {
     assert_eq!(totals.total_deployed, 0);
     assert!(totals.pool_value > 5_000_000_000i128); // Includes yield
 
-    credit_client.record_payment(&pool_id, &inv_id, &sme, &2_000_000_000i128, &due_date, &env.ledger().timestamp());
-    
+    credit_client.record_payment(
+        &pool_id,
+        &inv_id,
+        &sme,
+        &2_000_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+
     // Verify credit score state
     let credit_data = credit_client.get_credit_score(&sme);
     assert_eq!(credit_data.total_invoices, 1);
@@ -379,7 +495,9 @@ fn test_state_consistency() {
     assert!(credit_client.is_invoice_processed(&inv_id));
 }
 
-fn setup_pool(env: &Env) -> (
+fn setup_pool(
+    env: &Env,
+) -> (
     pool::Client<'_>,
     share::Client<'_>,
     Address, // admin
@@ -411,7 +529,13 @@ fn setup_pool(env: &Env) -> (
 
 fn invoice_client_init(env: &Env, invoice_id: &Address, admin: &Address, pool_id: &Address) {
     let invoice_client = invoice::Client::new(env, invoice_id);
-    invoice_client.initialize(admin, pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        admin,
+        pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
 }
 
 /// Integration test: Collateral post and release on full repayment
@@ -437,7 +561,13 @@ fn test_collateral_post_and_release() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -453,8 +583,7 @@ fn test_collateral_post_and_release() {
     let required_col = pool_client.required_collateral_for(&principal);
     assert_eq!(required_col, 1_000); // 20% of 5_000
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &10_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&sme, &(principal * 2 + required_col));
 
@@ -493,7 +622,10 @@ fn test_collateral_post_and_release() {
 
     let sme_after_repay = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
     // Net: paid amount_due but got required_col back
-    assert_eq!(sme_after_repay, sme_before_repay - amount_due + required_col);
+    assert_eq!(
+        sme_after_repay,
+        sme_before_repay - amount_due + required_col
+    );
 }
 
 /// Integration test: Collateral seized on default (no repayment past grace period)
@@ -519,7 +651,13 @@ fn test_collateral_seize_on_default() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -536,10 +674,8 @@ fn test_collateral_seize_on_default() {
     let principal: i128 = 5_000;
     let required_col = pool_client.required_collateral_for(&principal);
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &10_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &required_col);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
 
     pool_client.deposit(&investor, &usdc_id, &10_000i128);
     pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
@@ -563,7 +699,10 @@ fn test_collateral_seize_on_default() {
     // Pool value increased by collateral, deployed reduced by principal
     let tt_after = pool_client.get_token_totals(&usdc_id);
     assert_eq!(tt_after.pool_value, tt_before.pool_value + required_col);
-    assert_eq!(tt_after.total_deployed, tt_before.total_deployed - principal);
+    assert_eq!(
+        tt_after.total_deployed,
+        tt_before.total_deployed - principal
+    );
 
     // SME cannot seize again (collateral already settled)
     let result = pool_client.try_seize_collateral(&admin, &1u64);
@@ -583,13 +722,33 @@ fn test_credit_score_on_time_payment() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
-    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME"),
+        &2_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
     let before = credit_client.get_credit_score(&sme);
-    credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date - 100));
+    credit_client.record_payment(
+        &pool,
+        &inv_id,
+        &sme,
+        &2_000i128,
+        &due_date,
+        &(due_date - 100),
+    );
     let after = credit_client.get_credit_score(&sme);
     assert_eq!(after.paid_on_time, 1);
     assert_eq!(after.score - before.score, 30);
@@ -607,12 +766,32 @@ fn test_credit_score_late_payment() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = env.ledger().timestamp() + 30 * 86_400;
-    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME"),
+        &2_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
     let before = credit_client.get_credit_score(&sme);
-    credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date + 3600));
+    credit_client.record_payment(
+        &pool,
+        &inv_id,
+        &sme,
+        &2_000i128,
+        &due_date,
+        &(due_date + 3600),
+    );
     let after = credit_client.get_credit_score(&sme);
     assert_eq!(after.paid_late, 1);
     assert_eq!(after.score - before.score, 15);
@@ -629,10 +808,23 @@ fn test_credit_score_default_penalty() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 200_000u64;
-    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME"),
+        &2_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
     let before = credit_client.get_credit_score(&sme);
     credit_client.record_default(&pool, &inv_id, &sme, &2_000i128, &due_date);
     let after = credit_client.get_credit_score(&sme);
@@ -651,10 +843,23 @@ fn test_payment_history_idempotency() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 200_000u64;
-    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME"),
+        &2_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
     credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date - 1));
     let before = credit_client.get_credit_score(&sme);
     let _ = panic::catch_unwind(|| {
@@ -675,12 +880,39 @@ fn test_credit_score_multiple_invoices() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 300_000u64;
-    let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
-    let i2 = invoice_client.create_invoice(&sme, &String::from_str(&env, "B"), &1_000i128, &due_date, &String::from_str(&env, "i2"), &String::from_str(&env, "h2"));
-    let i3 = invoice_client.create_invoice(&sme, &String::from_str(&env, "C"), &1_000i128, &due_date, &String::from_str(&env, "i3"), &String::from_str(&env, "h3"));
+    let i1 = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "A"),
+        &1_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
+    let i2 = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "B"),
+        &1_000i128,
+        &due_date,
+        &String::from_str(&env, "i2"),
+        &String::from_str(&env, "h2"),
+    );
+    let i3 = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "C"),
+        &1_000i128,
+        &due_date,
+        &String::from_str(&env, "i3"),
+        &String::from_str(&env, "h3"),
+    );
     credit_client.record_payment(&pool, &i1, &sme, &1_000i128, &due_date, &(due_date - 10));
     credit_client.record_payment(&pool, &i2, &sme, &1_000i128, &due_date, &(due_date - 10));
     credit_client.record_default(&pool, &i3, &sme, &1_000i128, &due_date);
@@ -699,11 +931,31 @@ fn test_get_payment_history() {
     let credit_id = env.register_contract_wasm(None, credit_score::WASM);
     let invoice_client = invoice::Client::new(&env, &invoice_id);
     let credit_client = credit_score::Client::new(&env, &credit_id);
-    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     credit_client.initialize(&admin, &invoice_id, &pool);
     let due_date = 300_000u64;
-    let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
-    let i2 = invoice_client.create_invoice(&sme, &String::from_str(&env, "B"), &1_000i128, &due_date, &String::from_str(&env, "i2"), &String::from_str(&env, "h2"));
+    let i1 = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "A"),
+        &1_000i128,
+        &due_date,
+        &String::from_str(&env, "i1"),
+        &String::from_str(&env, "h1"),
+    );
+    let i2 = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "B"),
+        &1_000i128,
+        &due_date,
+        &String::from_str(&env, "i2"),
+        &String::from_str(&env, "h2"),
+    );
     credit_client.record_payment(&pool, &i1, &sme, &1_000i128, &due_date, &(due_date - 10));
     credit_client.record_default(&pool, &i2, &sme, &1_000i128, &due_date);
     let history = credit_client.get_payment_history(&sme);
@@ -733,7 +985,13 @@ fn test_collateral_not_required_below_threshold() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -748,10 +1006,8 @@ fn test_collateral_not_required_below_threshold() {
     let principal: i128 = 500;
     assert_eq!(pool_client.required_collateral_for(&principal), 0);
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &10_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &principal * 2);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &principal * 2);
 
     pool_client.deposit(&investor, &usdc_id, &10_000i128);
 
@@ -793,7 +1049,13 @@ fn test_collateral_error_double_deposit() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -835,7 +1097,13 @@ fn test_partial_repayment_lifecycle() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -909,7 +1177,13 @@ fn test_reserve_builds_from_fees_and_covers_default() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -933,10 +1207,8 @@ fn test_reserve_builds_from_fees_and_covers_default() {
     let required_col = pool_client.required_collateral_for(&principal);
     assert_eq!(required_col, 1_000);
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &20_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &20_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &20_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &20_000i128);
 
     pool_client.deposit(&investor, &usdc_id, &20_000i128);
 
@@ -974,7 +1246,10 @@ fn test_reserve_builds_from_fees_and_covers_default() {
     pool_client.fund_invoice(&admin, &2u64, &principal, &sme, &due_date2, &usdc_id);
 
     let reserve_before_default = pool_client.get_reserve_balance(&usdc_id);
-    assert!(reserve_before_default > 0, "Reserve should have been built from first repayment");
+    assert!(
+        reserve_before_default > 0,
+        "Reserve should have been built from first repayment"
+    );
 
     // Advance past due date and mark as defaulted
     env.ledger()
@@ -990,7 +1265,10 @@ fn test_reserve_builds_from_fees_and_covers_default() {
 
     // Verify active_funded_invoices was decremented after seizure
     let stats_after = pool_client.get_storage_stats();
-    assert_eq!(stats_after.active_funded_invoices, 0, "Active invoices should be 0 after seizure");
+    assert_eq!(
+        stats_after.active_funded_invoices, 0,
+        "Active invoices should be 0 after seizure"
+    );
 
     // Verify reserve was drawn before investors bear the loss
     // Without reserve: pool_value would = tt_before.pool_value + collateral - principal
@@ -1048,7 +1326,13 @@ fn test_reserve_admin_controls() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -1070,10 +1354,8 @@ fn test_reserve_admin_controls() {
     pool_client.set_factoring_fee(&admin, &500u32);
 
     let principal: i128 = 10_000;
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &20_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &20_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &20_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &20_000i128);
 
     pool_client.deposit(&investor, &usdc_id, &20_000i128);
 
@@ -1130,7 +1412,13 @@ fn test_within_grace_period_not_defaultable() {
     let pool_client = pool::Client::new(&env, &pool_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     share_client.initialize(
         &admin,
         &7u32,
@@ -1152,9 +1440,17 @@ fn test_within_grace_period_not_defaultable() {
         &String::from_str(&env, "hash123"),
     );
 
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
     pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
     invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Advance to just past due date but within grace period
@@ -1169,7 +1465,10 @@ fn test_within_grace_period_not_defaultable() {
     let result = panic::catch_unwind(|| {
         invoice_client.mark_defaulted(&inv_id, &pool_id);
     });
-    assert!(result.is_err(), "mark_defaulted should panic within grace period");
+    assert!(
+        result.is_err(),
+        "mark_defaulted should panic within grace period"
+    );
 }
 
 /// Integration test: Multi-token deposit with EURC at 1.08 USDC, yield distribution
@@ -1217,7 +1516,13 @@ fn test_multi_token_deposit_and_yield() {
         &String::from_str(&env, "sEURC"),
     );
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
 
@@ -1229,8 +1534,7 @@ fn test_multi_token_deposit_and_yield() {
         .mint(&investor_a, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
         .mint(&investor_b, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     pool_client.deposit(&investor_a, &usdc_id, &1_000_000_000i128);
     let totals_usdc = pool_client.get_token_totals(&usdc_id);
@@ -1242,7 +1546,10 @@ fn test_multi_token_deposit_and_yield() {
 
     let totals_usdc = pool_client.get_token_totals(&usdc_id);
     let totals_eurc = pool_client.get_token_totals(&eurc_id);
-    assert_eq!(totals_usdc.pool_value + totals_eurc.pool_value, 2_080_000_000i128);
+    assert_eq!(
+        totals_usdc.pool_value + totals_eurc.pool_value,
+        2_080_000_000i128
+    );
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
@@ -1274,7 +1581,10 @@ fn test_multi_token_deposit_and_yield() {
     let shares_a = share_usdc_client.balance(&investor_a);
     pool_client.withdraw(&investor_a, &usdc_id, &shares_a);
     let balance_a = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor_a);
-    assert!(balance_a > 5_000_000_000i128, "Investor A should have earned yield in USDC");
+    assert!(
+        balance_a > 5_000_000_000i128,
+        "Investor A should have earned yield in USDC"
+    );
 
     let shares_b = share_eurc_client.balance(&investor_b);
     pool_client.withdraw(&investor_b, &eurc_id, &shares_b);
@@ -1324,7 +1634,13 @@ fn test_token_removal_with_zero_balances() {
         &String::from_str(&env, "sEURC"),
     );
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
     pool_client.add_token(&admin, &eurc_id, &share_eurc_id);
 
@@ -1385,7 +1701,13 @@ fn test_token_removal_blocked_with_active_deposits() {
         &String::from_str(&env, "sEURC"),
     );
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &(30u64 * 86_400u64), &7u32);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
     pool_client.initialize(&admin, &usdc_id, &share_usdc_id, &invoice_id);
     pool_client.add_token(&admin, &eurc_id, &share_eurc_id);
 

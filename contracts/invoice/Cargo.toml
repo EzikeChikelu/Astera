@@ -16,3 +16,11 @@ proptest = "1.4"
 [[test]]
 name = "fuzz_tests"
 path = "tests/fuzz_tests.rs"
+
+[[test]]
+name = "timeout_tests"
+path = "tests/timeout_tests.rs"
+
+[[test]]
+name = "multi_oracle_tests"
+path = "tests/multi_oracle_tests.rs"

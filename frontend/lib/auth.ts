@@ -2,8 +2,8 @@ import { getFreighter } from '@/lib/freighter';
 
 const TOKEN_KEY = 'astera_jwt';
 
-/** How many seconds before expiry we proactively refresh the token. */
-const REFRESH_MARGIN_SECS = 5 * 60; // 5 minutes
+// How far before expiry we proactively refresh (5 minutes).
+export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 export function setToken(token: string) {
   if (typeof window !== 'undefined') localStorage.setItem(TOKEN_KEY, token);
@@ -18,23 +18,33 @@ export function clearToken() {
   if (typeof window !== 'undefined') localStorage.removeItem(TOKEN_KEY);
 }
 
-/** Decode the expiry from a JWT without verifying the signature. */
-function getTokenExpiry(token: string): number | null {
+/**
+ * Decode the `exp` Unix timestamp from a JWT payload without verifying the
+ * signature. Safe for client-side use — we only need the expiry to know when
+ * to refresh; the server verifies the signature on every authenticated call.
+ */
+export function getTokenExpiry(token: string): number | null {
   try {
-    const payload = token.split('.')[1];
-    if (!payload) return null;
-    const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-    return typeof decoded.exp === 'number' ? decoded.exp : null;
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const json = typeof atob !== 'undefined' ? atob(b64) : Buffer.from(b64, 'base64').toString();
+    const payload = JSON.parse(json) as Record<string, unknown>;
+    return typeof payload.exp === 'number' ? payload.exp : null;
   } catch {
     return null;
   }
 }
 
-/** Returns true when the token is expired or within the refresh margin. */
-function isTokenExpiredOrExpiring(token: string): boolean {
+export function isTokenExpired(token: string): boolean {
   const exp = getTokenExpiry(token);
-  if (exp === null) return true; // treat unparseable tokens as expired
-  return Date.now() / 1000 > exp - REFRESH_MARGIN_SECS;
+  return exp === null || exp <= Math.floor(Date.now() / 1000);
+}
+
+export function isTokenExpiringSoon(token: string, marginMs = REFRESH_MARGIN_MS): boolean {
+  const exp = getTokenExpiry(token);
+  if (exp === null) return true;
+  return exp * 1000 - Date.now() < marginMs;
 }
 
 export async function requestChallenge(account: string) {
@@ -89,58 +99,44 @@ export async function ensureAuthWithFreighter(address: string) {
 }
 
 /**
- * Proactively refresh the stored token when it is near expiry.
+ * Drop-in replacement for `fetch` on authenticated endpoints.
  *
- * Requires the wallet address so the SEP-10 challenge/response flow can be
- * re-run with Freighter.  Returns the valid token (existing or freshly issued)
- * or null when re-authentication fails.
- */
-export async function maybeRefreshToken(address: string): Promise<string | null> {
-  const token = getToken();
-  if (!token || isTokenExpiredOrExpiring(token)) {
-    const result = await ensureAuthWithFreighter(address);
-    if (result.token) return result.token;
-    // Re-auth failed — clear stale token so callers know to redirect to login
-    clearToken();
-    return null;
-  }
-  return token;
-}
-
-/**
- * Authenticated fetch wrapper with automatic 401 recovery.
- *
- * On a 401 response the SEP-10 challenge/response flow is re-run once to
- * obtain a fresh JWT, then the request is retried with the new token.  If
- * re-authentication fails (wallet disconnected, key changed, etc.) the
- * original 401 response is returned so the caller can redirect the user to
- * the connect-wallet flow.
- *
- * @param url - The URL to fetch.
- * @param opts - Standard `RequestInit` options (headers merged, not replaced).
- * @param address - Stellar public key of the authenticated user.  Required for
- *   automatic re-auth; if omitted the 401 is returned without retrying.
+ * - Proactively re-runs the SEP-10 flow if the stored token is within
+ *   REFRESH_MARGIN_MS of its expiry.
+ * - On a 401 response it attempts a single re-authentication and retries
+ *   the original request with the fresh token.
+ * - If re-auth fails (wallet disconnected, key changed) the 401 response
+ *   is returned as-is so the caller can redirect to the connect-wallet flow.
  */
 export async function authenticatedFetch(
   url: string,
   opts: RequestInit = {},
-  address?: string,
+  address: string,
 ): Promise<Response> {
-  const buildHeaders = (token: string | null): HeadersInit => ({
-    ...(opts.headers as Record<string, string> | undefined),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  });
+  let token = getToken();
 
-  const res = await fetch(url, { ...opts, headers: buildHeaders(getToken()) });
-
-  if (res.status === 401 && address) {
-    // Attempt silent re-authentication via SEP-10
-    const result = await ensureAuthWithFreighter(address);
-    if (result.token) {
-      return fetch(url, { ...opts, headers: buildHeaders(result.token) });
+  if (token && isTokenExpiringSoon(token)) {
+    const refreshed = await ensureAuthWithFreighter(address).catch(() => null);
+    if (refreshed && 'token' in refreshed) {
+      token = refreshed.token as string;
+      setToken(token);
     }
-    // Re-auth failed — clear token and return the 401 so the UI can redirect
-    clearToken();
+  }
+
+  const headers = new Headers(opts.headers as HeadersInit | undefined);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const res = await fetch(url, { ...opts, headers });
+
+  if (res.status === 401) {
+    const refreshed = await ensureAuthWithFreighter(address).catch(() => null);
+    if (refreshed && 'token' in refreshed) {
+      const freshToken = refreshed.token as string;
+      setToken(freshToken);
+      const retryHeaders = new Headers(opts.headers as HeadersInit | undefined);
+      retryHeaders.set('Authorization', `Bearer ${freshToken}`);
+      return fetch(url, { ...opts, headers: retryHeaders });
+    }
   }
 
   return res;
