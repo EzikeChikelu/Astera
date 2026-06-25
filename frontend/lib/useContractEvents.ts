@@ -42,6 +42,12 @@ export function useContractEvents({
   const walletAddress = useStore((s) => s.wallet.address);
   const setRecentEvents = useStore((s) => s.setRecentEvents);
 
+  // Keep a stable ref to onEvent so the SSE effect doesn't rerun on every render
+  const onEventRef = useRef(onEvent);
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  });
+
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
 
@@ -86,7 +92,7 @@ export function useContractEvents({
       const prev = useStore.getState().recentEvents;
       setRecentEvents([storeEvent, ...prev].slice(0, 100));
 
-      onEvent?.(data);
+      onEventRef.current?.(data);
     };
 
     // EventSource auto-reconnects on error — onerror is informational only
@@ -102,7 +108,7 @@ export function useContractEvents({
     };
     // invoiceId and walletAddress intentionally included so the stream
     // reconnects if either changes
-  }, [enabled, invoiceId, walletAddress, setRecentEvents, onEvent]);
+  }, [enabled, invoiceId, walletAddress, setRecentEvents]);
 
   return { connected };
 }
