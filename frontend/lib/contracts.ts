@@ -24,6 +24,7 @@ import type {
   InvestorPosition,
   PoolConfig,
   PoolTokenTotals,
+  WaitEstimate,
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
@@ -247,6 +248,30 @@ export async function getPoolConfig(): Promise<PoolConfig> {
     yieldProposalAt: Number(raw.yield_proposal_at ?? 0),
     yieldTimelockSecs: Number(raw.yield_timelock_secs ?? 0),
     maxSingleInvestorBps: Number(raw.max_single_investor_bps ?? 0),
+    maxWithdrawalQueueAgeDays: Number(raw.max_withdrawal_queue_age_days ?? 0),
+  };
+}
+
+export async function estimateWithdrawalWait(
+  investor: string,
+  token: string,
+): Promise<WaitEstimate | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'estimate_withdrawal_wait',
+    [new Address(investor).toScVal(), new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+
+  const estimate = raw as Record<string, unknown>;
+  return {
+    queuePosition: Number(estimate.queue_position ?? 0),
+    capitalAhead: BigInt(String(estimate.capital_ahead ?? 0)),
+    nearestInvoiceDueDate: Number(estimate.nearest_invoice_due_date ?? 0),
   };
 }
 

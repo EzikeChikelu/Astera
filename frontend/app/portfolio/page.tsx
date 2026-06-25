@@ -9,9 +9,10 @@ import {
   getAcceptedTokens,
   getPoolTokenTotals,
   getExchangeRate,
+  estimateWithdrawalWait,
 } from '@/lib/contracts';
 import { formatUSDC, stablecoinLabel } from '@/lib/stellar';
-import type { PoolTokenTotals } from '@/lib/types';
+import type { PoolTokenTotals, WaitEstimate } from '@/lib/types';
 
 interface PortfolioSnapshot {
   totalDeposited: bigint;
@@ -25,6 +26,7 @@ interface TokenRow {
   token: string;
   totals: PoolTokenTotals;
   position: PortfolioSnapshot | null;
+  waitEstimate: WaitEstimate | null;
   /** Exchange rate in bps (10_000 = 1:1 USD) */
   rateBps: number;
 }
@@ -173,10 +175,11 @@ export default function PortfolioPage() {
 
       const rowData: TokenRow[] = await Promise.all(
         tokens.map(async (token) => {
-          const [totals, rawPos, rateBps] = await Promise.all([
+          const [totals, rawPos, rateBps, waitEstimate] = await Promise.all([
             getPoolTokenTotals(token),
             getInvestorPosition(wallet.address!, token),
             getExchangeRate(token).catch(() => 10_000),
+            estimateWithdrawalWait(wallet.address!, token).catch(() => null),
           ]);
 
           const position: PortfolioSnapshot | null = rawPos
@@ -189,7 +192,7 @@ export default function PortfolioPage() {
               }
             : null;
 
-          return { token, totals, position, rateBps };
+          return { token, totals, position, waitEstimate, rateBps };
         }),
       );
 
@@ -445,9 +448,12 @@ export default function PortfolioPage() {
           {/* Per-token positions (collapsible when > 1 token) */}
           <div className="space-y-4">
             <h2 className="text-white font-semibold text-lg">Token Positions</h2>
-            {rows.map(({ token, position, totals, rateBps }) => {
+            {rows.map(({ token, position, totals, waitEstimate, rateBps }) => {
               const isCollapsed = collapsed[token] ?? false;
               const usdcDeposited = position ? toUsdcEquiv(position.totalDeposited, rateBps) : 0n;
+              const dueDate = waitEstimate?.nearestInvoiceDueDate
+                ? new Date(waitEstimate.nearestInvoiceDueDate * 1000).toLocaleDateString()
+                : 'No active invoice due date';
               return (
                 <div
                   key={token}
@@ -525,6 +531,24 @@ export default function PortfolioPage() {
                           }
                         />
                       </div>
+
+                      {waitEstimate && waitEstimate.queuePosition > 0 && (
+                        <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div>
+                              <p className="text-white font-medium">Withdrawal queue</p>
+                              <p className="text-brand-muted text-xs mt-1">
+                                Position {waitEstimate.queuePosition} with{' '}
+                                {formatUSDC(waitEstimate.capitalAhead)} ahead
+                              </p>
+                            </div>
+                            <div className="text-left sm:text-right">
+                              <p className="text-brand-muted text-xs">Nearest invoice due</p>
+                              <p className="text-white text-sm font-medium">{dueDate}</p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

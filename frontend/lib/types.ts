@@ -62,6 +62,7 @@ export interface PoolConfig {
   yieldTimelockSecs: number;
   // #233: max single-investor concentration
   maxSingleInvestorBps: number;
+  maxWithdrawalQueueAgeDays: number;
 }
 
 export interface PoolTokenTotals {
@@ -69,6 +70,12 @@ export interface PoolTokenTotals {
   totalDeployed: bigint;
   totalPaidOut: bigint;
   totalFeeRevenue: bigint;
+}
+
+export interface WaitEstimate {
+  queuePosition: number;
+  capitalAhead: bigint;
+  nearestInvoiceDueDate: number;
 }
 
 export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';
