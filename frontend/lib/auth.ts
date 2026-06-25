@@ -38,7 +38,7 @@ export function getTokenExpiry(token: string): number | null {
 
 export function isTokenExpired(token: string): boolean {
   const exp = getTokenExpiry(token);
-  return exp === null || exp < Math.floor(Date.now() / 1000);
+  return exp === null || exp <= Math.floor(Date.now() / 1000);
 }
 
 export function isTokenExpiringSoon(token: string, marginMs = REFRESH_MARGIN_MS): boolean {
@@ -117,7 +117,10 @@ export async function authenticatedFetch(
 
   if (token && isTokenExpiringSoon(token)) {
     const refreshed = await ensureAuthWithFreighter(address).catch(() => null);
-    if (refreshed && 'token' in refreshed) token = refreshed.token as string;
+    if (refreshed && 'token' in refreshed) {
+      token = refreshed.token as string;
+      setToken(token);
+    }
   }
 
   const headers = new Headers(opts.headers as HeadersInit | undefined);
@@ -128,8 +131,10 @@ export async function authenticatedFetch(
   if (res.status === 401) {
     const refreshed = await ensureAuthWithFreighter(address).catch(() => null);
     if (refreshed && 'token' in refreshed) {
+      const freshToken = refreshed.token as string;
+      setToken(freshToken);
       const retryHeaders = new Headers(opts.headers as HeadersInit | undefined);
-      retryHeaders.set('Authorization', `Bearer ${refreshed.token as string}`);
+      retryHeaders.set('Authorization', `Bearer ${freshToken}`);
       return fetch(url, { ...opts, headers: retryHeaders });
     }
   }

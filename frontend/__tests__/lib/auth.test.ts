@@ -206,4 +206,51 @@ describe('authenticatedFetch', () => {
     const res = await authenticatedFetch('/api/secure', {}, 'GADDR');
     expect(res.status).toBe(401);
   });
+
+  test('proactively refreshes token when it is expiring soon', async () => {
+    // Token is within the 5-min refresh margin so authenticatedFetch should
+    // re-auth before the request, not wait for a 401.
+    const expiringToken = makeJwt(nowSec() + 60); // 1 min left — inside margin
+    const freshToken = makeJwt(nowSec() + 3600);
+    localStorageMock.setItem('astera_jwt', expiringToken);
+
+    // Call sequence:
+    //   1 — challenge request  → challenge envelope  (proactive refresh)
+    //   2 — token exchange     → fresh JWT
+    //   3 — main request       → 200 OK (sent with fresh token)
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ transaction: 'xdr', network_passphrase: 'Test' }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: freshToken }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const { getFreighter } = await import('@/lib/freighter');
+    (getFreighter as jest.Mock).mockResolvedValue({
+      signTransaction: jest.fn().mockResolvedValue({ signed_envelope_xdr: 'signed' }),
+    });
+
+    const res = await authenticatedFetch('/api/secure', {}, 'GADDR');
+    expect(res.status).toBe(200);
+
+    // The final request must carry the fresh token, not the expiring one.
+    const lastCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1] as [
+      string,
+      RequestInit & { headers: Headers },
+    ];
+    expect((lastCall[1].headers as Headers).get('Authorization')).toBe(`Bearer ${freshToken}`);
+  });
+
+  test('makes request without Authorization header when no token is stored', async () => {
+    // localStorage is cleared in beforeEach so no token is present.
+    mockFetch.mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    await authenticatedFetch('/api/public', {}, 'GADDR');
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Headers }];
+    expect((opts.headers as Headers).get('Authorization')).toBeNull();
+  });
 });
