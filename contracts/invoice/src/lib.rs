@@ -358,7 +358,6 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-
 fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
         return false;
@@ -944,9 +943,11 @@ impl InvoiceContract {
         bump_instance(&env);
         fresh.push_back(now);
         env.storage().persistent().set(&ts_key, &fresh);
-        env.storage()
-            .persistent()
-            .extend_ttl(&ts_key, SLIDING_WINDOW_TTL_LEDGERS, SLIDING_WINDOW_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &ts_key,
+            SLIDING_WINDOW_TTL_LEDGERS,
+            SLIDING_WINDOW_TTL_LEDGERS,
+        );
 
         let count: u64 = env
             .storage()
