@@ -1,6 +1,7 @@
 'use client';
 
 import { useStore } from '@/lib/store';
+import { formatNetworkName } from '@/lib/network-label';
 
 export default function NetworkMismatchBanner() {
   const { networkMismatch, setNetworkMismatch } = useStore();
@@ -17,8 +18,8 @@ export default function NetworkMismatchBanner() {
     });
   };
 
-  const walletNetworkName = networkMismatch.walletNetwork === 'PUBLIC' ? 'Mainnet' : 'Testnet';
-  const appNetworkName = networkMismatch.appNetwork === 'mainnet' ? 'Mainnet' : 'Testnet';
+  const walletNetworkName = formatNetworkName(networkMismatch.walletNetwork);
+  const appNetworkName = formatNetworkName(networkMismatch.appNetwork);
 
   return (
     <div className="fixed top-16 left-0 right-0 z-40 bg-red-900/95 border-b border-red-800 backdrop-blur-sm">
