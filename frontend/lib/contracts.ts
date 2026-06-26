@@ -170,6 +170,20 @@ export async function buildCreateInvoiceTx(params: {
   verificationHash?: string;
   metadataUri?: string;
 }): Promise<string> {
+  // ── Input validation (#687) ────────────────────────────────────────────────
+  // Reject obviously invalid invoices client-side before spending an RPC round
+  // trip on a simulation that the contract would reject anyway.
+  if (!params.debtor || params.debtor.trim() === '') {
+    throw new Error('Debtor name is required');
+  }
+  if (params.amount <= 0n) {
+    throw new Error('Amount must be greater than zero');
+  }
+  const nowSecs = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(params.dueDate) || params.dueDate <= nowSecs) {
+    throw new Error('Due date must be in the future');
+  }
+
   const account = await getRpcAccount(params.owner);
   const contract = new Contract(INVOICE_CONTRACT_ID);
 
