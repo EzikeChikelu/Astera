@@ -312,6 +312,9 @@ pub enum DataKey {
     /// excluding defaults. Used as the input to milestone bonus thresholds so
     /// that micro-invoice cycling cannot inflate the score.
     MilestoneCount(Address),
+    /// #565: admin key rotation timelock
+    PendingAdmin,
+    AdminChangeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
