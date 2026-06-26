@@ -20,6 +20,7 @@ export function startApiServer(db: Database.Database, port: number): void {
     try {
       const {
         contract_id,
+        contract_type,
         event_type,
         limit = '50',
         offset = '0',
@@ -27,6 +28,7 @@ export function startApiServer(db: Database.Database, port: number): void {
 
       const events = getEvents(db, {
         contractId: contract_id as string | undefined,
+        contractType: contract_type as string | undefined,
         eventType: event_type as string | undefined,
         limit: parseInt(limit as string, 10),
         offset: parseInt(offset as string, 10),

@@ -15,6 +15,7 @@ export function initDb(dbPath: string): Database.Database {
     CREATE TABLE IF NOT EXISTS events (
       id TEXT PRIMARY KEY,
       contract_id TEXT NOT NULL,
+      contract_type TEXT NOT NULL DEFAULT 'unknown',
       event_type TEXT NOT NULL,
       topic TEXT NOT NULL,
       value TEXT,
@@ -30,7 +31,16 @@ export function initDb(dbPath: string): Database.Database {
       ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_events_ledger
       ON events(ledger_sequence);
+    CREATE INDEX IF NOT EXISTS idx_events_contract_type
+      ON events(contract_type);
   `);
+
+  // #700: migration for pre-existing deployments that lack contract_type.
+  const cols = db.prepare(`PRAGMA table_info(events)`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'contract_type')) {
+    db.exec(`ALTER TABLE events ADD COLUMN contract_type TEXT NOT NULL DEFAULT 'unknown'`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_events_contract_type ON events(contract_type)`);
+  }
 
   return db;
 }
@@ -40,9 +50,9 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
 
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO events
-      (id, contract_id, event_type, topic, value, ledger_sequence, ledger_close_at, tx_hash, created_at)
+      (id, contract_id, contract_type, event_type, topic, value, ledger_sequence, ledger_close_at, tx_hash, created_at)
     VALUES
-      (@id, @contractId, @eventType, @topic, @value, @ledgerSequence, @ledgerCloseAt, @txHash, @createdAt)
+      (@id, @contractId, @contractType, @eventType, @topic, @value, @ledgerSequence, @ledgerCloseAt, @txHash, @createdAt)
   `);
 
   const insertMany = db.transaction((events: IndexedEvent[]) => {
@@ -50,6 +60,7 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
       stmt.run({
         id: event.id,
         contractId: event.contractId,
+        contractType: event.contractType || 'unknown',
         eventType: event.eventType,
         topic: JSON.stringify(event.topic),
         value: JSON.stringify(event.value),
@@ -68,12 +79,13 @@ export function getEvents(
   db: Database.Database,
   options: {
     contractId?: string;
+    contractType?: string;
     eventType?: string;
     limit?: number;
     offset?: number;
   } = {}
 ): IndexedEvent[] {
-  const { contractId, eventType, limit = 50, offset = 0 } = options;
+  const { contractId, contractType, eventType, limit = 50, offset = 0 } = options;
 
   let query = 'SELECT * FROM events WHERE 1=1';
   const params: any[] = [];
@@ -81,6 +93,11 @@ export function getEvents(
   if (contractId) {
     query += ' AND contract_id = ?';
     params.push(contractId);
+  }
+
+  if (contractType) {
+    query += ' AND contract_type = ?';
+    params.push(contractType);
   }
 
   if (eventType) {
@@ -96,6 +113,7 @@ export function getEvents(
   return rows.map((row) => ({
     id: row.id,
     contractId: row.contract_id,
+    contractType: (row.contract_type || 'unknown') as IndexedEvent['contractType'],
     eventType: row.event_type,
     topic: JSON.parse(row.topic),
     value: row.value ? JSON.parse(row.value) : null,
