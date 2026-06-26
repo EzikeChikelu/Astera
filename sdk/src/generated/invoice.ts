@@ -1,0 +1,32 @@
+export const Errors = {
+  1: { message: 'Unauthorized' },
+  2: { message: 'InvalidStatusTransition' },
+  3: { message: 'InvoiceNotFound' },
+  4: { message: 'HashMismatch' },
+  5: { message: 'SmeExposureLimitExceeded' },
+  6: { message: 'AmountOverflow' },
+  7: { message: 'EmptyField' },
+  8: { message: 'FieldTooLong' },
+  9: { message: 'DateOverflow' },
+  10: { message: 'InvalidMetadata' },
+  11: { message: 'DescriptionTooLong' },
+  12: { message: 'DebtorNameTooLong' },
+  13: { message: 'VerificationHashTooLong' },
+  14: { message: 'ExtensionAlreadyPending' },
+  15: { message: 'InvalidDueDateExtension' },
+  16: { message: 'ExtensionTooLarge' },
+  17: { message: 'NoPendingExtension' },
+  18: { message: 'PoolCallFailed' },
+  19: { message: 'ArithmeticOverflow' },
+  20: { message: 'EmptyDebtorName' },
+  21: { message: 'EmptyDescription' },
+  22: { message: 'InvalidVerificationHash' },
+  23: { message: 'DueDateTooSoon' },
+  24: { message: 'UpgradeTimelockNotExpired' },
+  25: { message: 'InvalidUpgradeTimelock' },
+  26: { message: 'InvalidWasmHash' },
+  27: { message: 'VerificationDeadlineNotPassed' },
+} as const;
+
+export type InvoiceErrorCode = keyof typeof Errors;
+export type InvoiceErrorMessage = (typeof Errors)[InvoiceErrorCode]['message'];

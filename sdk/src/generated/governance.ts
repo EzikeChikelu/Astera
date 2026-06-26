@@ -1,0 +1,12 @@
+export enum GovernanceError {
+  NotInitialized = 1,
+  ProposalNotFound = 2,
+  ProposalInactive = 3,
+  AlreadyVoted = 4,
+  InsufficientShareBalance = 5,
+  VotingPeriodActive = 6,
+  TimelockActive = 7,
+  QuorumNotMet = 8,
+  InvalidProposalState = 9,
+  Unauthorized = 10,
+}
