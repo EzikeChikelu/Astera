@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState } from 'react';
 
 const adminLinks = [
   {
@@ -53,40 +54,84 @@ const adminLinks = [
 
 export default function AdminNav() {
   const path = usePathname();
+  const [open, setOpen] = useState(false);
 
   return (
-    <nav className="w-64 bg-brand-card border-r border-brand-border h-[calc(100vh-64px)] fixed left-0 top-16 hidden lg:flex flex-col p-4 gap-2">
-      <div className="mb-6 px-4">
-        <h2 className="text-xs font-bold uppercase tracking-widest text-brand-muted">
-          Admin Panel
-        </h2>
-      </div>
+    <>
+      {/* Hamburger — mobile only (< 768px) */}
+      <button
+        className="md:hidden fixed top-[72px] left-4 z-50 p-2 rounded-lg bg-brand-card border border-brand-border text-brand-muted hover:text-white"
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Toggle admin menu"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d={open ? 'M6 18L18 6M6 6l12 12' : 'M4 6h16M4 12h16M4 18h16'}
+          />
+        </svg>
+      </button>
 
-      {adminLinks.map((link) => {
-        const isActive =
-          path === link.href || (link.href === '/admin/dashboard' && path === '/admin');
+      {/* Mobile backdrop */}
+      {open && (
+        <div
+          className="md:hidden fixed inset-0 z-30 bg-black/50"
+          style={{ top: 64 }}
+          onClick={() => setOpen(false)}
+        />
+      )}
 
-        return (
-          <Link
-            key={link.href}
-            href={link.href}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
-              isActive
-                ? 'bg-brand-gold/10 text-brand-gold shadow-inner'
-                : 'text-brand-muted hover:text-white hover:bg-brand-dark/50'
-            }`}
-          >
-            <svg
-              className={`w-5 h-5 ${isActive ? 'text-brand-gold' : 'text-brand-muted'}`}
-              fill="currentColor"
-              viewBox="0 0 24 24"
+      {/*
+       * Sidebar:
+       *  < 768px  — hidden by default, shown as full-width (w-64) when hamburger is open
+       *  768–1024px — always visible, icon-only (w-16)
+       *  ≥ 1024px  — always visible, full labels (w-64)
+       */}
+      <nav
+        className={`fixed left-0 top-16 z-40 h-[calc(100vh-64px)] bg-brand-card border-r border-brand-border overflow-y-auto flex-col gap-2
+          md:flex md:w-16 md:p-2 md:items-center
+          lg:w-64 lg:p-4 lg:items-stretch
+          ${open ? 'flex w-64 p-4' : 'hidden'}`}
+      >
+        <div className="hidden lg:block mb-6 px-4">
+          <h2 className="text-xs font-bold uppercase tracking-widest text-brand-muted">
+            Admin Panel
+          </h2>
+        </div>
+
+        {adminLinks.map((link) => {
+          const isActive =
+            path === link.href || (link.href === '/admin/dashboard' && path === '/admin');
+
+          return (
+            <Link
+              key={link.href}
+              href={link.href}
+              title={link.label}
+              onClick={() => setOpen(false)}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200
+                md:justify-center md:px-2
+                lg:justify-start lg:px-4
+                ${
+                  isActive
+                    ? 'bg-brand-gold/10 text-brand-gold shadow-inner'
+                    : 'text-brand-muted hover:text-white hover:bg-brand-dark/50'
+                }`}
             >
-              <path d={link.icon} />
-            </svg>
-            {link.label}
-          </Link>
-        );
-      })}
-    </nav>
+              <svg
+                className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-brand-gold' : 'text-brand-muted'}`}
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d={link.icon} />
+              </svg>
+              <span className="md:hidden lg:block">{link.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+    </>
   );
 }

@@ -501,7 +501,7 @@ export default function InvoiceDetailPage() {
 
           <div className="text-4xl font-bold gradient-text mb-6">{formatUSDC(metadata.amount)}</div>
 
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div>
               <p className="text-brand-muted mb-1">Due Date</p>
               <p className="font-medium">{formatDate(metadata.dueDate)}</p>

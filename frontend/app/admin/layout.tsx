@@ -47,7 +47,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   return (
     <div className="min-h-screen bg-brand-dark">
       <AdminNav />
-      <main className="lg:pl-64 pt-16 pb-16">
+      <main className="md:pl-16 lg:pl-64 pt-16 pb-16">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 pt-12">{children}</div>
       </main>
     </div>
