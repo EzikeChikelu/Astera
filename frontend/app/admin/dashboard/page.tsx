@@ -17,13 +17,25 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
-import { getPoolConfig, getInvoiceCount, getInvoice } from '@/lib/contracts';
+import { getPoolConfig, getInvoiceCount, getMultipleInvoices } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
 const REFRESH_INTERVAL_MS = 60_000;
 const THIRTY_DAYS_SECS = 30 * 24 * 60 * 60;
 const SEVEN_DAYS_SECS = 7 * 24 * 60 * 60;
+// #695: batch invoice lookups via get_multiple_invoices; ~20 IDs per call
+// keeps each simulation under Soroban resource limits while parallelising
+// across pools with hundreds of invoices.
+const INVOICE_BATCH_SIZE = 20;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
 
 export default function AdminDashboardPage() {
   const { poolConfig, setPoolConfig } = useStore();
@@ -37,12 +49,11 @@ export default function AdminDashboardPage() {
       const [config, count] = await Promise.all([getPoolConfig(), getInvoiceCount()]);
       setPoolConfig(config);
 
-      const all: Invoice[] = [];
-      for (let i = 1; i <= count; i++) {
-        const inv = await getInvoice(i);
-        all.push(inv);
-      }
-      setInvoices(all);
+      const ids = Array.from({ length: count }, (_, i) => i + 1);
+      const batches = await Promise.all(
+        chunk(ids, INVOICE_BATCH_SIZE).map((group) => getMultipleInvoices(group)),
+      );
+      setInvoices(batches.flat());
       setLastRefreshed(new Date());
     } catch (e) {
       toast.error('Failed to load protocol statistics.');
