@@ -48,6 +48,49 @@ jobs:
         working-directory: ./contracts/${{ matrix.contract }}
         run: cargo test --verbose
 
+  rust-integration-tests:
+    name: Cross-Contract Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Build contracts
+        run: cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share
+
+      - name: Run cross-contract integration tests
+        run: cargo test --manifest-path contracts/tests/Cargo.toml
+
+  rust-audit:
+    name: Rust Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit Rust dependencies
+        run: cargo audit --file ../Cargo.lock
+        working-directory: contracts
+
   # ---- Frontend ----
   frontend:
     name: Frontend Build & Test
@@ -71,6 +114,9 @@ jobs:
           npm_config_optional: "true"
         run: |
           npm ci --include=optional
+
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=moderate
 
       - name: Type-check TypeScript
         run: npm run typecheck
