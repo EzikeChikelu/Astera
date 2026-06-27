@@ -2421,10 +2421,13 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        if threshold <= 0 {
+        if threshold < 0 {
             return Err(PoolError::InvalidCollateralThreshold);
         }
-        if collateral_bps == 0 || collateral_bps > BPS_DENOM {
+        if collateral_bps > BPS_DENOM {
+            return Err(PoolError::InvalidCollateralBps);
+        }
+        if collateral_bps == 0 && threshold > 0 {
             return Err(PoolError::InvalidCollateralBps);
         }
         let cfg = CollateralConfig {

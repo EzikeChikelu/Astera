@@ -267,6 +267,7 @@ pub enum DataKey {
     DebtorRecord(String),
     DebtorIds,
     SmeOutstanding(Address),
+    SmeInvoices(Address),
     MetadataImageUri,
     // #446: admin-configurable TTL for completed invoices
     CompletedInvoiceTtl,
@@ -300,6 +301,7 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     }
 
     invoice.status = InvoiceStatus::Expired;
+    remove_invoice_from_owner(env, &invoice.owner, invoice.id);
     env.storage()
         .persistent()
         .set(&DataKey::Invoice(invoice.id), &invoice);
@@ -367,11 +369,16 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
+fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
         return false;
     }
-    true
+    let len = uri.len() as usize;
+    let mut buf = [0u8; 256];
+    uri.copy_into_slice(&mut buf[..len]);
+    (len >= 7 && &buf[..7] == b"ipfs://")
+        || (len >= 5 && &buf[..5] == b"ar://")
+        || (len >= 8 && &buf[..8] == b"https://")
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -413,6 +420,46 @@ fn set_sme_outstanding(env: &Env, sme: &Address, value: i128) {
 fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
     let current = get_sme_outstanding(env, sme);
     set_sme_outstanding(env, sme, current.saturating_sub(amount));
+}
+
+/// Add an invoice ID to the owner's invoice index (#651).
+fn add_invoice_to_owner(env: &Env, owner: &Address, invoice_id: u64) {
+    let key = DataKey::SmeInvoices(owner.clone());
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(invoice_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LEDGERS_PER_DAY * 365, LEDGERS_PER_DAY * 365);
+}
+
+/// Remove an invoice ID from the owner's invoice index (#651).
+fn remove_invoice_from_owner(env: &Env, owner: &Address, invoice_id: u64) {
+    let key = DataKey::SmeInvoices(owner.clone());
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_ids: Vec<u64> = Vec::new(env);
+    for i in 0..ids.len() {
+        let id = ids.get(i).unwrap();
+        if id != invoice_id {
+            new_ids.push_back(id);
+        }
+    }
+    if new_ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LEDGERS_PER_DAY * 365, LEDGERS_PER_DAY * 365);
+    }
 }
 
 fn write_u64_decimal(buf: &mut [u8], mut n: u64) -> usize {
@@ -1010,6 +1057,7 @@ impl InvoiceContract {
             .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
         env.storage().instance().set(&DataKey::InvoiceCount, &id);
+        add_invoice_to_owner(&env, &owner, id);
 
         let mut stats: StorageStats = env
             .storage()
@@ -1518,6 +1566,7 @@ impl InvoiceContract {
             panic!("invalid status transition");
         }
         invoice.status = InvoiceStatus::Cancelled;
+        remove_invoice_from_owner(&env, &invoice.owner, id);
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
         env.storage()
@@ -1581,6 +1630,7 @@ impl InvoiceContract {
 
         // State transition: move to Cancelled
         invoice.status = InvoiceStatus::Cancelled;
+        remove_invoice_from_owner(&env, &invoice.owner, id);
 
         // Note: We do NOT call decrease_sme_outstanding here because the invoice
         // was never funded. SME outstanding is only incremented in mark_funded(),
@@ -1803,6 +1853,15 @@ impl InvoiceContract {
             .unwrap_or(0)
     }
 
+    /// Returns all invoice IDs owned by the given address (#651).
+    pub fn get_invoices_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::SmeInvoices(owner))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn get_storage_stats(env: Env) -> StorageStats {
         bump_instance(&env);
         env.storage()
@@ -1832,6 +1891,7 @@ impl InvoiceContract {
         }
         let mut expired_inv = inv;
         expired_inv.status = InvoiceStatus::Expired;
+        remove_invoice_from_owner(&env, &expired_inv.owner, id);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &expired_inv);

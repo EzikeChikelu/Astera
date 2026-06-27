@@ -353,7 +353,9 @@ impl Governance {
         if caller != proposal.proposer && caller != config.admin {
             return Err(GovernanceError::Unauthorized);
         }
-        if proposal.status == ProposalStatus::Executed {
+        if proposal.status == ProposalStatus::Cancelled
+            || proposal.status == ProposalStatus::Executed
+        {
             return Err(GovernanceError::ProposalInactive);
         }
 
