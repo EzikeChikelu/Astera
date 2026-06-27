@@ -1425,7 +1425,7 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
         env.events().publish(
             (EVT, symbol_short!("funded")),
-            (id, env.ledger().timestamp()),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
         );
         Ok(())
     }
@@ -1473,8 +1473,10 @@ impl InvoiceContract {
             .unwrap_or_default();
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
-        env.events()
-            .publish((EVT, symbol_short!("paid")), (id, env.ledger().timestamp()));
+        env.events().publish(
+            (EVT, symbol_short!("paid")),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
+        );
     }
 
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
@@ -1522,7 +1524,7 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish(
             (EVT, symbol_short!("default")),
-            (id, env.ledger().timestamp()),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
         );
     }
 
