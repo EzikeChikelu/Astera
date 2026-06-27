@@ -10,7 +10,15 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 
-export const NETWORK = Networks.TESTNET;
+// #659: pick the network passphrase from NEXT_PUBLIC_NETWORK so mainnet builds
+// sign with Networks.PUBLIC instead of falling through to testnet.
+const networkEnv = process.env.NEXT_PUBLIC_NETWORK ?? 'testnet';
+export const NETWORK =
+  networkEnv === 'mainnet'
+    ? Networks.PUBLIC
+    : networkEnv === 'standalone'
+      ? Networks.STANDALONE
+      : Networks.TESTNET;
 export const RPC_ENDPOINTS = [
   process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
   process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_1,
