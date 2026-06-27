@@ -139,6 +139,7 @@ pub enum InvoiceError {
     AdminChangePending = 28,
     AdminChangeTimelockNotExpired = 29,
     NoAdminChangeProposed = 30,
+    ContractPaused = 31,
 }
 
 #[contracttype]
@@ -362,7 +363,7 @@ fn require_not_paused(env: &Env) {
         .get::<DataKey, bool>(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, InvoiceError::ContractPaused);
     }
 }
 
@@ -721,7 +722,7 @@ impl InvoiceContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
@@ -736,7 +737,7 @@ impl InvoiceContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
@@ -3096,13 +3097,43 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
-    fn test_create_invoice_while_paused_panics() {
+    fn test_pause_non_admin_returns_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        let result = client.try_pause(&attacker);
+
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::Unauthorized.into()
+        );
+    }
+
+    #[test]
+    fn test_unpause_non_admin_returns_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        client.pause(&admin);
+        let result = client.try_unpause(&attacker);
+
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::Unauthorized.into()
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_while_paused_returns_typed_contract_paused() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, sme) = setup(&env);
         client.pause(&admin);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "D"),
             &1_000i128,
@@ -3110,6 +3141,10 @@ mod test {
             &String::from_str(&env, "x"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::ContractPaused.into()
         );
     }
 
