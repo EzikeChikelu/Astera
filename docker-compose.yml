@@ -120,6 +120,7 @@ services:
       - ORACLE_SECRET_KEY=${ORACLE_SECRET_KEY:-}
       - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
       - AUTO_VERIFY_DELAY_MS=30000
+      - HEALTH_PORT=8080
     depends_on:
       stellar:
         condition: service_healthy
@@ -128,6 +129,12 @@ services:
     volumes:
       - ./oracle-service:/app
       - ./sdk:/sdk
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8080}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

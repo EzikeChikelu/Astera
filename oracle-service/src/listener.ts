@@ -6,6 +6,7 @@ export class Listener {
   private config: OracleConfig;
   private verifier: Verifier;
   private horizon: Horizon.Server;
+  public processedCount = 0;
 
   constructor(config: OracleConfig, verifier: Verifier) {
     this.config = config;
@@ -40,6 +41,8 @@ export class Listener {
     }
 
     try {
+      this.processedCount += 1;
+
       // Horizon effects for Soroban events typically have the topic and value
       // This part depends on how Horizon represents contract events in effects.
       // Based on the indexer implementation:
