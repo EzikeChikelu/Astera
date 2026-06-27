@@ -276,6 +276,8 @@ pub enum DataKey {
     // #565: admin key rotation timelock
     PendingAdmin,
     AdminChangeScheduledAt,
+    // #654: enforce oracle verification before invoices may be funded
+    RequireOracleVerification,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -615,6 +617,9 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::RequireRegisteredDebtor, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireOracleVerification, &false);
         env.storage().persistent().set(
             &DataKey::MetadataImageUri,
             &String::from_str(&env, DEFAULT_METADATA_IMAGE_URI),
@@ -759,6 +764,38 @@ impl InvoiceContract {
             (EVT, Symbol::new(&env, "debtor_reg_updated")),
             (admin, old_required, required),
         );
+    }
+
+    // #654: gate funding on oracle verification when the admin flips this flag on.
+    pub fn set_oracle_verified_funding_only(env: Env, admin: Address, required: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let old_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireOracleVerification)
+            .unwrap_or(false);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireOracleVerification, &required);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "oracle_req_updated")),
+            (admin, old_required, required),
+        );
+    }
+
+    pub fn oracle_verified_funding_only(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RequireOracleVerification)
+            .unwrap_or(false)
     }
 
     pub fn pause(env: Env, admin: Address) {
@@ -1405,6 +1442,15 @@ impl InvoiceContract {
             invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
         if !is_fundable {
             panic!("invoice is not in fundable state");
+        }
+        // #654: when oracle-verified-funding-only is on, block unverified invoices.
+        let require_oracle: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireOracleVerification)
+            .unwrap_or(false);
+        if require_oracle && !invoice.oracle_verified {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         invoice.status = InvoiceStatus::Funded;
         invoice.funded_at = env.ledger().timestamp();
