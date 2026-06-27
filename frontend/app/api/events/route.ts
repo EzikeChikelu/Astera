@@ -11,10 +11,111 @@ import {
 export const dynamic = 'force-dynamic';
 
 const JWT_SECRET = process.env.SEP10_JWT_SECRET || process.env.JWT_SECRET;
-const POLL_INTERVAL_MS = 3_000;
+const POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_SSE_POLL_INTERVAL_MS ?? 10_000);
+const MIN_POLL_INTERVAL_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
-// Look back this many ledgers on the first poll to catch very recent events
 const INITIAL_LOOKBACK_LEDGERS = 10;
+
+type SseClient = {
+  controller: ReadableStreamDefaultController;
+  encoder: TextEncoder;
+  invoiceId: string | null;
+};
+
+let sharedPollerTimer: ReturnType<typeof setInterval> | null = null;
+const sharedClients: Set<SseClient> = new Set();
+let sharedLastSeenLedger = 0;
+
+async function sharedPoll() {
+  if (sharedClients.size === 0) return;
+
+  const contractIds = [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID].filter(Boolean);
+  if (contractIds.length === 0) return;
+
+  try {
+    const latest = await rpcGetLatestLedger();
+    const currentLedger = latest.sequence;
+
+    if (currentLedger <= sharedLastSeenLedger) return;
+
+    const startLedger =
+      sharedLastSeenLedger > 0
+        ? sharedLastSeenLedger + 1
+        : Math.max(1, currentLedger - INITIAL_LOOKBACK_LEDGERS);
+
+    const response = await rpcGetEvents({
+      startLedger,
+      filters: [{ contractIds }],
+    });
+
+    sharedLastSeenLedger = currentLedger;
+
+    for (const raw of response.events) {
+      const e = raw as unknown as Record<string, unknown>;
+      const topic = ((e.topic as unknown[]) ?? []).map((t) =>
+        scValToNative(t as Parameters<typeof scValToNative>[0]),
+      );
+      const value = scValToNative(e.value as Parameters<typeof scValToNative>[0]);
+      const eventInvoiceId = (value as unknown[] | null)?.[0];
+      const payload = JSON.stringify({
+        id: e.id,
+        contractId: e.contractId,
+        topic,
+        value,
+        ledger: e.ledger,
+        txHash: e.txHash,
+        ledgerCloseAt: (e.ledgerClosedAt ?? e.ledgerCloseAt) as string,
+      });
+
+      for (const client of sharedClients) {
+        if (client.invoiceId !== null && String(eventInvoiceId) !== client.invoiceId) continue;
+        try {
+          client.controller.enqueue(client.encoder.encode(`data: ${payload}\n\n`));
+        } catch {
+          client.controller.error(new Error('SSE client disconnected'));
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[SSE /api/events] shared poll error:', err);
+    for (const client of sharedClients) {
+      try {
+        client.controller.enqueue(
+          client.encoder.encode(`event: error\ndata: ${JSON.stringify({ type: 'error' })}\n\n`),
+        );
+      } catch {
+        client.controller.error(new Error('SSE client disconnected'));
+      }
+    }
+  }
+}
+
+function startSharedPoller(): void {
+  if (sharedPollerTimer) return;
+  const interval = Math.max(MIN_POLL_INTERVAL_MS, POLL_INTERVAL_MS);
+  if (sharedClients.size > 0) {
+    void sharedPoll();
+  }
+  sharedPollerTimer = setInterval(sharedPoll, interval);
+}
+
+function stopSharedPollerIfEmpty(): void {
+  if (sharedClients.size === 0 && sharedPollerTimer) {
+    clearInterval(sharedPollerTimer);
+    sharedPollerTimer = null;
+    sharedLastSeenLedger = 0;
+  }
+}
+
+function registerClient(client: SseClient): void {
+  sharedClients.add(client);
+  startSharedPoller();
+}
+
+function unregisterClient(client: SseClient): void {
+  sharedClients.delete(client);
+  stopSharedPollerIfEmpty();
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
@@ -38,81 +139,32 @@ export async function GET(request: NextRequest) {
   }
 
   const encoder = new TextEncoder();
-  let lastSeenLedger = 0;
 
   const stream = new ReadableStream({
-    async start(controller) {
-      let closed = false;
-
-      const enqueue = (data: string, eventName?: string) => {
-        if (closed) return;
-        const line = eventName ? `event: ${eventName}\ndata: ${data}\n\n` : `data: ${data}\n\n`;
-        controller.enqueue(encoder.encode(line));
+    start(controller) {
+      const client: SseClient = {
+        controller,
+        encoder,
+        invoiceId: invoiceIdParam,
       };
 
-      const poll = async () => {
-        if (closed) return;
+      controller.enqueue(
+        encoder.encode(`event: connected\ndata: ${JSON.stringify({ type: 'connected' })}\n\n`),
+      );
+
+      registerClient(client);
+
+      const heartbeatTimer = setInterval(() => {
         try {
-          const latest = await rpcGetLatestLedger();
-          const currentLedger = latest.sequence;
-
-          if (currentLedger <= lastSeenLedger) return;
-
-          const startLedger =
-            lastSeenLedger > 0
-              ? lastSeenLedger + 1
-              : Math.max(1, currentLedger - INITIAL_LOOKBACK_LEDGERS);
-
-          const response = await rpcGetEvents({
-            startLedger,
-            filters: [{ contractIds }],
-          });
-
-          lastSeenLedger = currentLedger;
-
-          for (const raw of response.events) {
-            const e = raw as unknown as Record<string, unknown>;
-            const topic = ((e.topic as unknown[]) ?? []).map((t) =>
-              scValToNative(t as Parameters<typeof scValToNative>[0]),
-            );
-            const value = scValToNative(e.value as Parameters<typeof scValToNative>[0]);
-            const eventInvoiceId = (value as unknown[] | null)?.[0];
-
-            // Filter by invoiceId if the caller requested a specific invoice
-            if (invoiceIdParam !== null && String(eventInvoiceId) !== invoiceIdParam) {
-              continue;
-            }
-
-            enqueue(
-              JSON.stringify({
-                id: e.id,
-                contractId: e.contractId,
-                topic,
-                value,
-                ledger: e.ledger,
-                txHash: e.txHash,
-                ledgerCloseAt: (e.ledgerClosedAt ?? e.ledgerCloseAt) as string,
-              }),
-            );
-          }
-        } catch (err) {
-          console.error('[SSE /api/events] poll error:', err);
-          enqueue(JSON.stringify({ type: 'error' }), 'error');
+          controller.enqueue(encoder.encode('event: ping\ndata: \n\n'));
+        } catch {
+          controller.error(new Error('SSE client disconnected'));
         }
-      };
-
-      // Initial handshake
-      enqueue(JSON.stringify({ type: 'connected' }), 'connected');
-
-      // First poll immediately, then schedule repeating poll + heartbeat
-      await poll();
-      const pollTimer = setInterval(poll, POLL_INTERVAL_MS);
-      const heartbeatTimer = setInterval(() => enqueue('', 'ping'), HEARTBEAT_INTERVAL_MS);
+      }, HEARTBEAT_INTERVAL_MS);
 
       request.signal.addEventListener('abort', () => {
-        closed = true;
-        clearInterval(pollTimer);
         clearInterval(heartbeatTimer);
+        unregisterClient(client);
         try {
           controller.close();
         } catch {
