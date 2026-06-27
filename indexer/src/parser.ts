@@ -2,9 +2,17 @@
  * Parse Stellar Horizon events into structured Astera event records.
  */
 
+/**
+ * Logical category of the source contract for an indexed event. Used to
+ * route credit_score events (#700) separately from invoice/pool events so
+ * the REST API can filter by contract type.
+ */
+export type ContractType = 'invoice' | 'pool' | 'credit_score' | 'unknown';
+
 export interface IndexedEvent {
   id: string;
   contractId: string;
+  contractType: ContractType;
   eventType: string;
   topic: string[];
   value: any;
@@ -12,6 +20,39 @@ export interface IndexedEvent {
   ledgerCloseAt: string;
   txHash: string;
   createdAt: string;
+}
+
+const CREDIT_SCORE_CONTRACT_ID = (process.env.CREDIT_SCORE_CONTRACT_ID || '').trim();
+const INVOICE_CONTRACT_ID = (process.env.INVOICE_CONTRACT_ID || '').trim();
+const POOL_CONTRACT_ID = (process.env.POOL_CONTRACT_ID || '').trim();
+
+// #700: credit_score contract emits these event subtypes under the "CREDIT" topic
+const CREDIT_SCORE_EVENT_TYPES = new Set([
+  'payment',
+  'default',
+  'score_cfg',
+  'thresh',
+  'lt_upd',
+  'hist_upd',
+]);
+
+function classifyContract(contractId: string, contractType: string, eventType: string): ContractType {
+  if (CREDIT_SCORE_CONTRACT_ID && contractId === CREDIT_SCORE_CONTRACT_ID) {
+    return 'credit_score';
+  }
+  if (INVOICE_CONTRACT_ID && contractId === INVOICE_CONTRACT_ID) {
+    return 'invoice';
+  }
+  if (POOL_CONTRACT_ID && contractId === POOL_CONTRACT_ID) {
+    return 'pool';
+  }
+  // Fallback: infer from topic. credit_score events publish under "CREDIT".
+  if (contractType === 'CREDIT' || CREDIT_SCORE_EVENT_TYPES.has(eventType)) {
+    return 'credit_score';
+  }
+  if (contractType === 'invoice') return 'invoice';
+  if (contractType === 'pool') return 'pool';
+  return 'unknown';
 }
 
 export function parseEvents(records: any[]): IndexedEvent[] {
@@ -25,10 +66,12 @@ export function parseEvents(records: any[]): IndexedEvent[] {
       if (!topic) continue;
 
       const [contractType, eventType] = topic;
+      const contractId = record.contract || '';
 
       events.push({
         id: record.id || `${record.paging_token}`,
-        contractId: record.contract || '',
+        contractId,
+        contractType: classifyContract(contractId, contractType, eventType || ''),
         eventType: eventType || 'unknown',
         topic: [contractType, eventType],
         value: parseValue(record),

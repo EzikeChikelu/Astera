@@ -20,6 +20,7 @@ export function startApiServer(db: Database.Database, port: number): void {
     try {
       const {
         contract_id,
+        contract_type,
         event_type,
         limit = '50',
         offset = '0',
@@ -27,6 +28,7 @@ export function startApiServer(db: Database.Database, port: number): void {
 
       const events = getEvents(db, {
         contractId: contract_id as string | undefined,
+        contractType: contract_type as string | undefined,
         eventType: event_type as string | undefined,
         limit: parseInt(limit as string, 10),
         offset: parseInt(offset as string, 10),
@@ -71,6 +73,73 @@ export function startApiServer(db: Database.Database, port: number): void {
       res.json({ eventType, events, count: events.length });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #702: Get all invoice events for a specific SME owner address.
+  // Supports an optional ?status= filter (e.g. Funded) which matches against
+  // either the indexed event_type (lowercased) or a status field embedded in
+  // the event value payload.
+  app.get('/api/invoices/by-owner/:address', (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address || typeof address !== 'string') {
+        return res.status(400).json({ error: 'address path param is required' });
+      }
+      const statusFilter = typeof req.query.status === 'string' ? req.query.status : undefined;
+
+      // Fetch invoice-contract events ordered newest-first; cap to a generous
+      // limit so the by-owner scan covers typical SME histories.
+      const events = getEvents(db, {
+        contractType: 'invoice',
+        limit: 1000,
+        offset: 0,
+      });
+
+      const ownerLower = address.toLowerCase();
+      const invoices = events
+        .filter((evt) => {
+          const value = evt.value;
+          if (!value) return false;
+          // Match the owner address across common shapes the indexer may store:
+          // raw string, { owner }, { sme }, or topic-embedded address strings.
+          const candidates: any[] = [
+            value.owner,
+            value.sme,
+            value.address,
+            value.from,
+            value,
+          ];
+          const matchesOwner = candidates.some((c) => {
+            if (!c) return false;
+            if (typeof c === 'string') return c.toLowerCase() === ownerLower;
+            if (typeof c === 'object') {
+              return JSON.stringify(c).toLowerCase().includes(ownerLower);
+            }
+            return false;
+          });
+          if (!matchesOwner) return false;
+          if (!statusFilter) return true;
+          const wanted = statusFilter.toLowerCase();
+          if (evt.eventType?.toLowerCase() === wanted) return true;
+          if (typeof value.status === 'string' && value.status.toLowerCase() === wanted) {
+            return true;
+          }
+          return false;
+        })
+        .map((evt) => ({
+          invoiceId:
+            (evt.value && (evt.value.invoice_id ?? evt.value.invoiceId ?? evt.value.id)) ??
+            null,
+          status: (evt.value && evt.value.status) || evt.eventType,
+          amount: (evt.value && (evt.value.amount ?? evt.value.value)) ?? null,
+          createdAt: evt.ledgerCloseAt,
+          txHash: evt.txHash,
+        }));
+
+      return res.json(invoices);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 
