@@ -2248,8 +2248,6 @@ impl FundingPool {
             return Err(PoolError::InvalidAmount);
         }
 
-        Self::non_reentrant_start(env); // <- ADD GUARD START
-
         let config: PoolConfig = get_config_cached(env)?;
         let funded_invoice_key = DataKey::FundedInvoice(invoice_id);
         let mut record: FundedInvoice = env
@@ -2273,90 +2271,106 @@ impl FundingPool {
             return Err(PoolError::Overpayment);
         }
 
-        // Update state FIRST - effects
-        record.repaid_amount = new_repaid_amount;
-        let fully_repaid = record.repaid_amount >= total_due;
+        Self::non_reentrant_start(env);
+        let guarded_result = (|| -> Result<(bool, Address, i128, i128, i128), PoolError> {
+            // Update state FIRST - effects
+            record.repaid_amount = new_repaid_amount;
+            let fully_repaid = record.repaid_amount >= total_due;
 
-        let token_totals_key = DataKey::TokenTotals(record.token.clone());
-        let mut tt: PoolTokenTotals = env
-            .storage()
-            .instance()
-            .get(&token_totals_key)
-            .unwrap_or_default();
-
-        let mut stats: PoolStorageStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::StorageStats)
-            .unwrap_or_default();
-
-        if fully_repaid {
-            tt.total_deployed = tt
-                .total_deployed
-                .checked_sub(record.principal)
-                .ok_or(PoolError::AmountOverflow)?;
-            tt.pool_value = tt
-                .pool_value
-                .checked_add(total_interest_i128)
-                .ok_or(PoolError::AmountOverflow)?;
-            tt.total_fee_revenue = tt
-                .total_fee_revenue
-                .checked_add(record.factoring_fee)
-                .ok_or(PoolError::AmountOverflow)?;
-            tt.protocol_revenue = tt
-                .protocol_revenue
-                .checked_add(record.factoring_fee)
-                .ok_or(PoolError::AmountOverflow)?;
-            tt.total_paid_out = tt
-                .total_paid_out
-                .checked_add(total_due)
-                .ok_or(PoolError::AmountOverflow)?;
-            stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
-
-            // Distribute interest proportionally to share holders via reward_per_share accumulator.
-            let share_token: Address = env
+            let token_totals_key = DataKey::TokenTotals(record.token.clone());
+            let mut tt: PoolTokenTotals = env
                 .storage()
                 .instance()
-                .get(&DataKey::ShareToken(record.token.clone()))
-                .ok_or(PoolError::ShareTokenNotConfigured)?;
-            let total_shares: i128 = env.invoke_contract(
-                &share_token,
-                &Symbol::new(env, "total_supply"),
-                Vec::new(env),
-            );
-            if total_shares > 0 {
-                let reward_delta = calculate_reward_delta(total_interest_i128, total_shares)?;
-                tt.reward_per_share = tt
-                    .reward_per_share
-                    .checked_add(reward_delta)
+                .get(&token_totals_key)
+                .unwrap_or_default();
+
+            let mut stats: PoolStorageStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::StorageStats)
+                .unwrap_or_default();
+
+            if fully_repaid {
+                tt.total_deployed = tt
+                    .total_deployed
+                    .checked_sub(record.principal)
                     .ok_or(PoolError::AmountOverflow)?;
+                tt.pool_value = tt
+                    .pool_value
+                    .checked_add(total_interest_i128)
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.total_fee_revenue = tt
+                    .total_fee_revenue
+                    .checked_add(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.protocol_revenue = tt
+                    .protocol_revenue
+                    .checked_add(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.total_paid_out = tt
+                    .total_paid_out
+                    .checked_add(total_due)
+                    .ok_or(PoolError::AmountOverflow)?;
+                stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+
+                // Distribute interest proportionally to share holders via reward_per_share accumulator.
+                let share_token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::ShareToken(record.token.clone()))
+                    .ok_or(PoolError::ShareTokenNotConfigured)?;
+                let total_shares: i128 = env.invoke_contract(
+                    &share_token,
+                    &Symbol::new(env, "total_supply"),
+                    Vec::new(env),
+                );
+                if total_shares > 0 {
+                    let reward_delta = calculate_reward_delta(total_interest_i128, total_shares)?;
+                    tt.reward_per_share = tt
+                        .reward_per_share
+                        .checked_add(reward_delta)
+                        .ok_or(PoolError::AmountOverflow)?;
+                }
             }
-        }
 
-        // Write all state BEFORE external call
-        env.storage().persistent().set(&funded_invoice_key, &record);
-        if fully_repaid {
-            set_funded_invoice_ttl(env, invoice_id, true);
-        }
-        env.storage().instance().set(&token_totals_key, &tt);
-        env.storage().instance().set(&DataKey::StorageStats, &stats);
+            // Write all state BEFORE external call
+            env.storage().persistent().set(&funded_invoice_key, &record);
+            if fully_repaid {
+                set_funded_invoice_ttl(env, invoice_id, true);
+            }
+            env.storage().instance().set(&token_totals_key, &tt);
+            env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        // Transfer LAST - interaction
-        let token_client = token::Client::new(env, &record.token);
-        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+            // Transfer LAST - interaction
+            let token_client = token::Client::new(env, &record.token);
+            token_client.transfer(&payer, &env.current_contract_address(), &amount);
 
-        // Handle collateral release after main transfer
-        if fully_repaid {
-            release_collateral(env, invoice_id, &payer, now);
-        }
+            // Handle collateral release after main transfer
+            if fully_repaid {
+                release_collateral(env, invoice_id, &payer, now);
+            }
 
-        Self::non_reentrant_end(env); // <- ADD GUARD END
+            let available_amount = if fully_repaid {
+                available_liquidity(&tt)?
+            } else {
+                0
+            };
+
+            Ok((
+                fully_repaid,
+                record.token.clone(),
+                record.principal,
+                record.repaid_amount,
+                available_amount,
+            ))
+        })();
+        Self::non_reentrant_end(env);
+        let (fully_repaid, token, principal, repaid_amount, available_amount) = guarded_result?;
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
-            let available_amount = available_liquidity(&tt)?;
             if let Err(e) =
-                Self::process_withdrawal_queue(env, record.token.clone(), available_amount)
+                Self::process_withdrawal_queue(env, token.clone(), available_amount)
             {
                 // Log error but don't fail the repayment
                 // `format!` is unavailable in `no_std`; keep a lightweight log.
@@ -2366,12 +2380,12 @@ impl FundingPool {
 
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
-                (invoice_id, record.principal, total_interest_i128, now),
+                (invoice_id, principal, total_interest_i128, now),
             );
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, amount, record.repaid_amount, now),
+                (invoice_id, amount, repaid_amount, now),
             );
         }
         Ok(())
@@ -3286,6 +3300,27 @@ impl FundingPool {
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
     }
+
+    pub fn get_funded_invoices_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<Vec<Option<FundedInvoice>>, PoolError> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(PoolError::BatchTooLarge);
+        }
+
+        let mut invoices = Vec::new(&env);
+        for i in 0..ids.len() {
+            let invoice_id = ids.get(i).ok_or(PoolError::StorageCorrupted)?;
+            invoices.push_back(
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::FundedInvoice(invoice_id)),
+            );
+        }
+        Ok(invoices)
+    }
+
     pub fn available_liquidity(env: Env, token: Address) -> i128 {
         let tt: PoolTokenTotals = env
             .storage()
@@ -3878,7 +3913,9 @@ impl FundingPool {
     /// - `process_queued_withdrawal()` - burns shares, transfers tokens
     /// - `fund_invoice()` - invokes invoice contract
     /// - `fund_multiple_invoices()` - invokes invoice contract
-    /// - `repay_invoice_request()` - transfers tokens, invokes share contract
+    /// - `repay_invoice_request()` - sets/checks the guard while updating
+    ///   repayment state, invoking the share contract, transferring tokens, and
+    ///   releasing collateral.
     /// - `claim_yield()` - queries share balance, transfers tokens
     /// - `deposit_collateral()` - transfers tokens
     /// - `seize_collateral()` - transfers tokens
@@ -5628,6 +5665,48 @@ mod test {
     }
 
     #[test]
+    fn test_get_funded_invoices_batch_returns_records_and_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 86_400),
+            &usdc_id,
+        );
+
+        let ids = soroban_sdk::vec![&env, 1u64, 99u64];
+        let records = client.get_funded_invoices_batch(&ids);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.get(0).unwrap().unwrap().invoice_id, 1);
+        assert!(records.get(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_funded_invoices_batch_rejects_oversized_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let mut ids = Vec::new(&env);
+        for invoice_id in 1u64..=21u64 {
+            ids.push_back(invoice_id);
+        }
+
+        let result = client.try_get_funded_invoices_batch(&ids);
+
+        assert_eq!(result, Err(Ok(PoolError::BatchTooLarge)));
+    }
+
+    #[test]
     fn test_total_due_overflow_returns_amount_overflow() {
         let env = Env::default();
         let token = Address::generate(&env);
@@ -6573,6 +6652,70 @@ mod test {
 
         mint(&env, &usdc_id, &investor, 1000);
         client.deposit(&investor, &usdc_id, &1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "reentrant call")]
+    fn test_repay_invoice_reentrancy_guard_blocks_when_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        let amount_due = client.estimate_repayment(&1u64);
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &true);
+        });
+
+        client.repay_invoice(&1u64, &sme, &amount_due);
+    }
+
+    #[test]
+    fn test_repay_invoice_reentrancy_guard_cleared_after_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        mint(&env, &usdc_id, &sme, 2_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        let amount_due = client.estimate_repayment(&1u64);
+
+        client.repay_invoice(&1u64, &sme, &amount_due);
+
+        env.as_contract(&client.address, || {
+            let guard = env
+                .storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::ReentrancyGuard)
+                .unwrap_or(false);
+            assert!(!guard);
+        });
     }
 
     #[test]

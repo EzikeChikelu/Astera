@@ -321,19 +321,19 @@ impl Governance {
             return Err(GovernanceError::InvalidProposalState);
         }
 
-        proposal.status = ProposalStatus::Executed;
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
         env.events().publish(
             (EVT, symbol_short!("execute")),
             (
                 proposal_id,
-                proposal.target_contract,
-                proposal.function_name,
-                proposal.calldata,
+                proposal.target_contract.clone(),
+                proposal.function_name.clone(),
+                proposal.calldata.clone(),
             ),
         );
+        proposal.status = ProposalStatus::Executed;
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
         Ok(())
     }
 
