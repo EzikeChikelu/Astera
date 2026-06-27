@@ -77,7 +77,13 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
         </div>
         <div
           className={
-            isOverdue ? 'text-red-400' : days <= 7 ? 'text-yellow-400' : 'text-brand-muted'
+            isOverdue
+              ? 'text-red-400'
+              : days <= 7
+                ? 'text-orange-400'
+                : days <= 30
+                  ? 'text-yellow-400'
+                  : 'text-brand-muted'
           }
         >
           {isOverdue ? `${Math.abs(days)}d overdue` : `${days}d left`}

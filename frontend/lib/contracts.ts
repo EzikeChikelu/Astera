@@ -161,6 +161,17 @@ export async function getInvoiceCount(): Promise<number> {
   return Number(scValToNative(result!.retval));
 }
 
+export async function getMaxInvoiceAmount(): Promise<number> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'get_max_invoice_amount',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
 export async function buildCreateInvoiceTx(params: {
   owner: string;
   debtor: string;

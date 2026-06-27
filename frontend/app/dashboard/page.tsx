@@ -9,6 +9,7 @@ import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
+import SMEOnboardingChecklist from '@/components/SMEOnboardingChecklist';
 import TestnetFaucet from '@/components/TestnetFaucet';
 import PipelineBoard from '@/components/dashboard/PipelineBoard';
 import ErrorBoundary from '@/components/ErrorBoundary';
@@ -658,7 +659,14 @@ function DashboardContent() {
             </div>
 
             {/* Right column */}
-            <div>
+            <div className="space-y-6">
+              {invoices.length < 1 && (
+                <SMEOnboardingChecklist
+                  walletConnected={wallet.connected}
+                  invoiceCount={invoices.length}
+                  onDismiss={() => {}}
+                />
+              )}
               {loading ? (
                 <CreditScoreSkeleton />
               ) : (
