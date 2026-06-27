@@ -485,7 +485,7 @@ fn require_not_paused(env: &Env) {
         .get::<DataKey, bool>(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, PoolError::ContractPaused);
     }
 }
 
@@ -5757,7 +5757,7 @@ mod test {
     // --- Pause mechanism tests ---
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_fund_invoice_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5779,7 +5779,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_repay_invoice_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5804,7 +5804,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_collateral_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5850,7 +5850,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_blocked_when_paused() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5863,7 +5863,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_withdraw_blocked_when_paused() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5984,7 +5984,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5997,7 +5997,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_withdraw_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
