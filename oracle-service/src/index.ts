@@ -1,3 +1,4 @@
+import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { Listener } from './listener';
 import { Verifier } from './verifier';
@@ -16,7 +17,7 @@ const config: OracleConfig = {
 
 async function main() {
   console.log('=== Astera Oracle Integration Service ===');
-  
+
   if (!config.oracleSecretKey) {
     console.error('Error: ORACLE_SECRET_KEY is not set.');
     process.exit(1);
@@ -29,15 +30,34 @@ async function main() {
 
   const verifier = new Verifier(config);
   const listener = new Listener(config, verifier);
+  const healthPort = parseInt(process.env.HEALTH_PORT || '8080', 10);
+  const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', processed: listener.processedCount }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'not_found' }));
+  });
 
   await listener.start();
+  server.listen(healthPort, () => {
+    console.log(`Health server listening on port ${healthPort}`);
+  });
 
   console.log('Oracle Service is running and listening for events...');
 
   // Keep alive
   process.on('SIGINT', () => {
     console.log('Shutting down...');
-    process.exit(0);
+    server.close(() => process.exit(0));
+  });
+
+  process.on('SIGTERM', () => {
+    console.log('Shutting down...');
+    server.close(() => process.exit(0));
   });
 }
 
