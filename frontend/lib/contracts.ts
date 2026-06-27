@@ -113,15 +113,8 @@ export async function getInvoice(id: number): Promise<Invoice> {
 export async function getMultipleInvoices(ids: number[]): Promise<Invoice[]> {
   if (ids.length === 0) return [];
 
-  const sim = await simulateTx(
-    INVOICE_CONTRACT_ID,
-    'get_multiple_invoices',
-    [xdr.ScVal.scvVec(ids.map((id) => nativeToScVal(BigInt(id), { type: 'u64' })))],
-    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
-  );
-
-  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  return scValToNative(result!.retval) as Invoice[];
+  const invoices = await Promise.all(ids.map((id) => getInvoice(id)));
+  return invoices;
 }
 
 export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
