@@ -15,6 +15,7 @@ const baseConfig: PoolConfig = {
   yieldProposalAt: 0,
   yieldTimelockSecs: 0,
   maxSingleInvestorBps: 10000,
+  maxWithdrawalQueueAgeDays: 0,
 };
 
 function totals(deposited: bigint, deployed: bigint): PoolTokenTotals {
