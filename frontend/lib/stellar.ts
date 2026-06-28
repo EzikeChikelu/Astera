@@ -20,9 +20,9 @@ export const NETWORK =
       ? Networks.STANDALONE
       : Networks.TESTNET;
 export const RPC_ENDPOINTS = [
-  process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_1,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_2,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_1,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_2,
   'https://soroban-testnet.stellar.org',
   'https://rpc-testnet.stellar.org',
 ].filter(Boolean) as string[];
