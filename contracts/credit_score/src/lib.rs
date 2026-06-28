@@ -1306,8 +1306,7 @@ impl CreditScoreContract {
         if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
             panic_with_error!(&env, CreditScoreError::AdminChangeTimelockNotExpired);
         }
-        let maybe_new_admin: Option<Address> =
-            env.storage().instance().get(&DataKey::PendingAdmin);
+        let maybe_new_admin: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         let new_admin = match maybe_new_admin {
             Some(v) => v,
             None => panic_with_error!(&env, CreditScoreError::NoAdminChangeProposed),
@@ -1335,10 +1334,8 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .remove(&DataKey::AdminChangeScheduledAt);
-        env.events().publish(
-            (EVT, Symbol::new(&env, "admin_chg_cancelled")),
-            admin,
-        );
+        env.events()
+            .publish((EVT, Symbol::new(&env, "admin_chg_cancelled")), admin);
     }
 }
 
