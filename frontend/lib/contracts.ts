@@ -61,6 +61,7 @@ function validateContractId(id: string, name: string): string {
 
 validateContractId(INVOICE_CONTRACT_ID, 'invoice');
 validateContractId(POOL_CONTRACT_ID, 'pool');
+validateContractId(CREDIT_SCORE_CONTRACT_ID, 'credit_score');
 if (GOVERNANCE_CONTRACT_ID) {
   validateContractId(GOVERNANCE_CONTRACT_ID, 'governance');
 }
