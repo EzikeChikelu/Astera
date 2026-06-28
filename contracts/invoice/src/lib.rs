@@ -4403,4 +4403,90 @@ mod test {
             InvoiceError::NoAdminChangeProposed.into()
         );
     }
+
+    // ── #624: request_extension / approve_extension unit tests ──────────────────
+
+    #[test]
+    fn test_extension_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, admin, pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+        client.mark_funded(&id, &pool);
+
+        let invoice = client.get_invoice(&id);
+        let current_due_date = invoice.due_date;
+        let new_due = current_due_date + 10 * 86_400; // 10 days extension
+
+        // Request extension
+        client.request_extension(&id, &sme, &new_due);
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.pending_due_date, Some(new_due));
+
+        // Approve extension by admin
+        client.approve_extension(&id, &admin);
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.due_date, new_due);
+        assert_eq!(invoice.pending_due_date, None);
+    }
+
+    #[test]
+    fn test_extension_too_large_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin, pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+        client.mark_funded(&id, &pool);
+
+        let invoice = client.get_invoice(&id);
+        let current_due_date = invoice.due_date;
+        // MAX_DUE_DATE_EXTENSION_SECS is 90 days. Request 91 days.
+        let new_due = current_due_date + 91 * 86_400;
+
+        let result = client.try_request_extension(&id, &sme, &new_due);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::ExtensionTooLarge.into()
+        );
+    }
+
+    #[test]
+    fn test_extension_double_request_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin, pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+        client.mark_funded(&id, &pool);
+
+        let invoice = client.get_invoice(&id);
+        let current_due_date = invoice.due_date;
+        let new_due1 = current_due_date + 10 * 86_400;
+        let new_due2 = current_due_date + 20 * 86_400;
+
+        client.request_extension(&id, &sme, &new_due1);
+        let result = client.try_request_extension(&id, &sme, &new_due2);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::ExtensionAlreadyPending.into()
+        );
+    }
+
+    #[test]
+    fn test_approve_no_pending_extension_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, admin, pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+        client.mark_funded(&id, &pool);
+
+        let result = client.try_approve_extension(&id, &admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::NoPendingExtension.into()
+        );
+    }
 }
