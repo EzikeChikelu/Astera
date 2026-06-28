@@ -371,7 +371,7 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
+fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
         return false;
     }

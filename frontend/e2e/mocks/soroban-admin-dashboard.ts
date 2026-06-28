@@ -1,7 +1,5 @@
 import type { Page } from '@playwright/test';
 import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
-
-const SOURCE_ADDRESS = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
 const INVOICE_CONTRACT_ID =
   process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ??
   'CInvoiceAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
@@ -9,11 +7,17 @@ const INVOICE_CONTRACT_ID =
 function extractContractMethod(txXdr: string): string | null {
   try {
     const envelope = xdr.TransactionEnvelope.fromXDR(txXdr, 'base64');
-    const tx = envelope.v1().tx();
+    const v1Envelope = envelope.v1();
+    if (!v1Envelope) return null;
+
+    const tx = v1Envelope.tx();
     const ops = tx.operations();
     if (ops.length === 0) return null;
 
-    const body = ops[0].body();
+    const firstOp = ops.at(0);
+    if (!firstOp) return null;
+
+    const body = firstOp.body();
     if (body.switch().name !== 'invokeHostFunction') return null;
 
     const hostFn = body.invokeHostFunctionOp().hostFunction();
