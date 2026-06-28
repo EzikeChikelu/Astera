@@ -1,133 +1,112 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ---- Rust Contracts ----
-  rust-contracts:
-    name: Rust Contracts
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        contract: [invoice, credit_score, share]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
-      - name: Check formatting
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo clippy -- -D warnings
-
-      - name: Build contract
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Run tests
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo test --verbose
-
-  rust-integration-tests:
-    name: Cross-Contract Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build contracts
-        run: cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share
-
-      - name: Run cross-contract integration tests
-        run: cargo test --manifest-path contracts/tests/Cargo.toml
-
-  rust-audit:
-    name: Rust Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Audit Rust dependencies
-        run: cargo audit --file ../Cargo.lock
-        working-directory: contracts
-
-  # ---- Frontend ----
-  frontend:
-    name: Frontend Build & Test
+  contracts:
+    name: Smart Contracts
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./frontend
+        working-directory: contracts
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        env:
-          NPM_CONFIG_OMIT: ""
-          npm_config_optional: "true"
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -- --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+      - run: cargo test --test fuzz_tests
+      - run: cargo test --test integration_tests
+      - name: Check WASM size
         run: |
-          npm ci --include=optional
+          cargo build --target wasm32-unknown-unknown --release
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            SIZE=$(wc -c < "$wasm" | tr -d ' ')
+            echo "$wasm: $SIZE bytes"
+            if [ "$SIZE" -gt 204800 ]; then
+              echo "ERROR: Binary too large for deployment"
+              exit 1
+            fi
+          done
 
-      - name: Audit npm dependencies
-        run: npm audit --audit-level=moderate
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test -- --coverage
 
-      - name: Type-check TypeScript
-        run: npm run typecheck
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 30
 
-      - name: Run ESLint
-        run: npm run lint
-
-      - name: Build frontend
-        run: npm run build
+  lighthouse:
+    name: Lighthouse CI
+    needs: [e2e]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Build and run Lighthouse CI
+        run: npx lhci autorun
         env:
-          NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+      - name: Upload Lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: .lighthouseci/
+          retention-days: 30

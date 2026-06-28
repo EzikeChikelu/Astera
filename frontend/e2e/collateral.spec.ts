@@ -57,4 +57,44 @@ test.describe('Collateral Flow', () => {
 
     await expect(page.getByText(/collateral released/i)).toBeVisible();
   });
+
+  test('SME deposits collateral for an invoice above the threshold', async ({ page }) => {
+    await injectConnectedWallet(page);
+
+    // Mock invoice with large amount (above collateral threshold)
+    await page.route('**/api/invoices/2', (route) => {
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          status: 'Pending',
+          amount: 100000,
+          owner: MOCK_ADDRESS,
+          threshold: 50000,
+        }),
+      });
+    });
+
+    await page.goto('/invoice/2');
+
+    // Verify collateral requirement section is visible
+    const collateralSection = page.getByRole('heading', { name: /collateral/i });
+    await expect(collateralSection).toBeVisible();
+
+    // Verify the required amount is displayed
+    await expect(page.getByText(/required/i)).toBeVisible();
+
+    // Simulate deposit transaction
+    const depositInput = page.locator('input[placeholder*="required" i]');
+    await expect(depositInput).toBeVisible();
+    await depositInput.fill('5000');
+
+    await page.getByRole('button', { name: /post collateral/i }).click();
+
+    // Verify success toast
+    await expect(page.getByText(/collateral posted successfully/i)).toBeVisible({ timeout: 10000 });
+
+    // Verify the posted amount is shown
+    await expect(page.getByText('5000')).toBeVisible();
+  });
 });
