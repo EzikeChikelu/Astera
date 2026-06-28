@@ -3200,7 +3200,10 @@ impl FundingPool {
         Self::require_not_paused(&env);
         Self::assert_accepted_token(&env, &token)?;
 
-        if bps == 0 || bps > BPS_DENOM {
+        if bps == 0 {
+            return Err(PoolError::ZeroAmount);
+        }
+        if bps > BPS_DENOM {
             return Err(PoolError::InvalidAmount);
         }
 

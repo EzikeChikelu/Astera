@@ -749,9 +749,7 @@ impl CreditScoreContract {
             .get(&DataKey::PoolContract)
             .expect("not initialized");
 
-        if caller != pool {
-            pool.require_auth();
-        }
+        pool.require_auth();
 
         require_not_paused(&env);
 
@@ -809,9 +807,7 @@ impl CreditScoreContract {
             .get(&DataKey::PoolContract)
             .expect("not initialized");
 
-        if caller != pool {
-            pool.require_auth();
-        }
+        pool.require_auth();
 
         require_not_paused(&env);
 
