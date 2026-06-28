@@ -3445,6 +3445,23 @@ impl FundingPool {
         }
     }
 
+    pub fn is_invoice_repaid(env: Env, invoice_id: u64) -> Result<bool, PoolError> {
+        bump_instance(&env);
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .ok_or(PoolError::InvoiceNotFound)?;
+        let (_interest, total_due) =
+            calculate_total_due(&record, &config, env.ledger().timestamp())?;
+        Ok(record.repaid_amount >= total_due)
+    }
+
     pub fn update_invoice_due_date(
         env: Env,
         invoice_contract: Address,
