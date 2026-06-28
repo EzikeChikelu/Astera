@@ -736,7 +736,7 @@ impl CreditScoreContract {
 
     pub fn record_payment(
         env: Env,
-        caller: Address,
+        _caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
@@ -795,7 +795,7 @@ impl CreditScoreContract {
 
     pub fn record_default(
         env: Env,
-        caller: Address,
+        _caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
