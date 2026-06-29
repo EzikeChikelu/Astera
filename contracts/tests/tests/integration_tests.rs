@@ -1007,7 +1007,7 @@ fn test_collateral_not_required_below_threshold() {
     assert_eq!(pool_client.required_collateral_for(&principal), 0);
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &principal * 2);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &(principal * 2));
 
     pool_client.deposit(&investor, &usdc_id, &10_000i128);
 

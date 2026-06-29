@@ -5739,7 +5739,11 @@ mod test {
 
         let result = client.try_get_funded_invoices_batch(&ids);
 
-        assert_eq!(result, Err(Ok(PoolError::BatchTooLarge)));
+        if let Err(Ok(err)) = result {
+            assert_eq!(err, PoolError::BatchTooLarge);
+        } else {
+            panic!("Expected BatchTooLarge error");
+        }
     }
 
     #[test]
@@ -7375,5 +7379,110 @@ mod test {
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let result = client.try_cancel_admin_change(&admin);
         assert_eq!(result, Err(Ok(PoolError::NoAdminChangeProposed)));
+    }
+
+    // ── #623: seize_collateral accounting & validation tests ────────────────────
+
+    #[test]
+    fn test_seize_collateral_happy_path_accounting() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal); // 1,000
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        // Mark invoice defaulted
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
+
+        let tt_before = client.get_token_totals(&usdc_id);
+        let pool_token_client = token::Client::new(&env, &usdc_id);
+        let pool_balance_before = pool_token_client.balance(&client.address);
+
+        client.seize_collateral(&admin, &1u64);
+
+        // 1. Check pool value increased, total deployed decreased by principal
+        let tt_after = client.get_token_totals(&usdc_id);
+        assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
+        assert_eq!(tt_after.total_deployed, tt_before.total_deployed - principal);
+
+        // 2. Check the pool contract still holds the collateral amount (retained, not returned to SME)
+        let pool_balance_after = pool_token_client.balance(&client.address);
+        assert_eq!(pool_balance_after, pool_balance_before); // no tokens transferred out
+
+        // 3. Verify CollateralDeposit.settled = true and seized_at is updated
+        let col = client.get_collateral_deposit(&1u64).unwrap();
+        assert!(col.settled);
+        assert_eq!(col.seized_at, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_seize_collateral_already_settled_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
+
+        client.seize_collateral(&admin, &1u64);
+
+        // Try second time — should fail with CollateralAlreadySettled
+        let result = client.try_seize_collateral(&admin, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::CollateralAlreadySettled)));
+    }
+
+    #[test]
+    fn test_seize_collateral_not_defaulted_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        // Do NOT mark invoice defaulted
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &false);
+
+        let result = client.try_seize_collateral(&admin, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::NotDefaulted)));
     }
 }
