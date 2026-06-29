@@ -1553,3 +1553,108 @@ fn test_token_removal_blocked_with_active_deposits() {
         "EURC should still be in accepted_tokens after failed removal"
     );
 }
+
+/// Integration test: Oracle verification + funding flow (Issue #621)
+#[test]
+fn test_oracle_verified_funding_flow() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_addr = env.register_contract_wasm(None, invoice::WASM);
+    let pool_addr = env.register_contract_wasm(None, pool::WASM);
+    let share_addr = env.register_contract_wasm(None, share::WASM);
+    let usdc_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_addr);
+    let pool_client = pool::Client::new(&env, &pool_addr);
+    let share_client = share::Client::new(&env, &share_addr);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_addr,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_addr, &share_addr, &invoice_addr);
+
+    // Configure oracle on the invoice contract
+    invoice_client.set_oracle(&admin, &oracle);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
+        .mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
+        .mint(&sme, &10_000_000_000i128);
+
+    pool_client.deposit(&investor, &usdc_addr, &5_000_000_000i128);
+
+    // Create invoice — starts in AwaitingVerification because oracle is configured
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #OVF-001"),
+        &String::from_str(&env, "hash_ovf"),
+        &metadata_url(&env),
+    );
+    assert_eq!(inv_id, 1);
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(
+        invoice.status,
+        invoice::InvoiceStatus::AwaitingVerification
+    );
+
+    // mark_funded should be blocked while invoice is AwaitingVerification
+    let block_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        invoice_client.mark_funded(&inv_id, &pool_addr);
+    }));
+    assert!(block_result.is_err());
+
+    // Oracle approves the invoice
+    invoice_client.verify_invoice(
+        &inv_id,
+        &oracle,
+        &true,
+        &String::from_str(&env, ""),
+        &String::from_str(&env, "hash_ovf"),
+    );
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
+    assert!(invoice.oracle_verified);
+
+    // Admin opens co-funding and invoice is funded
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_addr,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_addr);
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
+
+    let totals = pool_client.get_token_totals(&usdc_addr);
+    assert_eq!(totals.total_deployed, 2_000_000_000i128);
+}

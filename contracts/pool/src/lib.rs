@@ -1247,6 +1247,29 @@ impl FundingPool {
             return Err(PoolError::TokenHasActiveBalances);
         }
 
+        // Check 4: No active co-funding commitments in this token (#567)
+        // Scan all FundedInvoice records to find any in co-funding phase with commitments in this token
+        let stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+
+        for invoice_idx in 0..stats.total_funded_invoices {
+            if let Some(funded_invoice) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_idx))
+            {
+                // Check if this funded invoice uses the target token
+                if funded_invoice.token == token {
+                    // Found an active funded invoice using this token
+                    // This represents a co-funding commitment that must be settled before removal
+                    return Err(PoolError::TokenHasActiveCofundingCommitments);
+                }
+            }
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
@@ -1553,7 +1576,7 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         if shares <= 0 {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::ZeroAmount);
         }
         Self::assert_accepted_token(&env, &token)?;
 
@@ -1569,6 +1592,22 @@ impl FundingPool {
             if request.investor == investor {
                 return Err(PoolError::AlreadyQueuedForWithdrawal);
             }
+        }
+
+        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&investor_pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+        if shares > position.available {
+            return Err(PoolError::WithdrawalExceedsLimit);
         }
 
         Self::non_reentrant_start(&env);
