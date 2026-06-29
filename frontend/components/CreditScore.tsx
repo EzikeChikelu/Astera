@@ -183,7 +183,7 @@ export default function CreditScore({
       )}
 
       {/* Score Overview Card */}
-      <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+      <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl">
         <h2 className="text-lg font-semibold mb-6">On-Chain Credit Score</h2>
 
         {/* Staleness warning: score was computed under a previous scoring config */}
@@ -217,7 +217,7 @@ export default function CreditScore({
         {/* Score display with change indicator */}
         <div className="text-center mb-8">
           <div className={`text-5xl font-bold mb-2 ${scoreColor}`}>{score}</div>
-          <div className="text-brand-muted text-sm mb-1">{scoreLabel}</div>
+          <div className="text-[var(--muted)] text-sm mb-1">{scoreLabel}</div>
           {scoreChange !== null && (
             <div
               className={`text-xs font-medium ${
@@ -228,7 +228,7 @@ export default function CreditScore({
               {scoreChange} since last invoice
             </div>
           )}
-          <div className="text-xs text-brand-muted/60 mt-2">Based on {total} invoice(s)</div>
+          <div className="text-xs text-[var(--muted)]/60 mt-2">Based on {total} invoice(s)</div>
         </div>
 
         {/* Score Breakdown */}
@@ -240,28 +240,28 @@ export default function CreditScore({
 
         {/* Additional Stats */}
         {total > 0 && (
-          <div className="mt-6 pt-6 border-t border-brand-border grid grid-cols-2 gap-4">
+          <div className="mt-6 pt-6 border-t border-[var(--border)] grid grid-cols-2 gap-4">
             <div>
-              <div className="text-xs text-brand-muted mb-1">Repayment Rate</div>
+              <div className="text-xs text-[var(--muted)] mb-1">Repayment Rate</div>
               <div className="text-lg font-semibold">{Math.round(repaymentRate * 100)}%</div>
             </div>
             <div>
-              <div className="text-xs text-brand-muted mb-1">Average Payment Days</div>
+              <div className="text-xs text-[var(--muted)] mb-1">Average Payment Days</div>
               <div className="text-lg font-semibold">{avgPaymentDays} days</div>
             </div>
           </div>
         )}
 
         {total === 0 && (
-          <p className="text-center text-brand-muted text-sm mt-4">
+          <p className="text-center text-[var(--muted)] text-sm mt-4">
             Create and repay invoices to build your score.
           </p>
         )}
 
         {/* Score Tier Progress Bar */}
         {nextTier && currentTier && (
-          <div className="mt-6 pt-6 border-t border-brand-border">
-            <div className="flex justify-between text-xs text-brand-muted mb-2">
+          <div className="mt-6 pt-6 border-t border-[var(--border)]">
+            <div className="flex justify-between text-xs text-[var(--muted)] mb-2">
               <span>
                 {currentTier.name} ({score})
               </span>
@@ -283,7 +283,7 @@ export default function CreditScore({
                 }}
               />
             </div>
-            <div className="text-xs text-brand-muted mt-2 text-center">
+            <div className="text-xs text-[var(--muted)] mt-2 text-center">
               {pointsToNext} pts to {nextTier.name}
             </div>
           </div>
@@ -291,14 +291,14 @@ export default function CreditScore({
       </div>
 
       {/* Score Improvement Panel (collapsed by default) */}
-      <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden">
+      <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl overflow-hidden">
         <button
           onClick={() => setShowImprovement(!showImprovement)}
           className="w-full p-6 text-left flex items-center justify-between hover:bg-brand-border/20 transition"
         >
           <h3 className="text-lg font-semibold">Improve your score</h3>
           <svg
-            className={`w-5 h-5 text-brand-muted transition-transform ${
+            className={`w-5 h-5 text-[var(--muted)] transition-transform ${
               showImprovement ? 'rotate-180' : ''
             }`}
             fill="none"
@@ -313,24 +313,24 @@ export default function CreditScore({
           <div className="px-6 pb-6 space-y-6">
             {/* Score Breakdown Table */}
             <div>
-              <h4 className="text-sm font-semibold text-brand-muted uppercase tracking-wider mb-3">
+              <h4 className="text-sm font-semibold text-[var(--muted)] uppercase tracking-wider mb-3">
                 Current Stats vs. Recommendations
               </h4>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-brand-border">
-                      <th className="text-left text-brand-muted py-2 px-2">Factor</th>
-                      <th className="text-left text-brand-muted py-2 px-2">Your Stats</th>
-                      <th className="text-left text-brand-muted py-2 px-2">Impact</th>
-                      <th className="text-left text-brand-muted py-2 px-2">Tip</th>
+                    <tr className="border-b border-[var(--border)]">
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Factor</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Your Stats</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Impact</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Tip</th>
                     </tr>
                   </thead>
                   <tbody>
                     {recommendations.map((rec, i) => (
-                      <tr key={i} className="border-b border-brand-border/50">
+                      <tr key={i} className="border-b border-[var(--border)]/50">
                         <td className="py-3 px-2 font-medium">{rec.factor}</td>
-                        <td className="py-3 px-2 text-brand-muted">{rec.stat}</td>
+                        <td className="py-3 px-2 text-[var(--muted)]">{rec.stat}</td>
                         <td className="py-3 px-2">
                           <span
                             className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
@@ -344,7 +344,7 @@ export default function CreditScore({
                             {rec.impact}
                           </span>
                         </td>
-                        <td className="py-3 px-2 text-brand-muted text-xs">{rec.tip}</td>
+                        <td className="py-3 px-2 text-[var(--muted)] text-xs">{rec.tip}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -358,9 +358,9 @@ export default function CreditScore({
                 <h4 className="text-sm font-semibold mb-2">Next Milestone: {nextTier.name}</h4>
                 <div className="flex items-center gap-3 mb-3">
                   <div className="text-2xl font-bold">{nextTier.min}</div>
-                  <div className="text-xs text-brand-muted">{pointsToNext} points away</div>
+                  <div className="text-xs text-[var(--muted)]">{pointsToNext} points away</div>
                 </div>
-                <p className="text-sm text-brand-muted">
+                <p className="text-sm text-[var(--muted)]">
                   {TIER_BENEFITS[nextTier.name] || 'Unlock new benefits at this tier'}
                 </p>
                 {pointsToNext <= PTS_PAID_ON_TIME * 2 && (
@@ -379,23 +379,23 @@ export default function CreditScore({
 
       {/* Payment History Table */}
       {paymentHistory.length > 0 && (
-        <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+        <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl">
           <h3 className="text-lg font-semibold mb-4">Payment History</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-brand-border">
-                  <th className="text-left text-brand-muted py-3 px-2">Invoice</th>
-                  <th className="text-right text-brand-muted py-3 px-2">Amount</th>
-                  <th className="text-left text-brand-muted py-3 px-2">Status</th>
-                  <th className="text-right text-brand-muted py-3 px-2">Days Late</th>
+                <tr className="border-b border-[var(--border)]">
+                  <th className="text-left text-[var(--muted)] py-3 px-2">Invoice</th>
+                  <th className="text-right text-[var(--muted)] py-3 px-2">Amount</th>
+                  <th className="text-left text-[var(--muted)] py-3 px-2">Status</th>
+                  <th className="text-right text-[var(--muted)] py-3 px-2">Days Late</th>
                 </tr>
               </thead>
               <tbody>
                 {paymentHistory.slice(0, 10).map((record) => (
                   <tr
                     key={record.invoiceId}
-                    className="border-b border-brand-border hover:bg-brand-border/30 transition"
+                    className="border-b border-[var(--border)] hover:bg-brand-border/30 transition"
                   >
                     <td className="py-3 px-2 font-medium">#{record.invoiceId}</td>
                     <td className="text-right py-3 px-2">
@@ -443,7 +443,7 @@ function ScoreRow({
   return (
     <div>
       <div className="flex justify-between text-sm mb-1">
-        <span className="text-brand-muted">{label}</span>
+        <span className="text-[var(--muted)]">{label}</span>
         <span className="font-medium">{count}</span>
       </div>
       <div className="h-1.5 bg-brand-border rounded-full overflow-hidden">
@@ -458,7 +458,7 @@ function ScoreRow({
 
 export function CreditScoreSkeleton() {
   return (
-    <div className="p-6 bg-brand-card border border-brand-border rounded-2xl animate-pulse">
+    <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl animate-pulse">
       <Skeleton className="h-5 w-44 mb-6" />
 
       <div className="text-center mb-8">
@@ -481,7 +481,7 @@ export function CreditScoreSkeleton() {
         ))}
       </div>
 
-      <div className="mt-6 pt-6 border-t border-brand-border grid grid-cols-2 gap-4">
+      <div className="mt-6 pt-6 border-t border-[var(--border)] grid grid-cols-2 gap-4">
         <div>
           <Skeleton className="h-3 w-20 mb-1" />
           <Skeleton className="h-6 w-14" />
