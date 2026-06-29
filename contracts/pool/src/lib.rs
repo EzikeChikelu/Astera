@@ -147,6 +147,8 @@ pub enum PoolError {
     NoAdminChangeProposed = 56,
     // #655: estimate_repayment rejects an as_of_timestamp earlier than now
     TimestampInPast = 57,
+    // #567: token removal with active co-funding commitments
+    TokenHasActiveCofundingCommitments = 58,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1223,6 +1225,29 @@ impl FundingPool {
 
         if total_shares > 0 {
             return Err(PoolError::TokenHasActiveBalances);
+        }
+
+        // Check 4: No active co-funding commitments in this token (#567)
+        // Scan all FundedInvoice records to find any in co-funding phase with commitments in this token
+        let stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+
+        for invoice_idx in 0..stats.total_funded_invoices {
+            if let Some(funded_invoice) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_idx))
+            {
+                // Check if this funded invoice uses the target token
+                if funded_invoice.token == token {
+                    // Found an active funded invoice using this token
+                    // This represents a co-funding commitment that must be settled before removal
+                    return Err(PoolError::TokenHasActiveCofundingCommitments);
+                }
+            }
         }
 
         env.storage()
