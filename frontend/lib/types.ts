@@ -138,6 +138,16 @@ export function isStellarAddress(value: string): value is StellarAddress {
   return STELLAR_ADDRESS_REGEX.test(value);
 }
 
+export interface GovernanceConfig {
+  admin: StellarAddress;
+  shareToken: string;
+  votingPeriodSecs: number;
+  quorumBps: number;
+  passBps: number;
+  executionDelaySecs: number;
+  minShareBalance: bigint;
+}
+
 export interface CollateralConfig {
   threshold: bigint;
   collateralBps: number;
