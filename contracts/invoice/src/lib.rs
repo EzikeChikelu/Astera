@@ -371,7 +371,7 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
+fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
         return false;
     }
@@ -2392,7 +2392,11 @@ impl InvoiceContract {
             .set(&DataKey::AdminChangeScheduledAt, &env.ledger().timestamp());
         env.events().publish(
             (EVT, Symbol::new(&env, "admin_chg_proposed")),
-            (admin, new_admin, env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK_SECS),
+            (
+                admin,
+                new_admin,
+                env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK_SECS,
+            ),
         );
     }
 
@@ -2422,8 +2426,7 @@ impl InvoiceContract {
         if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
             panic_with_error!(&env, InvoiceError::AdminChangeTimelockNotExpired);
         }
-        let maybe_new_admin: Option<Address> =
-            env.storage().instance().get(&DataKey::PendingAdmin);
+        let maybe_new_admin: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         let new_admin = match maybe_new_admin {
             Some(v) => v,
             None => panic_with_error!(&env, InvoiceError::NoAdminChangeProposed),
@@ -2460,10 +2463,8 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .remove(&DataKey::AdminChangeScheduledAt);
-        env.events().publish(
-            (EVT, Symbol::new(&env, "admin_chg_cancelled")),
-            admin,
-        );
+        env.events()
+            .publish((EVT, Symbol::new(&env, "admin_chg_cancelled")), admin);
     }
 
     pub fn check_default_warning(env: Env, id: u64) -> bool {
