@@ -147,6 +147,8 @@ pub enum PoolError {
     NoAdminChangeProposed = 56,
     // #655: estimate_repayment rejects an as_of_timestamp earlier than now
     TimestampInPast = 57,
+    // #531: funding rejected because the invoice due date has already passed
+    InvoiceExpired = 58,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -816,6 +818,12 @@ fn fund_invoice_request(
     }
 
     let now = env.ledger().timestamp();
+
+    // #531: reject funding if the invoice due date has already passed
+    if now >= request.due_date {
+        return Err(PoolError::InvoiceExpired);
+    }
+
     let factoring_fee = resolve_factoring_fee(
         env,
         config,
