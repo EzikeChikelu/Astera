@@ -22,7 +22,6 @@ export class Listener {
     // Subscribe to contract effects (which include events)
     // Note: In a production environment, you should persist the cursor to resume after restart.
     this.horizon.effects()
-      .forContract(this.config.invoiceContractId)
       .cursor('now')
       .stream({
         onmessage: (effect: any) => {
@@ -41,6 +40,11 @@ export class Listener {
     }
 
     try {
+      // Filter by contract ID if present on the effect
+      if (effect.contract_id && effect.contract_id !== this.config.invoiceContractId) {
+        return;
+      }
+
       this.processedCount += 1;
 
       // Horizon effects for Soroban events typically have the topic and value

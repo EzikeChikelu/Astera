@@ -4,7 +4,13 @@ import { getUserFriendlyError } from '@/lib/errorHandling';
 // (account fetch + simulation) while keeping the real scVal/Address helpers.
 jest.mock('@/lib/stellar', () => {
   const actual = jest.requireActual('@/lib/stellar');
-  return { __esModule: true, ...actual, rpcExecute: jest.fn() };
+  return {
+    __esModule: true,
+    ...actual,
+    rpcExecute: jest.fn(),
+    INVOICE_CONTRACT_ID: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+    POOL_CONTRACT_ID: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+  };
 });
 
 // Keep the real SDK (TransactionBuilder, Contract, Account, Keypair, …) but stub

@@ -21,39 +21,31 @@ async function flushMicrotasks() {
   }
 }
 
-function mockStellarSdk(overrides: Record<string, unknown> = {}) {
-  jest.doMock(
-    '@stellar/stellar-sdk',
-    () => ({
-      Networks: { TESTNET: 'testnet-passphrase' },
-      BASE_FEE: '100',
-      Contract: jest.fn(),
-      rpc: {
-        Server: jest.fn(() => ({
-          getHealth: jest.fn(),
-        })),
-      },
-      scValToNative: jest.fn((value: unknown) => value),
-      nativeToScVal: jest.fn((value: unknown) => value),
-      Address: jest.fn(),
-      xdr: {},
-      TransactionBuilder: {
-        fromXDR: jest.fn(() => ({
-          hash: () => new Uint8Array([1, 2, 3]),
-        })),
-      },
-      ...overrides,
-    }),
-    { virtual: true },
-  );
-}
+jest.mock('@stellar/stellar-sdk', () => ({
+  Networks: { TESTNET: 'testnet-passphrase' },
+  BASE_FEE: '100',
+  Contract: jest.fn(),
+  rpc: {
+    Server: jest.fn(() => ({
+      getHealth: jest.fn(),
+    })),
+  },
+  scValToNative: jest.fn((value: unknown) => value),
+  nativeToScVal: jest.fn((value: unknown) => value),
+  Address: jest.fn(),
+  xdr: {},
+  TransactionBuilder: {
+    fromXDR: jest.fn(() => ({
+      hash: () => new Uint8Array([1, 2, 3]),
+    })),
+  },
+}));
 
 describe('stellar RPC rate limiting', () => {
   beforeEach(() => {
     jest.resetModules();
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-04-29T00:00:00Z'));
-    mockStellarSdk();
   });
 
   afterEach(() => {
@@ -161,7 +153,6 @@ describe('stellar transaction submission guard', () => {
 
   afterEach(() => {
     jest.useRealTimers();
-    jest.dontMock('@stellar/stellar-sdk');
   });
 
   it('rejects duplicate in-flight submissions and clears the guard when finished', async () => {
@@ -171,20 +162,16 @@ describe('stellar transaction submission guard', () => {
 
     sendTransaction.mockReturnValue(sendBlocker.promise);
 
-    mockStellarSdk({
-      rpc: {
-        Server: jest.fn(() => ({
-          getHealth: jest.fn(),
-          sendTransaction,
-          getTransaction,
-        })),
-      },
-      TransactionBuilder: {
-        fromXDR: jest.fn(() => ({
-          hash: () => new Uint8Array([1, 2, 3]),
-        })),
-      },
-    });
+    // Patch the hoisted mock before importing stellar
+    const mockSdk = jest.requireMock('@stellar/stellar-sdk') as {
+      rpc: { Server: jest.Mock };
+      TransactionBuilder: { fromXDR: jest.Mock };
+    };
+    mockSdk.rpc.Server = jest.fn(() => ({
+      getHealth: jest.fn(),
+      sendTransaction,
+      getTransaction,
+    }));
 
     const { submitTx } = await import('../../lib/stellar');
 
