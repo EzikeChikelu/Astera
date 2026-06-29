@@ -1531,7 +1531,7 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         if shares <= 0 {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::ZeroAmount);
         }
         Self::assert_accepted_token(&env, &token)?;
 
@@ -1547,6 +1547,22 @@ impl FundingPool {
             if request.investor == investor {
                 return Err(PoolError::AlreadyQueuedForWithdrawal);
             }
+        }
+
+        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&investor_pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+        if shares > position.available {
+            return Err(PoolError::WithdrawalExceedsLimit);
         }
 
         Self::non_reentrant_start(&env);
