@@ -147,8 +147,8 @@ pub enum PoolError {
     NoAdminChangeProposed = 56,
     // #655: estimate_repayment rejects an as_of_timestamp earlier than now
     TimestampInPast = 57,
-    // #567: token removal with active co-funding commitments
-    TokenHasActiveCofundingCommitments = 58,
+    // #531: funding rejected because the invoice due date has already passed
+    InvoiceExpired = 58,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -459,6 +459,7 @@ const EVT: Symbol = symbol_short!("POOL");
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
     fn get_credit_score(env: Env, sme: Address) -> CreditScoreData;
+    fn record_funding(env: Env, caller: Address, invoice_id: u64, sme: Address, amount: i128);
 }
 
 /// Cross-contract interface to the invoice contract (#385, #386).
@@ -818,6 +819,12 @@ fn fund_invoice_request(
     }
 
     let now = env.ledger().timestamp();
+
+    // #531: reject funding if the invoice due date has already passed
+    if now >= request.due_date {
+        return Err(PoolError::InvoiceExpired);
+    }
+
     let factoring_fee = resolve_factoring_fee(
         env,
         config,
@@ -911,6 +918,19 @@ fn fund_invoice_request(
             env.ledger().timestamp(),
         ),
     );
+
+    // #534: notify the credit score contract that this borrower secured funding.
+    // Non-fatal — a cross-contract failure must not revert a successful funding.
+    if let Some(cs_contract) = get_credit_score_contract(env) {
+        let cs_client = CreditScoreClient::new(env, &cs_contract);
+        let _ = cs_client.try_record_funding(
+            &env.current_contract_address(),
+            &request.invoice_id,
+            &request.sme,
+            &request.principal,
+        );
+    }
+
     Ok(())
 }
 
@@ -2312,6 +2332,11 @@ impl FundingPool {
             .persistent()
             .get(&funded_invoice_key)
             .ok_or(PoolError::InvoiceNotFound)?;
+
+        // #536: only the invoice's borrower (SME) may repay their own invoice
+        if payer != record.sme {
+            return Err(PoolError::Unauthorized);
+        }
 
         let now = env.ledger().timestamp();
         let (total_interest, total_due) = calculate_total_due(&record, &config, now)?;

@@ -24,6 +24,43 @@
   --text-secondary: #334155;
 }
 
+/* ---- Light mode: override hardcoded Tailwind brand colors ---- */
+:root.light .bg-brand-dark {
+  background-color: #f1f5f9 !important;
+}
+:root.light .bg-brand-card {
+  background-color: #ffffff !important;
+}
+:root.light .bg-brand-navy {
+  background-color: #f8fafc !important;
+}
+:root.light .border-brand-border {
+  border-color: #e2e8f0 !important;
+}
+:root.light .text-white {
+  color: #0f172a !important;
+}
+:root.light .text-brand-muted {
+  color: #64748b !important;
+}
+:root.light .placeholder-brand-muted::placeholder {
+  color: #94a3b8 !important;
+}
+:root.light .bg-brand-dark\/80 {
+  background-color: rgba(248, 250, 252, 0.9) !important;
+}
+:root.light input,
+:root.light textarea,
+:root.light select {
+  background-color: #f8fafc;
+  color: #0f172a;
+  border-color: #e2e8f0;
+}
+:root.light input::placeholder,
+:root.light textarea::placeholder {
+  color: #94a3b8;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;

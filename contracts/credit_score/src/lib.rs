@@ -793,6 +793,51 @@ impl CreditScoreContract {
         );
     }
 
+    /// Record that the borrower's invoice has been successfully funded (#534).
+    /// Being funded is a positive demand signal — lenders deployed capital,
+    /// which is evidence of creditworthiness. The weight is intentionally light
+    /// so funding events alone cannot override a poor repayment history.
+    ///
+    /// Idempotent: duplicate calls for the same invoice_id are silently ignored.
+    pub fn record_funding(
+        env: Env,
+        _caller: Address,
+        invoice_id: u64,
+        sme: Address,
+        amount: i128,
+    ) {
+        let pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .expect("not initialized");
+
+        pool.require_auth();
+
+        require_not_paused(&env);
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::InvoiceProcessed(invoice_id))
+        {
+            return;
+        }
+
+        let mut credit_data = Self::get_or_create_credit_data(&env, &sme);
+        credit_data.total_volume = credit_data.total_volume.saturating_add(amount);
+        credit_data.last_updated = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CreditScore(sme.clone()), &credit_data);
+
+        env.events().publish(
+            (EVT, symbol_short!("funded")),
+            (sme, invoice_id, amount, env.ledger().timestamp()),
+        );
+    }
+
     pub fn record_default(
         env: Env,
         _caller: Address,
