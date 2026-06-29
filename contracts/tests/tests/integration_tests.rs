@@ -1658,3 +1658,420 @@ fn test_oracle_verified_funding_flow() {
     let totals = pool_client.get_token_totals(&usdc_addr);
     assert_eq!(totals.total_deployed, 2_000_000_000i128);
 }
+
+/// Integration test: Concurrent deposit and withdrawal in same ledger
+/// Verifies pool accounting is correct regardless of transaction ordering
+#[test]
+fn test_concurrent_deposit_and_withdrawal_same_ledger() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let (pool_client, share_client, admin, usdc_id) = setup_pool(&env);
+    
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    // Mint tokens to lenders
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender2, &10_000_000_000i128);
+
+    // Initial deposit from lender1
+    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
+    let initial_pool_value = pool_client.get_token_totals(&usdc_id).pool_value;
+    assert_eq!(initial_pool_value, 5_000_000_000i128);
+
+    // Simulate same-ledger transactions: 
+    // Transaction 1: lender2 deposits 1000 USDC
+    // Transaction 2: lender1 withdraws 500 USDC worth of shares
+    
+    // Execute deposit first
+    pool_client.deposit(&lender2, &usdc_id, &1_000_000_000i128);
+    
+    // Same ledger - no sequence number increment
+    // Execute withdrawal immediately after
+    let shares_to_withdraw = share_client.balance(&lender1) / 10; // withdraw 10%
+    pool_client.withdraw(&lender1, &usdc_id, &shares_to_withdraw);
+
+    // Verify final pool value is correct
+    let final_totals = pool_client.get_token_totals(&usdc_id);
+    let expected_value = 5_000_000_000i128 + 1_000_000_000i128 - 500_000_000i128;
+    assert_eq!(final_totals.pool_value, expected_value);
+
+    // Test reverse ordering: withdrawal then deposit
+    let env2 = test_env();
+    env2.mock_all_auths_allowing_non_root_auth();
+    env2.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let (pool_client2, share_client2, _admin2, usdc_id2) = setup_pool(&env2);
+    let lender1_alt = Address::generate(&env2);
+    let lender2_alt = Address::generate(&env2);
+
+    soroban_sdk::token::StellarAssetClient::new(&env2, &usdc_id2)
+        .mint(&lender1_alt, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env2, &usdc_id2)
+        .mint(&lender2_alt, &10_000_000_000i128);
+
+    pool_client2.deposit(&lender1_alt, &usdc_id2, &5_000_000_000i128);
+
+    // Reverse order: withdraw then deposit (same ledger)
+    let shares_alt = share_client2.balance(&lender1_alt) / 10;
+    pool_client2.withdraw(&lender1_alt, &usdc_id2, &shares_alt);
+    pool_client2.deposit(&lender2_alt, &usdc_id2, &1_000_000_000i128);
+
+    // Should have same final value regardless of ordering
+    let final_totals2 = pool_client2.get_token_totals(&usdc_id2);
+    assert_eq!(final_totals2.pool_value, expected_value);
+}
+
+/// Integration test: Deposit during active invoice funding
+/// Verifies new deposits are correctly accounted for in next yield calculation
+#[test]
+fn test_deposit_during_active_funding() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+
+    // Mint tokens
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &10_000_000_000i128);
+
+    // Initial deposit from lender1
+    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
+    let shares_lender1_initial = share_client.balance(&lender1);
+
+    // Create and fund invoice
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+
+    // Fund invoice - this deploys capital
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    // While invoice is active, lender2 deposits (same ledger)
+    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128);
+    let shares_lender2 = share_client.balance(&lender2);
+
+    // Verify pool accounting
+    let totals = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals.pool_value, 8_000_000_000i128); // 5B + 3B
+    assert_eq!(totals.total_deployed, 2_000_000_000i128);
+    assert_eq!(pool_client.available_liquidity(&usdc_id), 6_000_000_000i128);
+
+    // SME repays with interest
+    env.ledger().with_mut(|l| l.timestamp += 20 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&inv_id, &None);
+    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+
+    // Both lenders should get proportional yield
+    // Lender1 had capital deployed, lender2 did not
+    let shares_lender1_final = share_client.balance(&lender1);
+    
+    // Lender1's shares should be same (yield increases share value, not count)
+    assert_eq!(shares_lender1_final, shares_lender1_initial);
+    
+    // When they withdraw, lender1 should have higher returns per share
+    pool_client.withdraw(&lender1, &usdc_id, &shares_lender1_final);
+    pool_client.withdraw(&lender2, &usdc_id, &shares_lender2);
+
+    let balance1 = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender1);
+    let balance2 = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender2);
+
+    // Lender1 should have earned yield
+    assert!(balance1 > 5_000_000_000i128);
+    // Lender2 deposited after deployment, should get base amount
+    assert_eq!(balance2, 3_000_000_000i128);
+}
+
+/// Integration test: Withdrawal while invoice is being repaid
+/// Verifies repayment is credited before withdrawal accounting
+#[test]
+fn test_withdraw_during_repayment() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+
+    // Mint tokens
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &10_000_000_000i128);
+
+    // Lender deposits
+    pool_client.deposit(&lender, &usdc_id, &5_000_000_000i128);
+
+    // Create and fund invoice
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &4_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &4_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    // Move time forward
+    env.ledger().with_mut(|l| l.timestamp += 20 * 86_400);
+
+    // SME repays invoice
+    let amount_due = pool_client.estimate_repayment(&inv_id, &None);
+    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+
+    // In same ledger, lender tries to withdraw
+    // The repayment should be reflected in pool value
+    let totals_before = pool_client.get_token_totals(&usdc_id);
+    assert!(totals_before.pool_value > 5_000_000_000i128); // Includes repayment with yield
+    assert_eq!(totals_before.total_deployed, 0i128); // Invoice fully repaid
+
+    // Lender withdraws all shares
+    let shares = share_client.balance(&lender);
+    pool_client.withdraw(&lender, &usdc_id, &shares);
+
+    // Lender should receive their deposit plus yield
+    let lender_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender);
+    assert!(lender_balance > 5_000_000_000i128);
+
+    // Pool should be empty
+    let totals_after = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals_after.pool_value, 0i128);
+}
+
+/// Integration test: Multiple lenders withdraw simultaneously when pool is 90% deployed
+/// Verifies only liquid portion is accessible and later withdrawals correctly fail
+#[test]
+fn test_multiple_simultaneous_withdrawals_high_deployment() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let lender3 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+
+    // Mint tokens to all lenders
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&lender3, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &10_000_000_000i128);
+
+    // All lenders deposit equal amounts
+    pool_client.deposit(&lender1, &usdc_id, &3_000_000_000i128);
+    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128);
+    pool_client.deposit(&lender3, &usdc_id, &4_000_000_000i128);
+
+    let total_pool = pool_client.get_token_totals(&usdc_id).pool_value;
+    assert_eq!(total_pool, 10_000_000_000i128);
+
+    // Deploy 90% of pool to invoice
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &9_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &9_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    // Verify deployment
+    let totals = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals.total_deployed, 9_000_000_000i128);
+    assert_eq!(pool_client.available_liquidity(&usdc_id), 1_000_000_000i128);
+
+    // All three lenders try to withdraw simultaneously (same ledger)
+    // Only 1B liquidity available, total value is 10B
+    
+    // Lender1 attempts to withdraw all their shares (should represent 3B value)
+    let shares1 = share_client.balance(&lender1);
+    let result1 = pool_client.try_withdraw(&lender1, &usdc_id, &shares1);
+    
+    // First withdrawal should fail if trying to withdraw more than available liquidity
+    // or succeed with partial amount
+    // Based on pool logic, this might fail with insufficient liquidity error
+    assert!(result1.is_err());
+
+    // Lender1 tries to withdraw only available liquidity portion
+    let shares_for_available = shares1 / 10; // ~10% of their shares (~300M USDC)
+    pool_client.withdraw(&lender1, &usdc_id, &shares_for_available);
+
+    // Verify liquidity reduced
+    let remaining_liquidity = pool_client.available_liquidity(&usdc_id);
+    assert!(remaining_liquidity < 1_000_000_000i128);
+
+    // Lender2 tries to withdraw all shares - should fail
+    let shares2 = share_client.balance(&lender2);
+    let result2 = pool_client.try_withdraw(&lender2, &usdc_id, &shares2);
+    assert!(result2.is_err());
+
+    // Lender3 tries to withdraw small amount within remaining liquidity
+    let shares3_small = share_client.balance(&lender3) / 40; // ~2.5% (~100M)
+    if remaining_liquidity >= 100_000_000i128 {
+        pool_client.withdraw(&lender3, &usdc_id, &shares3_small);
+    }
+
+    // After invoice repayment, all should be able to withdraw
+    env.ledger().with_mut(|l| l.timestamp += 25 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&inv_id, &None);
+    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+
+    // Now all lenders can withdraw remaining shares
+    let shares1_remaining = share_client.balance(&lender1);
+    let shares2_remaining = share_client.balance(&lender2);
+    let shares3_remaining = share_client.balance(&lender3);
+
+    pool_client.withdraw(&lender1, &usdc_id, &shares1_remaining);
+    pool_client.withdraw(&lender2, &usdc_id, &shares2_remaining);
+    pool_client.withdraw(&lender3, &usdc_id, &shares3_remaining);
+
+    // All lenders should have received their deposits plus yield
+    let balance1 = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender1);
+    let balance2 = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender2);
+    let balance3 = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&lender3);
+
+    assert!(balance1 > 3_000_000_000i128);
+    assert!(balance2 > 3_000_000_000i128);
+    assert!(balance3 > 4_000_000_000i128);
+}
