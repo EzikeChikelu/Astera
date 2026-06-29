@@ -57,6 +57,10 @@ export default function GovernancePage() {
   const hasMoreProposals = visibleCount < filteredProposals.length;
 
   const loadProposals = useCallback(async () => {
+    if (!GOVERNANCE_CONTRACT_ID) {
+      setRefreshing(false);
+      return;
+    }
     setRefreshing(true);
     try {
       const items = await listGovernanceProposals();
@@ -88,6 +92,10 @@ export default function GovernancePage() {
   }, [wallet.address, governanceConfig]);
 
   useEffect(() => {
+    if (!GOVERNANCE_CONTRACT_ID) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     Promise.all([loadProposals(), loadVotingPower()]).finally(() => setLoading(false));
     const interval = setInterval(loadProposals, 30_000);
