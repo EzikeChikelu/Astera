@@ -285,37 +285,38 @@ export class AsteraClient {
   private async submitTx(
     signedXDR: string,
     onProgress?: (progress: TransactionProgress) => void,
-  ): Promise<StellarRpc.Api.GetTransactionResponse> {
+  ): Promise<{ hash: string } & StellarRpc.Api.GetTransactionResponse> {
     const tx = TransactionBuilder.fromXDR(signedXDR, this.config.network);
     const response = await this.server.sendTransaction(tx);
+    const hash = response.hash;
 
     if (response.status === 'ERROR') {
       const error = `Transaction failed: ${JSON.stringify(response)}`;
-      onProgress?.({ status: 'failed', hash: response.hash, error });
+      onProgress?.({ status: 'failed', hash, error });
       throw new Error(error);
     }
 
-    onProgress?.({ status: 'pending', hash: response.hash });
-    let result = await this.server.getTransaction(response.hash);
+    onProgress?.({ status: 'pending', hash });
+    let result = await this.server.getTransaction(hash);
     let attempts = 0;
 
     while (
       (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
       attempts < 20
     ) {
-      onProgress?.({ status: 'pending', hash: response.hash });
+      onProgress?.({ status: 'pending', hash });
       await new Promise((r) => setTimeout(r, 1500));
-      result = await this.server.getTransaction(response.hash);
+      result = await this.server.getTransaction(hash);
       attempts++;
     }
 
     if (String(result.status) === 'FAILED') {
       const error = 'Transaction failed on-chain';
-      onProgress?.({ status: 'failed', hash: response.hash, error });
+      onProgress?.({ status: 'failed', hash, error });
       throw new Error(error);
     }
 
-    onProgress?.({ status: 'confirmed', hash: response.hash });
-    return result;
+    onProgress?.({ status: 'confirmed', hash });
+    return Object.assign(result, { hash });
   }
 }

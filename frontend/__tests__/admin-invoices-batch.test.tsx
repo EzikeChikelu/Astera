@@ -79,7 +79,8 @@ describe('AdminInvoicesPage batch funding', () => {
     await userEvent.click(batchButton);
     expect(await screen.findByText('Fund 1 selected invoices')).toBeInTheDocument();
 
-    const confirmButton = screen.getByRole('button', { name: /Fund selected/i });
+    const confirmButtons = screen.getAllByRole('button', { name: /Fund selected/i });
+    const confirmButton = confirmButtons[confirmButtons.length - 1]!;
     await userEvent.click(confirmButton);
 
     await waitFor(() => {
