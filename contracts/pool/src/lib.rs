@@ -182,11 +182,12 @@ const DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS: u32 = 30;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
-const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
+// 5 years — aligned with the invoice contract's DEFAULT_COMPLETED_INVOICE_TTL so a
+// pool FundedInvoice record does not expire long before its invoice record (#636).
+const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365 * 5;
 // Collateral records are kept for 90 days after settlement (repayment or
-// seizure) so auditors and the SME have time to verify the record exists.
-// This is longer than COMPLETED_INVOICE_TTL (30 days) because collateral
-// disputes may arise well after the invoice is closed.
+// seizure) so auditors and the SME have time to verify the record exists,
+// covering the post-settlement audit/dispute window.
 const SETTLEMENT_COLLATERAL_TTL: u32 = LEDGERS_PER_DAY * 90;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
@@ -2642,8 +2643,7 @@ impl FundingPool {
                 .persistent()
                 .set(&DataKey::CollateralDeposit(invoice_id), &col);
             // Use SETTLEMENT_COLLATERAL_TTL (90 days) so the seizure record
-            // outlives COMPLETED_INVOICE_TTL (30 days) and remains queryable
-            // for the full post-default audit window.
+            // remains queryable for the full post-default audit window.
             env.storage().persistent().extend_ttl(
                 &DataKey::CollateralDeposit(invoice_id),
                 SETTLEMENT_COLLATERAL_TTL,
