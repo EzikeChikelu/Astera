@@ -28,6 +28,7 @@ import type {
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
+  GovernanceConfig,
   GovernanceProposal,
   StellarAddress,
 } from './types';
@@ -1134,6 +1135,50 @@ export async function getCreditScoreStatus(
 }
 
 // ---- Governance ----
+
+export async function getGovernanceConfig(): Promise<GovernanceConfig | null> {
+  if (!GOVERNANCE_CONTRACT_ID) return null;
+
+  try {
+    const sim = await simulateTx(
+      GOVERNANCE_CONTRACT_ID,
+      'get_config',
+      [],
+      'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+    );
+
+    const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+    const raw = scValToNative(result!.retval) as Record<string, unknown>;
+
+    return {
+      admin: raw.admin as StellarAddress,
+      shareToken: raw.share_token as string,
+      votingPeriodSecs: Number(raw.voting_period_secs),
+      quorumBps: Number(raw.quorum_bps),
+      passBps: Number(raw.pass_bps),
+      executionDelaySecs: Number(raw.execution_delay_secs),
+      minShareBalance: BigInt(String(raw.min_share_balance ?? 0)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getShareBalance(shareTokenId: string, address: string): Promise<bigint> {
+  try {
+    const sim = await simulateTx(
+      shareTokenId,
+      'balance',
+      [new Address(address).toScVal()],
+      address,
+    );
+
+    const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+    return BigInt(String(scValToNative(result!.retval) ?? 0));
+  } catch {
+    return 0n;
+  }
+}
 
 export async function listGovernanceProposals(): Promise<GovernanceProposal[]> {
   if (!GOVERNANCE_CONTRACT_ID) return [];

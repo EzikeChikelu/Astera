@@ -6,13 +6,15 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { GOVERNANCE_CONTRACT_ID, formatDate, truncateAddress } from '@/lib/stellar';
 import {
+  getGovernanceConfig,
+  getShareBalance,
   listGovernanceProposals,
   buildCreateProposalTx,
   buildVoteProposalTx,
   buildExecuteProposalTx,
   submitTx,
 } from '@/lib/contracts';
-import type { GovernanceProposal, ProposalStatus } from '@/lib/types';
+import type { GovernanceConfig, GovernanceProposal, ProposalStatus } from '@/lib/types';
 
 const PROPOSALS_PAGE_SIZE = 10;
 
@@ -25,6 +27,8 @@ export default function GovernancePage() {
   const [proposals, setProposals] = useState<GovernanceProposal[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [votingPower, setVotingPower] = useState<bigint | null>(null);
+  const [governanceConfig, setGovernanceConfig] = useState<GovernanceConfig | null>(null);
   const [formOpen, setFormOpen] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -68,12 +72,27 @@ export default function GovernancePage() {
     }
   }, [selectedId]);
 
+  const loadVotingPower = useCallback(async () => {
+    if (!wallet.address || !GOVERNANCE_CONTRACT_ID) return;
+
+    let config = governanceConfig;
+    if (!config) {
+      config = await getGovernanceConfig();
+      if (config) setGovernanceConfig(config);
+    }
+
+    if (config) {
+      const balance = await getShareBalance(config.shareToken, wallet.address);
+      setVotingPower(balance);
+    }
+  }, [wallet.address, governanceConfig]);
+
   useEffect(() => {
     setLoading(true);
-    loadProposals().finally(() => setLoading(false));
+    Promise.all([loadProposals(), loadVotingPower()]).finally(() => setLoading(false));
     const interval = setInterval(loadProposals, 30_000);
     return () => clearInterval(interval);
-  }, [loadProposals]);
+  }, [loadProposals, loadVotingPower]);
 
   useEffect(() => {
     setVisibleCount(PROPOSALS_PAGE_SIZE);
@@ -141,6 +160,17 @@ export default function GovernancePage() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {wallet.connected && votingPower !== null && (
+              <div className="px-3 py-1.5 rounded-lg border border-brand-border bg-brand-dark/50 text-xs text-brand-muted">
+                Voting Power:{' '}
+                <span className="text-white font-semibold">{votingPower.toString()}</span>
+                {governanceConfig && votingPower < governanceConfig.minShareBalance && (
+                  <span className="text-yellow-400 ml-1">
+                    (min {governanceConfig.minShareBalance.toString()} required)
+                  </span>
+                )}
+              </div>
+            )}
             <button
               onClick={() => void loadProposals()}
               className="px-4 py-2 rounded-xl border border-brand-border text-sm text-brand-muted hover:text-white hover:border-brand-gold/40"
@@ -233,10 +263,30 @@ export default function GovernancePage() {
 
             <button
               type="submit"
-              disabled={!wallet.connected || !GOVERNANCE_CONTRACT_ID || submitting}
+              disabled={
+                !wallet.connected ||
+                !GOVERNANCE_CONTRACT_ID ||
+                submitting ||
+                (governanceConfig !== null &&
+                  votingPower !== null &&
+                  votingPower < governanceConfig.minShareBalance)
+              }
               className="rounded-xl bg-brand-gold px-5 py-3 text-sm font-semibold text-brand-dark disabled:opacity-50"
+              title={
+                governanceConfig !== null &&
+                votingPower !== null &&
+                votingPower < governanceConfig.minShareBalance
+                  ? `Insufficient voting power. You need at least ${governanceConfig.minShareBalance.toString()} shares to create a proposal.`
+                  : undefined
+              }
             >
-              {submitting ? 'Submitting...' : 'Create Proposal'}
+              {submitting
+                ? 'Submitting...'
+                : governanceConfig !== null &&
+                    votingPower !== null &&
+                    votingPower < governanceConfig.minShareBalance
+                  ? 'Insufficient Balance'
+                  : 'Create Proposal'}
             </button>
           </form>
         )}
@@ -336,7 +386,10 @@ export default function GovernancePage() {
               {selectedProposal ? (
                 <div className="space-y-4">
                   <p className="text-sm text-brand-muted">
-                    Voting power is based on your current share balance.
+                    Voting power:{' '}
+                    <strong className="text-white">
+                      {votingPower !== null ? votingPower.toString() : '—'}
+                    </strong>
                   </p>
                   <div className="rounded-2xl border border-brand-border bg-brand-dark/50 p-4 text-sm text-brand-muted">
                     <p>Target: {truncateAddress(selectedProposal.targetContract)}</p>

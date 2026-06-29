@@ -9,15 +9,41 @@ import { formatUSDC, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
 const AGING_BUCKETS = [
-  { key: 'critical', label: '90+ Days Overdue', minDays: 90, color: 'text-red-400 border-red-500/30 bg-red-500/10' },
-  { key: 'severe', label: '61–90 Days Overdue', minDays: 61, color: 'text-orange-400 border-orange-500/30 bg-orange-500/10' },
-  { key: 'moderate', label: '31–60 Days Overdue', minDays: 31, color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10' },
-  { key: 'mild', label: '1–30 Days Overdue', minDays: 1, color: 'text-yellow-300 border-yellow-400/30 bg-yellow-400/5' },
+  {
+    key: 'critical',
+    label: '90+ Days Overdue',
+    minDays: 90,
+    color: 'text-red-400 border-red-500/30 bg-red-500/10',
+  },
+  {
+    key: 'severe',
+    label: '61–90 Days Overdue',
+    minDays: 61,
+    color: 'text-orange-400 border-orange-500/30 bg-orange-500/10',
+  },
+  {
+    key: 'moderate',
+    label: '31–60 Days Overdue',
+    minDays: 31,
+    color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10',
+  },
+  {
+    key: 'mild',
+    label: '1–30 Days Overdue',
+    minDays: 1,
+    color: 'text-yellow-300 border-yellow-400/30 bg-yellow-400/5',
+  },
+  {
+    key: 'current',
+    label: 'Current (Not Overdue)',
+    minDays: 0,
+    color: 'text-green-400 border-green-500/30 bg-green-500/10',
+  },
 ] as const;
 
 const AT_RISK_DAYS = 7;
 
-type AgingBucket = typeof AGING_BUCKETS[number]['key'];
+type AgingBucket = (typeof AGING_BUCKETS)[number]['key'];
 
 interface AgingGroup {
   bucket: AgingBucket;
@@ -54,12 +80,17 @@ export default function AdminAgingPage() {
 
   useEffect(() => {
     loadData();
+    const interval = setInterval(loadData, 60_000);
+    return () => clearInterval(interval);
   }, [loadData]);
 
   const nowSecs = Math.floor(Date.now() / 1000);
   const oneDaySecs = 86400;
 
   const { overdueBuckets, atRiskInvoices } = useMemo(() => {
+    const overdueDefs = AGING_BUCKETS.filter((b) => b.minDays >= 1);
+    const currentDef = AGING_BUCKETS.find((b) => b.minDays === 0);
+
     const buckets: AgingGroup[] = AGING_BUCKETS.map((b) => ({
       bucket: b.key,
       label: b.label,
@@ -69,7 +100,7 @@ export default function AdminAgingPage() {
     }));
 
     const atRisk: Invoice[] = [];
-    const bucketDefs = AGING_BUCKETS;
+    const currentBucket = currentDef ? buckets[AGING_BUCKETS.indexOf(currentDef)] : null;
 
     for (const inv of invoices) {
       if (inv.status !== 'Funded') continue;
@@ -77,18 +108,25 @@ export default function AdminAgingPage() {
       const overdueDays = Math.floor((nowSecs - inv.dueDate) / oneDaySecs);
 
       if (overdueDays > 0) {
-        for (let i = 0; i < bucketDefs.length; i++) {
-          const def = bucketDefs[i]!;
-          const nextDef = i > 0 ? bucketDefs[i - 1]! : null;
+        for (let i = 0; i < overdueDefs.length; i++) {
+          const def = overdueDefs[i]!;
+          const nextDef = i > 0 ? overdueDefs[i - 1]! : null;
           const upperBound = nextDef ? nextDef.minDays - 1 : Infinity;
           if (overdueDays >= def.minDays && overdueDays <= upperBound) {
-            buckets[i]!.invoices.push(inv);
-            buckets[i]!.totalAmount += BigInt(inv.amount ?? 0);
+            const bucketIdx = AGING_BUCKETS.indexOf(def);
+            buckets[bucketIdx]!.invoices.push(inv);
+            buckets[bucketIdx]!.totalAmount += BigInt(inv.amount ?? 0);
             break;
           }
         }
       } else if (overdueDays <= 0 && Math.abs(overdueDays) <= AT_RISK_DAYS) {
         atRisk.push(inv);
+      }
+
+      if (overdueDays <= 0 && currentBucket) {
+        const bucketIdx = AGING_BUCKETS.indexOf(currentDef!);
+        buckets[bucketIdx]!.invoices.push(inv);
+        buckets[bucketIdx]!.totalAmount += BigInt(inv.amount ?? 0);
       }
     }
 
@@ -134,6 +172,12 @@ export default function AdminAgingPage() {
           value={overdueBuckets[0]!.invoices.length.toString()}
           description={formatUSDC(overdueBuckets[0]!.totalAmount)}
           trend={overdueBuckets[0]!.invoices.length > 0 ? 'danger' : undefined}
+        />
+        <SummaryCard
+          label="Current (On Track)"
+          value={overdueBuckets[4]!.invoices.length.toString()}
+          description={`${formatUSDC(overdueBuckets[4]!.totalAmount)} in active invoices`}
+          trend="success"
         />
         <SummaryCard
           label="At Risk (due within 7d)"
@@ -211,7 +255,16 @@ export default function AdminAgingPage() {
               )}
             </div>
           ))}
-          {totalOverdueCount === 0 && (
+          {totalOverdueCount === 0 && overdueBuckets[4]!.invoices.length === 0 && (
+            <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
+              <div className="text-3xl mb-3">✓</div>
+              <p className="text-brand-muted font-medium">No funded invoices found.</p>
+              <p className="text-xs text-brand-muted mt-1">
+                Funded invoices will appear here once the pool starts lending.
+              </p>
+            </div>
+          )}
+          {totalOverdueCount === 0 && overdueBuckets[4]!.invoices.length > 0 && (
             <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
               <div className="text-3xl mb-3">✓</div>
               <p className="text-brand-muted font-medium">No overdue invoices.</p>
@@ -264,7 +317,9 @@ function InvoiceTable({ invoices, nowSecs }: { invoices: Invoice[]; nowSecs: num
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-brand-border bg-brand-dark/50">
-            <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">ID</th>
+            <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
+              ID
+            </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
               Debtor
             </th>
@@ -284,9 +339,7 @@ function InvoiceTable({ invoices, nowSecs }: { invoices: Invoice[]; nowSecs: num
         </thead>
         <tbody className="divide-y divide-brand-border">
           {invoices.map((inv) => {
-            const overdueDays = Math.floor(
-              (nowSecs - inv.dueDate) / 86400,
-            );
+            const overdueDays = Math.floor((nowSecs - inv.dueDate) / 86400);
             return (
               <tr key={inv.id} className="hover:bg-brand-dark/30 transition-colors">
                 <td className="px-6 py-4 font-mono">#{inv.id}</td>
