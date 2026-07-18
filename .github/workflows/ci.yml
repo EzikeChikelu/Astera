@@ -26,10 +26,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
       - run: cargo clippy -- -D warnings
-      - run: cargo test
-      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests
+      # contracts/tests (package `integration-tests`) is itself a workspace
+      # member and uses soroban_sdk::contractimport! to load prebuilt .wasm
+      # files, so these must exist before ANY `cargo test` invocation that
+      # touches the full workspace — including the unqualified one below.
       - name: Build contracts for integration tests
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share
+      - run: cargo test
+      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests
       - run: cargo test -p integration-tests --test integration_tests
       - name: Check WASM size
         run: |
