@@ -148,8 +148,9 @@ pub enum InvoiceError {
 }
 
 #[contracttype]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DisputeResolution {
+    Pending,
     InFavorOfSME,
     InFavorOfDebtor,
 }
@@ -199,7 +200,7 @@ pub struct DisputeRecord {
     pub evidence_hash: String,
     pub filed_at: u64,
     pub resolved_at: u64,
-    pub outcome: Option<DisputeResolution>,
+    pub outcome: DisputeResolution,
 }
 
 #[contracttype]
@@ -1392,6 +1393,9 @@ impl InvoiceContract {
                 env.storage().instance().set(&DataKey::StorageStats, &stats);
                 set_invoice_ttl(&env, id, true);
             }
+            DisputeResolution::Pending => {
+                panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+            }
         }
         env.storage()
             .persistent()
@@ -1524,6 +1528,20 @@ impl InvoiceContract {
         invoice.paid_at = env.ledger().timestamp();
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
+        // Release this invoice's amount from the debtor registry's exposure
+        // tracking, if the debtor field refers to a registered debtor (#241).
+        // Without this, a debtor's exposure capacity would never be freed up
+        // by paid invoices, permanently shrinking how much new business can
+        // be written against them.
+        let debtor_key = DataKey::DebtorRecord(invoice.debtor.clone());
+        if let Some(mut record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, DebtorRecord>(&debtor_key)
+        {
+            record.current_exposure = record.current_exposure.saturating_sub(invoice.amount);
+            env.storage().persistent().set(&debtor_key, &record);
+        }
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1613,7 +1631,11 @@ impl InvoiceContract {
             .get(&DataKey::DisputeResolutionWindow)
             .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
         let now = env.ledger().timestamp();
-        let default_at = checked_default_deadline(&env, invoice.due_date, resolve_invoice_grace_period_days(&env, &invoice));
+        let default_at = checked_default_deadline(
+            &env,
+            invoice.due_date,
+            resolve_invoice_grace_period_days(&env, &invoice),
+        );
         let dispute_deadline = default_at.saturating_add(dispute_window);
 
         if now > dispute_deadline {
@@ -1629,7 +1651,7 @@ impl InvoiceContract {
             evidence_hash,
             filed_at: now,
             resolved_at: 0,
-            outcome: None,
+            outcome: DisputeResolution::Pending,
         };
 
         env.storage()
@@ -1639,18 +1661,11 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Dispute(id), &dispute_record);
 
-        env.events().publish(
-            (EVT, symbol_short!("dispute")),
-            (id, borrower, now),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("dispute")), (id, borrower, now));
     }
 
-    pub fn resolve_dispute(
-        env: Env,
-        id: u64,
-        admin: Address,
-        outcome: DisputeResolution,
-    ) {
+    pub fn resolve_default_dispute(env: Env, id: u64, admin: Address, outcome: DisputeResolution) {
         admin.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
@@ -1679,23 +1694,26 @@ impl InvoiceContract {
             .get(&DataKey::Dispute(id))
             .expect("dispute not found");
 
-        if dispute_record.outcome.is_some() {
+        if dispute_record.outcome != DisputeResolution::Pending {
             panic_with_error!(&env, InvoiceError::DisputeAlreadyResolved);
         }
 
         let now = env.ledger().timestamp();
         dispute_record.resolved_at = now;
-        dispute_record.outcome = Some(outcome.clone());
+        dispute_record.outcome = outcome.clone();
 
         match outcome {
             DisputeResolution::InFavorOfDebtor => {
-                invoice.status = InvoiceStatus::Active;
+                invoice.status = InvoiceStatus::Funded;
                 let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
                 let grace_secs = (grace_period_days as u64).saturating_mul(SECS_PER_DAY);
                 invoice.due_date = now.saturating_add(grace_secs);
             }
             DisputeResolution::InFavorOfSME => {
                 invoice.status = InvoiceStatus::Defaulted;
+            }
+            DisputeResolution::Pending => {
+                panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
             }
         }
 
@@ -1706,16 +1724,12 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Dispute(id), &dispute_record);
 
-        env.events().publish(
-            (EVT, symbol_short!("resolved")),
-            (id, admin, now),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("resolved")), (id, admin, now));
     }
 
     pub fn get_dispute(env: Env, id: u64) -> Option<DisputeRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Dispute(id))
+        env.storage().persistent().get(&DataKey::Dispute(id))
     }
 
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
@@ -2631,6 +2645,9 @@ impl InvoiceContract {
         false
     }
 }
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(test)]
 mod test {
@@ -4657,7 +4674,7 @@ mod test {
         // Create first invoice for 2000
         let id1 = client.create_invoice_with_metadata(
             &sme,
-            &debtor_name,
+            &debtor_id,
             &2_000i128,
             &(env.ledger().timestamp() + 86_400 * 30),
             &String::from_str(&env, "Invoice 1"),
@@ -4672,7 +4689,7 @@ mod test {
         // Create second invoice for 2500
         let id2 = client.create_invoice_with_metadata(
             &sme,
-            &debtor_name,
+            &debtor_id,
             &2_500i128,
             &(env.ledger().timestamp() + 86_400 * 30),
             &String::from_str(&env, "Invoice 2"),
@@ -4689,7 +4706,7 @@ mod test {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.create_invoice_with_metadata(
                 &sme,
-                &debtor_name,
+                &debtor_id,
                 &1_000i128,
                 &(env.ledger().timestamp() + 86_400 * 30),
                 &String::from_str(&env, "Invoice 3"),
@@ -4717,7 +4734,7 @@ mod test {
 
         let id = client.create_invoice_with_metadata(
             &sme,
-            &debtor_name,
+            &debtor_id,
             &3_000i128,
             &(env.ledger().timestamp() + 86_400 * 30),
             &String::from_str(&env, "Invoice"),
@@ -4759,7 +4776,7 @@ mod test {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.create_invoice_with_metadata(
                 &sme,
-                &debtor_name,
+                &debtor_id,
                 &1_000i128,
                 &(env.ledger().timestamp() + 86_400 * 30),
                 &String::from_str(&env, "Invoice"),

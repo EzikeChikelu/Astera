@@ -157,6 +157,8 @@ pub enum PoolError {
     ProposalAlreadyExecuted = 62,
     ProposalAlreadyCancelled = 63,
     InvalidOperationDelay = 64,
+    // #567: token removal blocked while a funded invoice still references this token
+    TokenHasActiveCofundingCommitments = 65,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -204,8 +206,8 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
 const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
 const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
-// #742: two-step confirmation delay for critical admin operations.
-// Default 24 hours, configurable down to MIN_OPERATION_DELAY_SECS.
+                                                 // #742: two-step confirmation delay for critical admin operations.
+                                                 // Default 24 hours, configurable down to MIN_OPERATION_DELAY_SECS.
 const OPERATION_DELAY_SECS: u64 = 86_400; // 24 hours default
 const MIN_OPERATION_DELAY_SECS: u64 = 3_600; // 1 hour minimum
 /// Current on-chain storage schema version (#397). Bump by one and add a
@@ -655,7 +657,7 @@ fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResul
     // Ceiling division: round up so that any non-zero fee rate on any
     // non-zero principal yields at least 1 stroop.  Without this, small
     // invoices where principal × fee_bps < BPS_DENOM always truncate to 0.
-    let fee = (numerator + BPS_DENOM as u128 - 1) / BPS_DENOM as u128;
+    let fee = numerator.div_ceil(BPS_DENOM as u128);
     u128_to_i128(fee)
 }
 
@@ -1317,7 +1319,7 @@ impl FundingPool {
                 .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_idx))
             {
                 // Check if this funded invoice uses the target token
-                if funded_invoice.token == token {
+                if &funded_invoice.token == token {
                     // Found an active funded invoice using this token
                     // This represents a co-funding commitment that must be settled before removal
                     return Err(PoolError::TokenHasActiveCofundingCommitments);
@@ -1466,6 +1468,10 @@ impl FundingPool {
 
         // #233: update investor position — track in USDC terms to match pool_value
         investor_position.deposited += usdc_received;
+        // #217: `available` tracks shares not yet withdrawn or reserved by a
+        // queued withdrawal request, in share-token units (matches what
+        // request_withdrawal compares it against).
+        investor_position.available += shares_to_mint;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -1590,6 +1596,17 @@ impl FundingPool {
         burn_args.push_back(shares.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
 
+        // #217: keep `available` in sync with actual burned shares.
+        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        if let Some(mut position) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, InvestorPosition>(&investor_pos_key)
+        {
+            position.available = position.available.saturating_sub(shares);
+            env.storage().persistent().set(&investor_pos_key, &position);
+        }
+
         // Update USDC-denominated pool value SECOND - effects
         tt.pool_value -= usdc_amount;
         env.storage().instance().set(&token_totals_key, &tt);
@@ -1652,7 +1669,7 @@ impl FundingPool {
         }
 
         let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let position: InvestorPosition = env
+        let mut position: InvestorPosition = env
             .storage()
             .persistent()
             .get(&investor_pos_key)
@@ -1666,6 +1683,10 @@ impl FundingPool {
         if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
+        // #217: reserve these shares immediately so they can't be double-spent
+        // by another request_withdrawal/withdraw call before this one settles.
+        position.available -= shares;
+        env.storage().persistent().set(&investor_pos_key, &position);
 
         Self::non_reentrant_start(&env);
 
@@ -1765,9 +1786,11 @@ impl FundingPool {
 
             let mut new_queue = Vec::new(&env);
             let mut request_id = 0u64;
+            let mut cancelled_shares = 0i128;
             for req in queue.iter() {
                 if req.investor == investor {
                     request_id = req.request_id;
+                    cancelled_shares = req.shares;
                 } else {
                     new_queue.push_back(req);
                 }
@@ -1780,8 +1803,21 @@ impl FundingPool {
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().remove(&request_key);
 
-            env.events()
-                .publish((EVT, symbol_short!("wd_cncl")), (investor, token, request_id));
+            // #217: release the shares this request had reserved.
+            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+            if let Some(mut position) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, InvestorPosition>(&investor_pos_key)
+            {
+                position.available += cancelled_shares;
+                env.storage().persistent().set(&investor_pos_key, &position);
+            }
+
+            env.events().publish(
+                (EVT, symbol_short!("wd_cncl")),
+                (investor, token, request_id),
+            );
             Ok(())
         })
     }
@@ -1911,12 +1947,7 @@ impl FundingPool {
             .ok_or(PoolError::AmountOverflow)
     }
 
-    fn burn_withdrawal_shares(
-        env: &Env,
-        share_token: &Address,
-        investor: Address,
-        shares: i128,
-    ) {
+    fn burn_withdrawal_shares(env: &Env, share_token: &Address, investor: Address, shares: i128) {
         let mut burn_args = Vec::new(env);
         burn_args.push_back(investor.into_val(env));
         burn_args.push_back(shares.into_val(env));
@@ -1931,12 +1962,7 @@ impl FundingPool {
         shares_to_burn: i128,
         amount: i128,
     ) -> PoolResult<()> {
-        Self::burn_withdrawal_shares(
-            env,
-            share_token,
-            request.investor.clone(),
-            shares_to_burn,
-        );
+        Self::burn_withdrawal_shares(env, share_token, request.investor.clone(), shares_to_burn);
 
         let token_client = token::Client::new(env, token);
         token_client.transfer(&env.current_contract_address(), &request.investor, &amount);
@@ -2098,7 +2124,9 @@ impl FundingPool {
                     remaining_request.investor.clone(),
                     remaining_request.request_id,
                 );
-                env.storage().persistent().set(&request_key, &remaining_request);
+                env.storage()
+                    .persistent()
+                    .set(&request_key, &remaining_request);
                 remaining_queue.push_back(remaining_request);
             }
         }
@@ -2508,9 +2536,7 @@ impl FundingPool {
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
-            if let Err(e) =
-                Self::process_withdrawal_queue(env, token.clone(), available_amount)
-            {
+            if let Err(e) = Self::process_withdrawal_queue(env, token.clone(), available_amount) {
                 // Log error but don't fail the repayment
                 // `format!` is unavailable in `no_std`; keep a lightweight log.
                 let _ = e;
@@ -2570,10 +2596,7 @@ impl FundingPool {
     /// #742: Validate collateral parameters. Shared by `propose_operation`
     /// (validates before scheduling) and `execute_set_collateral_config`
     /// (defensive re-check at execution time).
-    fn validate_collateral_config(
-        threshold: i128,
-        collateral_bps: u32,
-    ) -> PoolResult<()> {
+    fn validate_collateral_config(threshold: i128, collateral_bps: u32) -> PoolResult<()> {
         if threshold < 0 {
             return Err(PoolError::InvalidCollateralThreshold);
         }
@@ -2730,11 +2753,7 @@ impl FundingPool {
     /// through the two-step proposal flow (`propose_operation` → wait →
     /// `execute_operation`). Calling it directly is rejected with
     /// `OperationRequiresProposal`.
-    pub fn seize_collateral(
-        env: Env,
-        admin: Address,
-        _invoice_id: u64,
-    ) -> Result<(), PoolError> {
+    pub fn seize_collateral(env: Env, admin: Address, _invoice_id: u64) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -2744,11 +2763,7 @@ impl FundingPool {
     /// #742: Internal execution of `seize_collateral`, invoked by
     /// `execute_operation` after the timelock has elapsed. Performs the original
     /// default-status and settlement checks.
-    fn execute_seize_collateral(
-        env: &Env,
-        admin: &Address,
-        invoice_id: u64,
-    ) -> PoolResult<()> {
+    fn execute_seize_collateral(env: &Env, admin: &Address, invoice_id: u64) -> PoolResult<()> {
         non_reentrant!(env, {
             let record: FundedInvoice = env
                 .storage()
@@ -4029,7 +4044,6 @@ impl FundingPool {
         Ok(())
     }
 
-<<<<<<< HEAD
     /// Propose an admin key rotation (#565).
     pub fn propose_admin_change(
         env: Env,
@@ -4076,8 +4090,7 @@ impl FundingPool {
         if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
             return Err(PoolError::AdminChangeTimelockNotExpired);
         }
-        let maybe_new_admin: Option<Address> =
-            env.storage().instance().get(&DataKey::PendingAdmin);
+        let maybe_new_admin: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         let new_admin = match maybe_new_admin {
             Some(v) => v,
             None => return Err(PoolError::NoAdminChangeProposed),
@@ -4096,7 +4109,10 @@ impl FundingPool {
         env.events().publish(
             (EVT, Symbol::new(&env, "admin_changed")),
             (admin, new_admin, now),
-=======
+        );
+        Ok(())
+    }
+
     // ---- #742: two-step confirmation for critical admin operations ----
 
     /// Returns the configured operation delay in seconds (#742).
@@ -4125,10 +4141,8 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::OperationDelaySecs, &secs);
-        env.events().publish(
-            (EVT, symbol_short!("op_delay")),
-            (admin, old, secs),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("op_delay")), (admin, old, secs));
         Ok(())
     }
 
@@ -4160,9 +4174,7 @@ impl FundingPool {
             .instance()
             .get(&DataKey::OperationDelaySecs)
             .unwrap_or(OPERATION_DELAY_SECS);
-        let execute_after = now
-            .checked_add(delay)
-            .ok_or(PoolError::AmountOverflow)?;
+        let execute_after = now.checked_add(delay).ok_or(PoolError::AmountOverflow)?;
 
         let proposal_id: u64 = env
             .storage()
@@ -4225,9 +4237,7 @@ impl FundingPool {
 
         let op = proposal.operation.clone();
         match op {
-            AdminOperation::RemoveToken(token) => {
-                Self::execute_remove_token(&env, &admin, &token)?
-            }
+            AdminOperation::RemoveToken(token) => Self::execute_remove_token(&env, &admin, &token)?,
             AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
                 Self::execute_set_collateral_config(&env, &admin, threshold, collateral_bps)?
             }
@@ -4236,15 +4246,11 @@ impl FundingPool {
             }
         }
 
-        env.events().publish(
-            (EVT, symbol_short!("op_exec")),
-            (admin, proposal_id, now),
->>>>>>> 28c0816 (Implement two-factor admin confirmation for critical pool operations Add mandatory timelock for high-impact operations to prevent instant execution if admin key is compromised. Operations now require a two-step flow: propose then execute after delay. Changes: - Add AdminOperation enum for remove_token, set_collateral_config, seize_collateral - Add Proposal struct to track pending operations - Implement propose_operation with configurable delay (default 24h, min 1h) - Implement execute_operation with timelock enforcement - Implement cancel_operation for emergency proposal cancellation - Add validation for collateral config params at proposal time - Add storage keys for proposals and operation delay config - Add new error codes for proposal lifecycle - Update critical operations to reject direct calls and require proposal flow - Refactor operations into internal execute functions - Add events for propose, execute, and cancel actions)
-        );
+        env.events()
+            .publish((EVT, symbol_short!("op_exec")), (admin, proposal_id, now));
         Ok(())
     }
 
-<<<<<<< HEAD
     /// Cancel a pending admin key rotation (#565).
     pub fn cancel_admin_change(env: Env, admin: Address) -> Result<(), PoolError> {
         admin.require_auth();
@@ -4263,7 +4269,6 @@ impl FundingPool {
         Ok(())
     }
 
-=======
     /// Cancel a pending proposal (#742). Admin-only; a proposal that was already
     /// executed or cancelled is rejected.
     pub fn cancel_operation(env: Env, admin: Address, proposal_id: u64) -> Result<(), PoolError> {
@@ -4302,7 +4307,6 @@ impl FundingPool {
             .get(&DataKey::Proposal(proposal_id))
     }
 
->>>>>>> 28c0816 (Implement two-factor admin confirmation for critical pool operations Add mandatory timelock for high-impact operations to prevent instant execution if admin key is compromised. Operations now require a two-step flow: propose then execute after delay. Changes: - Add AdminOperation enum for remove_token, set_collateral_config, seize_collateral - Add Proposal struct to track pending operations - Implement propose_operation with configurable delay (default 24h, min 1h) - Implement execute_operation with timelock enforcement - Implement cancel_operation for emergency proposal cancellation - Add validation for collateral config params at proposal time - Add storage keys for proposals and operation delay config - Add new error codes for proposal lifecycle - Update critical operations to reject direct calls and require proposal flow - Refactor operations into internal execute functions - Add events for propose, execute, and cancel actions)
     // ---- Internal utility methods ----
 
     /// ## Issue #321: Reentrancy Guard Implementation
@@ -4566,6 +4570,54 @@ mod test {
 
     fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
         soroban_sdk::token::StellarAssetClient::new(env, token_id).mint(to, &amount);
+    }
+
+    /// #742: RemoveToken, SetCollateralConfig, and SeizeCollateral now require
+    /// the two-step propose/execute timelock flow instead of direct admin
+    /// calls. These helpers drive that flow for tests that only care about
+    /// the end state, not the proposal mechanics themselves.
+    fn advance_past_operation_delay(env: &Env, client: &FundingPoolClient<'_>) {
+        let delay = client.get_operation_delay();
+        env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    }
+
+    fn propose_and_execute_set_collateral_config(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        admin: &Address,
+        threshold: i128,
+        collateral_bps: u32,
+    ) {
+        let proposal_id = client.propose_operation(
+            admin,
+            &AdminOperation::SetCollateralConfig(threshold, collateral_bps),
+        );
+        advance_past_operation_delay(env, client);
+        client.execute_operation(admin, &proposal_id);
+    }
+
+    fn propose_and_execute_remove_token(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        admin: &Address,
+        token: &Address,
+    ) {
+        let proposal_id =
+            client.propose_operation(admin, &AdminOperation::RemoveToken(token.clone()));
+        advance_past_operation_delay(env, client);
+        client.execute_operation(admin, &proposal_id);
+    }
+
+    fn propose_and_execute_seize_collateral(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        admin: &Address,
+        invoice_id: u64,
+    ) {
+        let proposal_id =
+            client.propose_operation(admin, &AdminOperation::SeizeCollateral(invoice_id));
+        advance_past_operation_delay(env, client);
+        client.execute_operation(admin, &proposal_id);
     }
 
     #[test]
@@ -5228,7 +5280,7 @@ mod test {
         client.add_token(&admin, &new_token, &new_share);
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 2);
-        client.remove_token(&admin, &new_token);
+        propose_and_execute_remove_token(&env, &client, &admin, &new_token);
         let tokens = client.accepted_tokens();
         assert_eq!(tokens.len(), 1);
     }
@@ -5241,8 +5293,11 @@ mod test {
         let investor = Address::generate(&env);
         mint(&env, &usdc_id, &investor, 1_000);
         client.deposit(&investor, &usdc_id, &1_000);
-        // pool has a non-zero balance — token removal must fail
-        let result = client.try_remove_token(&admin, &usdc_id);
+        // pool has a non-zero balance — token removal must fail at execute time
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::RemoveToken(usdc_id.clone()));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::TokenHasActiveBalances)));
     }
 
@@ -5267,7 +5322,7 @@ mod test {
         assert_eq!(tokens.len(), 2);
 
         // Remove token with zero balances should succeed
-        client.remove_token(&admin, &new_token);
+        propose_and_execute_remove_token(&env, &client, &admin, &new_token);
 
         // Verify token was removed
         let tokens_after = client.accepted_tokens();
@@ -5303,8 +5358,11 @@ mod test {
         mint(&env, &new_token, &investor, 1_000);
         client.deposit(&investor, &new_token, &1_000);
 
-        // Attempt to remove token with deposited balance should fail
-        let result = client.try_remove_token(&admin, &new_token);
+        // Attempt to remove token with deposited balance should fail at execute time
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::RemoveToken(new_token.clone()));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::TokenHasActiveBalances)));
 
         // Verify token is still in accepted list
@@ -5346,8 +5404,11 @@ mod test {
         let tt = client.get_token_totals(&new_token);
         assert!(tt.total_deployed > 0);
 
-        // Attempt to remove token with deployed capital should fail
-        let result = client.try_remove_token(&admin, &new_token);
+        // Attempt to remove token with deployed capital should fail at execute time
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::RemoveToken(new_token.clone()));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::TokenHasDeployedCapital)));
 
         // Verify token is still in accepted list
@@ -5397,7 +5458,13 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         // Set threshold to 5000 USDC, 10% collateral
-        client.set_collateral_config(&admin, &50_000_000_000i128, &1_000u32);
+        propose_and_execute_set_collateral_config(
+            &env,
+            &client,
+            &admin,
+            50_000_000_000i128,
+            1_000u32,
+        );
         let cfg = client.get_collateral_config();
         assert_eq!(cfg.threshold, 50_000_000_000i128);
         assert_eq!(cfg.collateral_bps, 1_000u32);
@@ -5408,7 +5475,11 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        let result = client.try_set_collateral_config(&admin, &1_000i128, &10_001u32);
+        // #742: invalid params are rejected at propose time, not direct-call time.
+        let result = client.try_propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 10_001u32),
+        );
         assert_eq!(result, Err(Ok(PoolError::InvalidCollateralBps)));
     }
 
@@ -5417,7 +5488,10 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
-        let result = client.try_set_collateral_config(&admin, &1_000i128, &0u32);
+        let result = client.try_propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 0u32),
+        );
         assert_eq!(result, Err(Ok(PoolError::InvalidCollateralBps)));
     }
 
@@ -5437,7 +5511,13 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         // Lower threshold to 500 USDC, 20% collateral
-        client.set_collateral_config(&admin, &5_000_000_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(
+            &env,
+            &client,
+            &admin,
+            5_000_000_000i128,
+            2_000u32,
+        );
         // 1000 USDC principal → 200 USDC collateral
         let req = client.required_collateral_for(&10_000_000_000i128);
         assert_eq!(req, 2_000_000_000i128); // 20% of 10,000 USDC
@@ -5478,7 +5558,7 @@ mod test {
         let sme = Address::generate(&env);
 
         // Lower threshold so our test amounts trigger it
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
 
         mint(&env, &usdc_id, &investor, 10_000);
         client.deposit(&investor, &usdc_id, &10_000);
@@ -5504,7 +5584,7 @@ mod test {
         let sme = Address::generate(&env);
 
         // Threshold = 1000, 20% collateral
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
 
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal); // 1000
@@ -5546,7 +5626,7 @@ mod test {
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
 
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
@@ -5591,7 +5671,7 @@ mod test {
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -5630,7 +5710,7 @@ mod test {
         let sme = Address::generate(&env);
         let invoice_contract = client.get_config().invoice_contract;
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -5645,7 +5725,7 @@ mod test {
         // Mark invoice defaulted via dummy invoice contract
         DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
 
-        client.seize_collateral(&admin, &1u64);
+        propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
 
         // Record must still be queryable after seizure (90-day TTL applied)
         let col = client.get_collateral_deposit(&1u64);
@@ -5687,7 +5767,7 @@ mod test {
         let (client, admin, usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         mint(&env, &usdc_id, &sme, 5_000);
 
         client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
@@ -5704,7 +5784,7 @@ mod test {
         let sme = Address::generate(&env);
 
         // 20% collateral required on anything >= 1000
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
 
         let principal: i128 = 5_000;
         // Required = 1000, but we only deposit 500
@@ -5733,7 +5813,7 @@ mod test {
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -5753,8 +5833,10 @@ mod test {
         let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
-        // Trying to seize after repayment must return AlreadyFullyRepaid
-        let result = client.try_seize_collateral(&admin, &1u64);
+        // Trying to seize after repayment must return AlreadyFullyRepaid at execute time
+        let proposal_id = client.propose_operation(&admin, &AdminOperation::SeizeCollateral(1u64));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
 
@@ -6197,7 +6279,7 @@ mod test {
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
         mint(&env, &usdc_id, &investor, 10_000);
@@ -6300,7 +6382,7 @@ mod test {
         let (client, admin, usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         mint(&env, &usdc_id, &sme, 1_000);
         client.pause(&admin);
         client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
@@ -7242,7 +7324,7 @@ mod test {
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -7259,7 +7341,7 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp = due_date + 1);
 
         // seize_collateral should succeed — guard acquired and released
-        client.seize_collateral(&admin, &1u64);
+        propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
     }
 
     #[test]
@@ -7291,7 +7373,7 @@ mod test {
         let (client, admin, usdc_id, _share_token) = setup(&env);
         let sme = Address::generate(&env);
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         mint(&env, &usdc_id, &sme, 5_000);
 
         // deposit_collateral should succeed — guard acquired and released
@@ -7459,7 +7541,7 @@ mod test {
             &1u64,
             &10_000,
             &sme,
-            &env.ledger().timestamp(),
+            &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
         client.fund_invoice(
@@ -7467,7 +7549,7 @@ mod test {
             &2u64,
             &10_000,
             &sme,
-            &env.ledger().timestamp(),
+            &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
 
@@ -7762,7 +7844,7 @@ mod test {
         let sme = Address::generate(&env);
         let invoice_contract = client.get_config().invoice_contract;
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal); // 1,000
 
@@ -7781,12 +7863,15 @@ mod test {
         let pool_token_client = token::Client::new(&env, &usdc_id);
         let pool_balance_before = pool_token_client.balance(&client.address);
 
-        client.seize_collateral(&admin, &1u64);
+        propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
 
         // 1. Check pool value increased, total deployed decreased by principal
         let tt_after = client.get_token_totals(&usdc_id);
         assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
-        assert_eq!(tt_after.total_deployed, tt_before.total_deployed - principal);
+        assert_eq!(
+            tt_after.total_deployed,
+            tt_before.total_deployed - principal
+        );
 
         // 2. Check the pool contract still holds the collateral amount (retained, not returned to SME)
         let pool_balance_after = pool_token_client.balance(&client.address);
@@ -7807,7 +7892,7 @@ mod test {
         let sme = Address::generate(&env);
         let invoice_contract = client.get_config().invoice_contract;
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -7821,10 +7906,12 @@ mod test {
 
         DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
 
-        client.seize_collateral(&admin, &1u64);
+        propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
 
-        // Try second time — should fail with CollateralAlreadySettled
-        let result = client.try_seize_collateral(&admin, &1u64);
+        // Try second time — should fail with CollateralAlreadySettled at execute time
+        let proposal_id = client.propose_operation(&admin, &AdminOperation::SeizeCollateral(1u64));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::CollateralAlreadySettled)));
     }
 
@@ -7837,7 +7924,7 @@ mod test {
         let sme = Address::generate(&env);
         let invoice_contract = client.get_config().invoice_contract;
 
-        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
         let principal: i128 = 5_000;
         let required = client.required_collateral_for(&principal);
 
@@ -7852,7 +7939,9 @@ mod test {
         // Do NOT mark invoice defaulted
         DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &false);
 
-        let result = client.try_seize_collateral(&admin, &1u64);
+        let proposal_id = client.propose_operation(&admin, &AdminOperation::SeizeCollateral(1u64));
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
         assert_eq!(result, Err(Ok(PoolError::NotDefaulted)));
     }
 
@@ -7958,9 +8047,19 @@ mod test {
     /// succeed or return `PoolError::AmountOverflow` gracefully — never panic.
     #[test]
     fn test_property_no_overflow_panic_on_edge_case_large_inputs() {
-        let edge_principals: [u128; 5] =
-            [1, 2, PROP_MAX_PRINCIPAL / 2, PROP_MAX_PRINCIPAL - 1, PROP_MAX_PRINCIPAL];
-        let edge_yields: [u32; 4] = [1, 2, (PROP_MAX_YIELD_BPS / 2) as u32, PROP_MAX_YIELD_BPS as u32];
+        let edge_principals: [u128; 5] = [
+            1,
+            2,
+            PROP_MAX_PRINCIPAL / 2,
+            PROP_MAX_PRINCIPAL - 1,
+            PROP_MAX_PRINCIPAL,
+        ];
+        let edge_yields: [u32; 4] = [
+            1,
+            2,
+            (PROP_MAX_YIELD_BPS / 2) as u32,
+            PROP_MAX_YIELD_BPS as u32,
+        ];
         let edge_elapsed: [u64; 5] = [
             1,
             SECS_PER_DAY,
@@ -7998,7 +8097,11 @@ mod test {
     #[test]
     fn test_property_compound_gte_simple_at_input_boundaries() {
         let principals: [u128; 3] = [1, PROP_MAX_PRINCIPAL / 2, PROP_MAX_PRINCIPAL];
-        let yields: [u32; 3] = [1, (PROP_MAX_YIELD_BPS / 2) as u32, PROP_MAX_YIELD_BPS as u32];
+        let yields: [u32; 3] = [
+            1,
+            (PROP_MAX_YIELD_BPS / 2) as u32,
+            PROP_MAX_YIELD_BPS as u32,
+        ];
         let elapsed: [u64; 3] = [1, PROP_MAX_ELAPSED_SECS / 2, PROP_MAX_ELAPSED_SECS];
 
         for &principal in principals.iter() {
