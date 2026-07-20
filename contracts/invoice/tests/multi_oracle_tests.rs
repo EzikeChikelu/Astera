@@ -444,7 +444,10 @@ fn test_consensus_verify_hash_mismatch_rejected() {
         &String::from_str(&env, "consensus approved"),
         &String::from_str(&env, "wrong-hash"),
     );
-    assert_eq!(result.unwrap_err().unwrap(), InvoiceError::HashMismatch.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        InvoiceError::HashMismatch.into()
+    );
 }
 
 #[test]

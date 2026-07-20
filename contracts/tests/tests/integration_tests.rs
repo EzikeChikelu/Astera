@@ -2193,7 +2193,14 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
     registry_client.set_invoice_contract(&admin, &invoice_id);
     // 6000 bps (60%) quorum so 3-of-5 equally-staked oracles lands exactly on
     // the threshold, per the "approves at exactly quorum" scenario.
-    registry_client.set_registry_config(&admin, &1_000i128, &3u32, &6_000u32, &(3 * 86_400u64), &(7 * 86_400u64));
+    registry_client.set_registry_config(
+        &admin,
+        &1_000i128,
+        &3u32,
+        &6_000u32,
+        &(3 * 86_400u64),
+        &(7 * 86_400u64),
+    );
     invoice_client.set_oracle_registry(&admin, &registry_id);
     invoice_client.set_consensus_required(&admin, &true);
 
@@ -2240,7 +2247,10 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
     registry_client.submit_vote(&oracles[0], &inv_id, &false, &String::from_str(&env, "e"));
     registry_client.submit_vote(&oracles[1], &inv_id, &false, &String::from_str(&env, "e"));
     assert_eq!(
-        registry_client.get_verification_round(&inv_id).unwrap().status,
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
         oracle_registry::RoundStatus::Open
     );
 
@@ -2250,7 +2260,10 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
     registry_client.submit_vote(&oracles[4], &inv_id, &true, &String::from_str(&env, "e"));
 
     let round = registry_client.get_verification_round(&inv_id).unwrap();
-    assert_eq!(round.status, oracle_registry::RoundStatus::ConsensusApproved);
+    assert_eq!(
+        round.status,
+        oracle_registry::RoundStatus::ConsensusApproved
+    );
     assert_eq!(round.weight_for, 3_000i128);
     assert_eq!(round.weight_against, 2_000i128);
 
@@ -2259,7 +2272,14 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
     assert!(invoice.oracle_verified);
 
     // The pool funds the now-Verified invoice exactly like the legacy flow.
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
     invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,
@@ -2345,7 +2365,10 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
     // quorum out of 5000 total stake.
     registry_client.submit_vote(&oracles[0], &inv_id, &true, &String::from_str(&env, "e"));
     assert_eq!(
-        registry_client.get_verification_round(&inv_id).unwrap().status,
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
         oracle_registry::RoundStatus::Open
     );
 
@@ -2353,7 +2376,10 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
     env.ledger().with_mut(|l| l.timestamp += 3 * 86_400 + 1);
     registry_client.expire_round(&inv_id);
     assert_eq!(
-        registry_client.get_verification_round(&inv_id).unwrap().status,
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
         oracle_registry::RoundStatus::Expired
     );
 
@@ -2375,7 +2401,14 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
     assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
 
     // Fully unblocked: the pool can now fund it like any other verified invoice.
-    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
     invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,

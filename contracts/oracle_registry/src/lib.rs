@@ -246,8 +246,7 @@ impl OracleRegistryContract {
         config.round_duration_secs = round_duration_secs;
         config.deregister_cooldown_secs = deregister_cooldown_secs;
         env.storage().instance().set(&DataKey::Config, &config);
-        env.events()
-            .publish((EVT, symbol_short!("cfg_upd")), admin);
+        env.events().publish((EVT, symbol_short!("cfg_upd")), admin);
         Ok(())
     }
 
@@ -331,10 +330,8 @@ impl OracleRegistryContract {
             env.storage().instance().set(&DataKey::OracleIds, &ids);
         }
 
-        env.events().publish(
-            (EVT, symbol_short!("registrd")),
-            (operator, stake_amount),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("registrd")), (operator, stake_amount));
         Ok(())
     }
 

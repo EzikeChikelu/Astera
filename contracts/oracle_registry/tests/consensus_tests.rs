@@ -157,7 +157,10 @@ fn test_quorum_approval_at_exactly_two_thirds_calls_consensus_verify() {
     );
     // 2000 >= 1980, consensus reached.
     let round = client.get_verification_round(&7u64).unwrap();
-    assert_eq!(round.status, oracle_registry::RoundStatus::ConsensusApproved);
+    assert_eq!(
+        round.status,
+        oracle_registry::RoundStatus::ConsensusApproved
+    );
 
     let calls = invoice.calls();
     assert_eq!(calls.len(), 1);
@@ -191,7 +194,10 @@ fn test_quorum_rejection_calls_consensus_verify_with_approved_false() {
     );
 
     let round = client.get_verification_round(&7u64).unwrap();
-    assert_eq!(round.status, oracle_registry::RoundStatus::ConsensusRejected);
+    assert_eq!(
+        round.status,
+        oracle_registry::RoundStatus::ConsensusRejected
+    );
     let calls = invoice.calls();
     assert_eq!(calls.len(), 1);
     let (_id, approved, _reason, _hash) = calls.get(0).unwrap();
@@ -219,7 +225,10 @@ fn test_uneven_stake_whale_reaches_quorum_alone() {
     client.submit_vote(&whale, &7u64, &true, &String::from_str(&env, "e"));
 
     let round = client.get_verification_round(&7u64).unwrap();
-    assert_eq!(round.status, oracle_registry::RoundStatus::ConsensusApproved);
+    assert_eq!(
+        round.status,
+        oracle_registry::RoundStatus::ConsensusApproved
+    );
 }
 
 #[test]
@@ -258,8 +267,7 @@ fn test_vote_from_unregistered_oracle_rejected() {
     client.open_verification_round(&caller, &7u64, &hash);
 
     let stranger = Address::generate(&env);
-    let result =
-        client.try_submit_vote(&stranger, &7u64, &true, &String::from_str(&env, "e"));
+    let result = client.try_submit_vote(&stranger, &7u64, &true, &String::from_str(&env, "e"));
     assert_eq!(result, Err(Ok(OracleRegistryError::NotRegistered)));
 }
 
@@ -324,12 +332,8 @@ fn test_admin_resolve_round_before_expiry_rejected() {
     let hash = String::from_str(&env, "h1");
     client.open_verification_round(&caller, &7u64, &hash);
 
-    let result = client.try_admin_resolve_round(
-        &admin,
-        &7u64,
-        &true,
-        &String::from_str(&env, "too early"),
-    );
+    let result =
+        client.try_admin_resolve_round(&admin, &7u64, &true, &String::from_str(&env, "too early"));
     assert_eq!(result, Err(Ok(OracleRegistryError::RoundNotExpired)));
 }
 
