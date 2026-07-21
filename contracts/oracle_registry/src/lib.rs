@@ -615,7 +615,13 @@ impl OracleRegistryContract {
         // simultaneously via a floored-to-zero threshold.
         let threshold = (round.total_stake_snapshot * round.quorum_bps as i128 + 9_999) / 10_000;
 
-        if round.weight_for >= threshold {
+        // N-of-M: stake-weight alone is not enough to finalize. `required_votes`
+        // (N) is an independent floor on the number of *distinct* oracles that
+        // must participate, so a single high-stake oracle can't unilaterally
+        // decide a round just because its stake alone clears quorum_bps.
+        let has_min_votes = round.votes.len() >= round.required_votes;
+
+        if has_min_votes && round.weight_for >= threshold {
             round.status = RoundStatus::ConsensusApproved;
             let oracle_hash = round.oracle_hash.clone();
             env.storage().persistent().set(&round_key, &round);
@@ -623,7 +629,7 @@ impl OracleRegistryContract {
             Self::finalize_on_invoice(&env, invoice_id, true, &oracle_hash)?;
             env.events()
                 .publish((EVT, symbol_short!("consensus")), (invoice_id, true));
-        } else if round.weight_against >= threshold {
+        } else if has_min_votes && round.weight_against >= threshold {
             round.status = RoundStatus::ConsensusRejected;
             let oracle_hash = round.oracle_hash.clone();
             env.storage().persistent().set(&round_key, &round);

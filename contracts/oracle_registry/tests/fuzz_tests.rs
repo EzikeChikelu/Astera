@@ -49,14 +49,20 @@ impl DummyInvoice {
 }
 
 const QUORUM_BPS: i128 = 6_600;
+// Matches DEFAULT_REQUIRED_VOTES in src/lib.rs — the registry is never
+// re-configured in this test, so a fresh `initialize` always defaults to 3.
+const REQUIRED_VOTES: u32 = 3;
 
 fn ceil_threshold(total_stake: i128) -> i128 {
     (total_stake * QUORUM_BPS + 9_999) / 10_000
 }
 
 /// Reference model: replays the same votes in the same order, stopping as
-/// soon as one side crosses the ceiling-divided quorum threshold, exactly as
-/// the contract's early-finalization behavior does.
+/// soon as one side crosses the ceiling-divided quorum threshold *and* at
+/// least `REQUIRED_VOTES` distinct oracles have voted — exactly the two-gate
+/// finalization behavior in `submit_vote` (stake weight alone isn't enough;
+/// see test_whale_stake_alone_insufficient_without_minimum_vote_count in
+/// consensus_tests.rs).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Outcome {
     Approved,
@@ -69,16 +75,17 @@ fn reference_model(stakes: &[i128], votes: &[bool]) -> Outcome {
     let threshold = ceil_threshold(total);
     let mut weight_for: i128 = 0;
     let mut weight_against: i128 = 0;
-    for (stake, approved) in stakes.iter().zip(votes.iter()) {
+    for (i, (stake, approved)) in stakes.iter().zip(votes.iter()).enumerate() {
         if *approved {
             weight_for += stake;
         } else {
             weight_against += stake;
         }
-        if weight_for >= threshold {
+        let has_min_votes = (i + 1) as u32 >= REQUIRED_VOTES;
+        if has_min_votes && weight_for >= threshold {
             return Outcome::Approved;
         }
-        if weight_against >= threshold {
+        if has_min_votes && weight_against >= threshold {
             return Outcome::Rejected;
         }
     }

@@ -130,7 +130,18 @@ fn test_single_rogue_oracle_cannot_reach_default_quorum() {
 fn test_quorum_approval_at_exactly_two_thirds_calls_consensus_verify() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, stake_token, invoice) = setup(&env, 1_000);
+    let (client, admin, stake_token, invoice) = setup(&env, 1_000);
+    // required_votes lowered to 2 so this test can isolate the stake-quorum
+    // threshold math from the separate N-of-M minimum-vote-count gate
+    // (covered by test_whale_stake_alone_insufficient_without_minimum_vote_count).
+    client.set_registry_config(
+        &admin,
+        &1_000i128,
+        &2u32,
+        &6_600u32,
+        &(3 * 86_400u64),
+        &(7 * 86_400u64),
+    );
     // Total stake 3000, threshold = ceil(3000*6600/10000) = 1980.
     let oracles = register_n_equal(&env, &client, &stake_token, 3, 1_000);
     let caller = Address::generate(&env);
@@ -174,7 +185,17 @@ fn test_quorum_approval_at_exactly_two_thirds_calls_consensus_verify() {
 fn test_quorum_rejection_calls_consensus_verify_with_approved_false() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, stake_token, invoice) = setup(&env, 1_000);
+    let (client, admin, stake_token, invoice) = setup(&env, 1_000);
+    // See the approval test above — isolates stake-quorum math from the
+    // separate minimum-vote-count gate.
+    client.set_registry_config(
+        &admin,
+        &1_000i128,
+        &2u32,
+        &6_600u32,
+        &(3 * 86_400u64),
+        &(7 * 86_400u64),
+    );
     let oracles = register_n_equal(&env, &client, &stake_token, 3, 1_000);
     let caller = Address::generate(&env);
     let hash = String::from_str(&env, "h1");
@@ -205,25 +226,53 @@ fn test_quorum_rejection_calls_consensus_verify_with_approved_false() {
 }
 
 #[test]
-fn test_uneven_stake_whale_reaches_quorum_alone() {
-    // One whale oracle holds 90% of stake; a single approving vote from the
-    // whale alone must cross the two-thirds default quorum.
+fn test_whale_stake_alone_insufficient_without_minimum_vote_count() {
+    // A whale oracle holding 90% of stake must NOT be able to finalize a
+    // round alone, even though its weight alone would clear the stake
+    // quorum. `required_votes` (the N in N-of-M) is an independent floor on
+    // the number of distinct participating oracles — a single high-stake
+    // oracle unilaterally deciding a round is exactly the 1-of-2 problem
+    // this contract replaces.
     let env = Env::default();
     env.mock_all_auths();
     let (client, _admin, stake_token, _invoice) = setup(&env, 1_000);
     let whale = Address::generate(&env);
     token::StellarAssetClient::new(&env, &stake_token).mint(&whale, &9_000);
     client.register_oracle(&whale, &9_000);
-    let minnow = Address::generate(&env);
-    token::StellarAssetClient::new(&env, &stake_token).mint(&minnow, &1_000);
-    client.register_oracle(&minnow, &1_000);
+    let others = register_n_equal(&env, &client, &stake_token, 2, 1_000);
 
     let caller = Address::generate(&env);
     let hash = String::from_str(&env, "h1");
     client.open_verification_round(&caller, &7u64, &hash);
 
     client.submit_vote(&whale, &7u64, &true, &String::from_str(&env, "e"));
+    // Whale's weight alone (9000/11000 ≈ 82%) clears the default 66%
+    // quorum, but only 1 of the default required_votes = 3 oracles has
+    // voted — the round must stay open.
+    assert_eq!(
+        client.get_verification_round(&7u64).unwrap().status,
+        oracle_registry::RoundStatus::Open
+    );
 
+    client.submit_vote(
+        &others.get(0).unwrap(),
+        &7u64,
+        &true,
+        &String::from_str(&env, "e"),
+    );
+    // 2 of 3 required votes in, weight is well past quorum — still open.
+    assert_eq!(
+        client.get_verification_round(&7u64).unwrap().status,
+        oracle_registry::RoundStatus::Open
+    );
+
+    client.submit_vote(
+        &others.get(1).unwrap(),
+        &7u64,
+        &true,
+        &String::from_str(&env, "e"),
+    );
+    // Both gates satisfied: 3 distinct votes and weight past quorum.
     let round = client.get_verification_round(&7u64).unwrap();
     assert_eq!(
         round.status,
