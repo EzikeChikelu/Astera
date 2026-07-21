@@ -150,6 +150,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [contracts]
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    env:
+      # GitHub withholds repository secrets from `pull_request` runs
+      # triggered by a fork (by design — a fork PR can't be trusted with
+      # deploy credentials), so TESTNET_DEPLOYER_SECRET is empty for any
+      # external contribution and every step below would fail immediately on
+      # `--source-account` with nothing to actually test. `secrets`/`env`
+      # aren't usable in a job-level `if:`, so every secret-dependent step is
+      # individually guarded on this instead — they skip cleanly on fork PRs
+      # and run for real whenever the secret *is* available (e.g. a
+      # maintainer's own branch).
+      HAS_DEPLOY_SECRET: ${{ secrets.TESTNET_DEPLOYER_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -157,6 +168,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install Soroban CLI
+        if: env.HAS_DEPLOY_SECRET == 'true'
         # Building soroban-cli from source via `cargo install` pulls in native
         # deps (libdbus, libudev, ...) that keep drifting on the runner image
         # and take 10+ minutes to compile. Download the prebuilt stellar-cli
@@ -170,10 +182,12 @@ jobs:
           sudo ln -sf /usr/local/bin/stellar /usr/local/bin/soroban
           soroban --version
       - name: Build contracts
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share
       - name: Deploy invoice contract to testnet
         id: deploy-invoice
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/invoice.wasm \
@@ -183,6 +197,7 @@ jobs:
           echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
           echo "Invoice contract ID: $CONTRACT_ID"
       - name: Smoke test invoice contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           soroban contract invoke \
             --id ${{ steps.deploy-invoice.outputs.contract_id }} \
@@ -192,6 +207,7 @@ jobs:
           # Should return InvoiceError::InvoiceNotFound — verify it doesn't crash
       - name: Deploy pool contract to testnet
         id: deploy-pool
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/pool.wasm \
@@ -201,6 +217,7 @@ jobs:
           echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
           echo "Pool contract ID: $CONTRACT_ID"
       - name: Smoke test pool contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           soroban contract invoke \
             --id ${{ steps.deploy-pool.outputs.contract_id }} \
@@ -208,6 +225,7 @@ jobs:
             --network testnet
       - name: Deploy credit_score contract to testnet
         id: deploy-credit-score
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/credit_score.wasm \
@@ -217,6 +235,7 @@ jobs:
           echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
           echo "Credit score contract ID: $CONTRACT_ID"
       - name: Smoke test credit_score contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           soroban contract invoke \
             --id ${{ steps.deploy-credit-score.outputs.contract_id }} \
@@ -224,6 +243,7 @@ jobs:
             --network testnet
       - name: Deploy share contract to testnet
         id: deploy-share
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/share.wasm \
@@ -233,6 +253,7 @@ jobs:
           echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
           echo "Share contract ID: $CONTRACT_ID"
       - name: Smoke test share contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
           soroban contract invoke \
             --id ${{ steps.deploy-share.outputs.contract_id }} \
