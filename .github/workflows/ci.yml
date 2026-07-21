@@ -156,13 +156,19 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies for soroban-cli
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Install Soroban CLI
+        # Building soroban-cli from source via `cargo install` pulls in native
+        # deps (libdbus, libudev, ...) that keep drifting on the runner image
+        # and take 10+ minutes to compile. Download the prebuilt stellar-cli
+        # release instead and symlink it as `soroban` — same tool (stellar-cli
+        # is soroban-cli's current name), same CLI surface, no native build.
         run: |
-          cargo install soroban-cli --locked
+          curl -sSfL -o stellar-cli.tar.gz \
+            https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz
+          tar xzf stellar-cli.tar.gz
+          sudo install -m 755 stellar /usr/local/bin/stellar
+          sudo ln -sf /usr/local/bin/stellar /usr/local/bin/soroban
+          soroban --version
       - name: Build contracts
         run: |
           cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share
