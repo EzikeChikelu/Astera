@@ -78,6 +78,11 @@ export const Errors = {
   75: { message: 'CoFundingRoundNotFilled' },
   76: { message: 'CoFundingTooManyParticipants' },
   77: { message: 'InvalidCoFundingParams' },
+  78: { message: 'WithdrawalQueueFull' },
+  79: { message: 'InvalidRateModelConfig' },
+  80: { message: 'RateModelNotConfigured' },
+  81: { message: 'RateModelProposalNotFound' },
+  82: { message: 'RateModelChangeNotReady' },
 } as const;
 
 export type PoolErrorCode = keyof typeof Errors;
