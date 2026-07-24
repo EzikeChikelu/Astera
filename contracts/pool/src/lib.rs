@@ -151,9 +151,14 @@ pub enum PoolError {
     InvalidCoFundingParams = 77,
     // #865: global withdrawal-queue depth cap reached for this token
     WithdrawalQueueFull = 78,
+    // #863: utilization-driven rate model errors
+    InvalidRateModelConfig = 79,
+    RateModelNotConfigured = 80,
+    RateModelProposalNotFound = 81,
+    RateModelChangeNotReady = 82,
     // #867: on-chain compliance / sanctions screening gate
-    ComplianceNotCleared = 79,
-    ComplianceCheckFailed = 80,
+    ComplianceNotCleared = 83,
+    ComplianceCheckFailed = 84,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -200,6 +205,16 @@ const DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH: u32 = 500;
 // estimate_withdrawal_wait/get_liquidity_forecast, mirroring the credit_score contract's
 // PaymentHistory rolling-window pattern.
 const MAX_INFLOW_HISTORY: u32 = 50;
+// #863: fixed-size ring buffer capacity for the per-token rate history
+// ((timestamp, utilization_bps, rate_bps) samples) charted by the frontend.
+// 720 samples ≈ 30 days at hourly granularity; oldest entry is evicted on
+// overflow so storage never grows unbounded.
+const MAX_RATE_HISTORY: u32 = 720;
+// #863: absolute protocol ceiling for any rate the curve can produce or an
+// admin can configure — matches the existing 5_000 bps cap in set_yield /
+// propose_yield_change so the dynamic model can never price beyond what the
+// manual override already allows.
+const MAX_RATE_BPS_CAP: u32 = 5_000;
 // #865: clamp bounds for the predictive wait estimate so a sparse/empty inflow history
 // or a huge queue never produces a nonsensical (zero or unbounded) estimate.
 const MIN_WAIT_ESTIMATE_SECS: u64 = 3_600; // 1 hour
@@ -274,6 +289,43 @@ pub struct LiquidityForecastPoint {
 pub struct InflowEvent {
     pub amount: i128,
     pub timestamp: u64,
+}
+
+/// #863: utilization-driven kinked interest-rate model parameters, per token.
+/// The realized rate for *new* fundings moves automatically with utilization;
+/// only these curve parameters are admin-governed (via the timelocked
+/// propose/execute machinery, same pattern as `propose_yield_change`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateModelConfig {
+    /// Rate (bps) at 0% utilization.
+    pub base_rate_bps: u32,
+    /// The "kink" point in bps (e.g. 8_000 = 80% utilization).
+    pub optimal_utilization_bps: u32,
+    /// Rate increase (bps) spread across the 0..optimal utilization span.
+    pub slope1_bps: u32,
+    /// Rate increase (bps) spread across the optimal..100% span — steeper,
+    /// this is what disincentivizes over-draining the pool.
+    pub slope2_bps: u32,
+    /// Hard ceiling on the computed rate.
+    pub max_rate_bps: u32,
+}
+
+/// #863: one recorded rate sample for the frontend's rate-history chart.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateSnapshot {
+    pub timestamp: u64,
+    pub utilization_bps: u32,
+    pub rate_bps: u32,
+}
+
+/// #863: a pending timelocked rate-model parameter change for one token.
+#[contracttype]
+#[derive(Clone)]
+pub struct RateModelProposal {
+    pub config: RateModelConfig,
+    pub proposed_at: u64,
 }
 
 #[contracttype]
@@ -392,6 +444,12 @@ pub struct FundedInvoice {
     /// interest directly to that round's `CoFundShare` holders instead of
     /// the pool-wide `reward_per_share` accumulator.
     pub co_funding_round_id: Option<u64>,
+    /// #863: interest rate locked in at funding time. When the token has a
+    /// `RateModelConfig` this is the curve's output at funding-time
+    /// utilization; otherwise it is the static `PoolConfig.yield_bps`.
+    /// Locked for the life of the invoice — later utilization/curve changes
+    /// never retroactively reprice already-funded invoices.
+    pub locked_yield_bps: u32,
 }
 
 // #860: multi-investor co-funding rounds — every co-funder ranks pari passu
@@ -528,6 +586,14 @@ pub enum KycStatus {
     Rejected,
 }
 
+/// #867: compliance gate config (registry address + require flag).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComplianceGateConfig {
+    pub registry: Address,
+    pub required: bool,
+}
+
 /// Record of collateral deposited for a specific invoice.
 #[contracttype]
 #[derive(Clone)]
@@ -628,12 +694,25 @@ pub enum DataKey {
     InflowHistoryStart(Address),
     // #865: individual ring-buffer slot: (token, slot_index) -> InflowEvent.
     InflowRecord(Address, u32),
-    // #867: optional compliance registry + opt-in gate
-    ComplianceRegistry,
-    RequireComplianceCheck,
+    // #863: per-token kinked interest-rate model parameters.
+    RateModel(Address),
+    // #863: pending timelocked rate-model change per token.
+    PendingRateModel(Address),
+    // #863: timestamp of the last executed rate-model change per token —
+    // enforces the same cooldown pattern as yield changes.
+    RateModelChangedAt(Address),
+    // #863: rate-history ring buffer bookkeeping (token -> length / start),
+    // mirroring the InflowHistory pattern above.
+    RateHistoryLen(Address),
+    RateHistoryStart(Address),
+    // #863: individual rate-history ring-buffer slot: (token, slot_index) -> RateSnapshot.
+    RateRecord(Address, u32),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
+// #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
+// the Soroban 50-variant ceiling after #863.
+const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -779,6 +858,162 @@ fn calculate_interest(
     div_round_half_up(interest_numerator, denominator)
 }
 
+/// #863: pure two-slope kinked interest-rate curve (Aave/Compound family),
+/// independently unit-testable with no storage/env dependency.
+///
+/// ```text
+/// util <= optimal: rate = base + util * slope1 / optimal
+/// util >  optimal: rate = base + slope1 + (util - optimal) * slope2 / (10_000 - optimal)
+/// ```
+///
+/// The result is always clamped to `config.max_rate_bps`. All arithmetic is
+/// done in `u128` with checked ops; on any overflow the rate saturates to the
+/// ceiling rather than panicking. Monotonically non-decreasing in utilization
+/// for any valid config.
+pub fn compute_current_rate(utilization_bps: u32, config: &RateModelConfig) -> u32 {
+    let util = utilization_bps.min(BPS_DENOM) as u128;
+    let optimal = config.optimal_utilization_bps as u128;
+    let base = config.base_rate_bps as u128;
+    let ceiling = config.max_rate_bps as u128;
+
+    let mul_div = |a: u128, b: u128, denom: u128| -> u128 {
+        a.checked_mul(b)
+            .and_then(|v| v.checked_div(denom))
+            .unwrap_or(u128::MAX)
+    };
+
+    // Below (and at) the kink: base plus the pro-rata share of slope1.
+    // `checked_div(0)` on a zero kink yields None -> saturates to the ceiling.
+    let mut rate = base.saturating_add(mul_div(
+        util.min(optimal),
+        config.slope1_bps as u128,
+        optimal,
+    ));
+
+    // Above the kink: add the pro-rata share of slope2 over the remaining span.
+    // `util > optimal` implies span > 0 here, but checked_div keeps it total.
+    if util > optimal {
+        let span = (BPS_DENOM as u128).saturating_sub(optimal);
+        rate = rate.saturating_add(mul_div(util - optimal, config.slope2_bps as u128, span));
+    }
+
+    rate.min(ceiling).min(u32::MAX as u128) as u32
+}
+
+/// #863: curve-config sanity bounds checked before a rate model is stored.
+fn validate_rate_model_config(config: &RateModelConfig) -> PoolResult<()> {
+    // Kink must be inside (0%, 100%] — 0 would make the slope1 pro-ration
+    // meaningless (and the below-kink division undefined).
+    if config.optimal_utilization_bps == 0 || config.optimal_utilization_bps > BPS_DENOM {
+        return Err(PoolError::InvalidRateModelConfig);
+    }
+    if config.max_rate_bps == 0 || config.max_rate_bps > MAX_RATE_BPS_CAP {
+        return Err(PoolError::InvalidRateModelConfig);
+    }
+    if config.base_rate_bps > config.max_rate_bps {
+        return Err(PoolError::InvalidRateModelConfig);
+    }
+    if config.slope1_bps > MAX_RATE_BPS_CAP || config.slope2_bps > MAX_RATE_BPS_CAP {
+        return Err(PoolError::InvalidRateModelConfig);
+    }
+    Ok(())
+}
+
+/// #863: current utilization of a token in bps (0..10_000), 0 for an empty pool.
+fn utilization_bps(tt: &PoolTokenTotals) -> u32 {
+    if tt.pool_value <= 0 {
+        return 0;
+    }
+    ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32
+}
+
+/// #863: the rate a *new* funding for `token` would lock right now — the
+/// curve's output at current utilization when a rate model is configured,
+/// otherwise the static `config.yield_bps` fallback. Once a token has a
+/// `RateModelConfig`, the flat `yield_bps` is inert for that token's new
+/// fundings (the dynamic curve is the single source of truth); `set_yield` /
+/// `propose_yield_change` remain as the manual override for tokens without a
+/// configured model.
+fn current_rate_for_token(env: &Env, config: &PoolConfig, token: &Address) -> u32 {
+    let tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&DataKey::TokenTotals(token.clone()))
+        .unwrap_or_default();
+    match env
+        .storage()
+        .instance()
+        .get::<DataKey, RateModelConfig>(&DataKey::RateModel(token.clone()))
+    {
+        Some(model) => compute_current_rate(utilization_bps(&tt), &model),
+        None => config.yield_bps,
+    }
+}
+
+/// #863: append one (timestamp, utilization, rate) sample to the token's
+/// fixed-size rate-history ring buffer (capacity `MAX_RATE_HISTORY`; oldest
+/// entry evicted on overflow so storage stays bounded). No-op for tokens
+/// without a configured rate model, and consecutive duplicate samples (same
+/// utilization and rate) are collapsed so quiet periods don't flush real
+/// history out of the buffer.
+fn record_rate_snapshot(env: &Env, token: &Address) {
+    let model: Option<RateModelConfig> = env
+        .storage()
+        .instance()
+        .get(&DataKey::RateModel(token.clone()));
+    let Some(model) = model else { return };
+    let tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&DataKey::TokenTotals(token.clone()))
+        .unwrap_or_default();
+    let util = utilization_bps(&tt);
+    let rate = compute_current_rate(util, &model);
+
+    let len_key = DataKey::RateHistoryLen(token.clone());
+    let start_key = DataKey::RateHistoryStart(token.clone());
+    let len: u32 = env.storage().instance().get(&len_key).unwrap_or(0);
+    let start: u32 = env.storage().instance().get(&start_key).unwrap_or(0);
+
+    // Collapse consecutive duplicates: read the newest slot if any.
+    if len > 0 {
+        let newest_idx = (start + len - 1) % MAX_RATE_HISTORY;
+        if let Some(last) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, RateSnapshot>(&DataKey::RateRecord(token.clone(), newest_idx))
+        {
+            if last.utilization_bps == util && last.rate_bps == rate {
+                return;
+            }
+        }
+    }
+
+    let snapshot = RateSnapshot {
+        timestamp: env.ledger().timestamp(),
+        utilization_bps: util,
+        rate_bps: rate,
+    };
+    if len < MAX_RATE_HISTORY {
+        env.storage()
+            .persistent()
+            .set(&DataKey::RateRecord(token.clone(), len), &snapshot);
+        env.storage().instance().set(&len_key, &(len + 1));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::RateRecord(token.clone(), start), &snapshot);
+        let new_start = (start + 1) % MAX_RATE_HISTORY;
+        env.storage().instance().set(&start_key, &new_start);
+    }
+
+    // Indexed off-chain into a time-series table for the rate-history API.
+    env.events().publish(
+        (EVT, symbol_short!("rate_snap")),
+        (token.clone(), snapshot.timestamp, util, rate),
+    );
+}
+
 fn u128_to_i128(value: u128) -> PoolResult<i128> {
     if value > i128::MAX as u128 {
         return Err(PoolError::AmountOverflow);
@@ -810,9 +1045,12 @@ fn calculate_total_due(
     let elapsed_secs = accrual_end
         .checked_sub(record.funded_at)
         .ok_or(PoolError::AmountOverflow)?;
+    // #863: interest accrues at the rate locked in when the invoice was
+    // funded (curve output at funding-time utilization, or the static
+    // yield_bps fallback) — never the current live rate.
     let total_interest = calculate_interest(
         record.principal as u128,
-        config.yield_bps,
+        record.locked_yield_bps,
         elapsed_secs,
         config.compound_interest,
     )?;
@@ -1236,6 +1474,25 @@ fn fund_invoice_request(
         request.sme.clone(),
         &request.token,
     )?;
+    let prev_deployed = tt.total_deployed;
+    tt.total_deployed = tt
+        .total_deployed
+        .checked_add(request.principal)
+        .ok_or(PoolError::AmountOverflow)?;
+    // #863: lock in the rate live at funding time. With a configured rate
+    // model this prices the invoice off post-deployment utilization (the
+    // liquidity this funding consumes is reflected in its own rate);
+    // otherwise it falls back to the static `config.yield_bps`.
+    let locked_yield_bps = {
+        let model: Option<RateModelConfig> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateModel(request.token.clone()));
+        match model {
+            Some(m) => compute_current_rate(utilization_bps(&tt), &m),
+            None => config.yield_bps,
+        }
+    };
     let funded = FundedInvoice {
         invoice_id: request.invoice_id,
         sme: request.sme.clone(),
@@ -1246,6 +1503,7 @@ fn fund_invoice_request(
         due_date: request.due_date,
         repaid_amount: 0i128,
         co_funding_round_id: None,
+        locked_yield_bps,
     };
 
     // Persist invoice record and update totals/stats.
@@ -1256,11 +1514,6 @@ fn fund_invoice_request(
     // #865: index this invoice_id so liquidity forecasting can enumerate open invoices.
     record_funded_invoice_id(env, &request.token, request.invoice_id);
 
-    let prev_deployed = tt.total_deployed;
-    tt.total_deployed = tt
-        .total_deployed
-        .checked_add(request.principal)
-        .ok_or(PoolError::AmountOverflow)?;
     env.storage().instance().set(&token_totals_key, &tt);
 
     // #275: check utilization after deployment
@@ -1325,6 +1578,9 @@ fn fund_invoice_request(
             env.ledger().timestamp(),
         ),
     );
+
+    // #863: utilization moved with this funding — record a rate sample.
+    record_rate_snapshot(env, &request.token);
 
     // #534: notify the credit score contract that this borrower secured funding.
     // Non-fatal — a cross-contract failure must not revert a successful funding.
@@ -3089,6 +3345,10 @@ impl FundingPool {
         Self::non_reentrant_end(env);
         let (fully_repaid, token, principal, repaid_amount, available_amount) = guarded_result?;
 
+        // #863: a repayment changes utilization (deployed capital and/or pool
+        // value) — record a rate sample for the history chart.
+        record_rate_snapshot(env, &token);
+
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
             if let Err(e) = Self::process_withdrawal_queue(env, token.clone(), available_amount) {
@@ -3572,6 +3832,179 @@ impl FundingPool {
             (admin, cooldown_secs, max_change_bps, timelock_secs),
         );
         Ok(())
+    }
+
+    // #863: utilization-driven rate model governance — the curve's *parameters*
+    // move through the same cooldown + 48h-timelock pattern as yield changes;
+    // the realized rate itself moves automatically with utilization.
+
+    /// Admin proposes new rate-model parameters for `token`. The proposal
+    /// becomes executable after `yield_timelock_secs` (48h default) via
+    /// `execute_rate_model_change`; a fresh proposal replaces any pending one.
+    /// Proposals respect the yield-change cooldown between executed changes.
+    pub fn propose_rate_model_change(
+        env: Env,
+        admin: Address,
+        token: Address,
+        new_config: RateModelConfig,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        Self::require_admin(&env, &admin)?;
+        validate_rate_model_config(&new_config)?;
+
+        // Same cooldown pattern as propose_yield_change, tracked per token.
+        let now = env.ledger().timestamp();
+        let last_change: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateModelChangedAt(token.clone()))
+            .unwrap_or(0);
+        if now < last_change.saturating_add(config.yield_change_cooldown_secs) {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        let proposal = RateModelProposal {
+            config: new_config,
+            proposed_at: now,
+        };
+        let effective_at = now + config.yield_timelock_secs;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingRateModel(token.clone()), &proposal);
+        env.events().publish(
+            (EVT, symbol_short!("rm_prop")),
+            (admin, token, effective_at),
+        );
+        Ok(())
+    }
+
+    /// Anyone can execute once the timelock has elapsed; the new curve applies
+    /// to *new* fundings only — already-funded invoices keep their locked rate.
+    pub fn execute_rate_model_change(env: Env, token: Address) -> Result<(), PoolError> {
+        bump_instance(&env);
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        let proposal: RateModelProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingRateModel(token.clone()))
+            .ok_or(PoolError::RateModelProposalNotFound)?;
+
+        let now = env.ledger().timestamp();
+        let effective_at = proposal
+            .proposed_at
+            .saturating_add(config.yield_timelock_secs);
+        if now < effective_at {
+            return Err(PoolError::RateModelChangeNotReady);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RateModel(token.clone()), &proposal.config);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingRateModel(token.clone()));
+        env.storage()
+            .instance()
+            .set(&DataKey::RateModelChangedAt(token.clone()), &now);
+
+        // Record a sample so history reflects the new curve immediately.
+        record_rate_snapshot(&env, &token);
+        env.events()
+            .publish((EVT, symbol_short!("rm_exec")), (token, now));
+        Ok(())
+    }
+
+    /// Admin cancels a pending rate-model proposal before execution.
+    pub fn cancel_rate_model_change(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingRateModel(token.clone()));
+        env.events()
+            .publish((EVT, symbol_short!("rm_cncl")), (admin, token));
+        Ok(())
+    }
+
+    /// #863: the rate a new funding for `token` would lock right now.
+    /// Errors with `RateModelNotConfigured` when the token has no curve —
+    /// callers can then fall back to `get_config().yield_bps`.
+    pub fn get_current_rate(env: Env, token: Address) -> Result<u32, PoolError> {
+        let model: RateModelConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateModel(token.clone()))
+            .ok_or(PoolError::RateModelNotConfigured)?;
+        let tt = Self::get_token_totals(env, token);
+        Ok(compute_current_rate(utilization_bps(&tt), &model))
+    }
+
+    /// #863: the token's current curve parameters, if any.
+    pub fn get_rate_model_config(env: Env, token: Address) -> Option<RateModelConfig> {
+        env.storage().instance().get(&DataKey::RateModel(token))
+    }
+
+    /// #863: up to `limit` most recent rate samples for `token`, returned in
+    /// chronological (oldest-first) order — ready for the frontend chart.
+    pub fn get_rate_history(env: Env, token: Address, limit: u32) -> Vec<RateSnapshot> {
+        let mut out = Vec::new(&env);
+        let len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateHistoryLen(token.clone()))
+            .unwrap_or(0);
+        if len == 0 || limit == 0 {
+            return out;
+        }
+        let start: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateHistoryStart(token.clone()))
+            .unwrap_or(0);
+        let take = len.min(limit);
+        // Skip the oldest `len - take` samples so the most recent `take` remain.
+        let skip = len - take;
+        for offset in skip..len {
+            let idx = (start + offset) % MAX_RATE_HISTORY;
+            if let Some(snapshot) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, RateSnapshot>(&DataKey::RateRecord(token.clone(), idx))
+            {
+                out.push_back(snapshot);
+            }
+        }
+        out
+    }
+
+    /// #863: what the rate would be at a hypothetical utilization — powers the
+    /// frontend's "what if I deposit/withdraw X" scenario preview.
+    pub fn preview_rate_at_utilization(
+        env: Env,
+        token: Address,
+        hypothetical_util_bps: u32,
+    ) -> Result<u32, PoolError> {
+        let model: RateModelConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateModel(token))
+            .ok_or(PoolError::RateModelNotConfigured)?;
+        Ok(compute_current_rate(hypothetical_util_bps, &model))
     }
 
     pub fn set_factoring_fee(
@@ -4394,6 +4827,10 @@ impl FundingPool {
                     .instance()
                     .get(&DataKey::StorageStats)
                     .unwrap_or_default();
+                // #863: co-funded invoices lock the live rate at finalization
+                // too, so their repayment interest is computed from the same
+                // single source of truth as pool-funded invoices.
+                let config = get_config_cached(&env)?;
                 let funded = FundedInvoice {
                     invoice_id,
                     sme: round.sme.clone(),
@@ -4404,6 +4841,7 @@ impl FundingPool {
                     due_date: round.due_date,
                     repaid_amount: 0,
                     co_funding_round_id: Some(invoice_id),
+                    locked_yield_bps: current_rate_for_token(&env, &config, &round.token),
                 };
                 env.storage()
                     .persistent()
@@ -4892,23 +5330,17 @@ impl FundingPool {
         Ok(())
     }
 
-    /// #867: when `RequireComplianceCheck` is true, call the configured
-    /// compliance registry's `is_cleared`. Fatal on not-cleared or call failure.
+    /// #867: when compliance gate `required` is true, call the configured
+    /// registry's `is_cleared`. Fatal on not-cleared or call failure.
     fn require_compliance_cleared(env: &Env, address: &Address) -> PoolResult<()> {
-        let required: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::RequireComplianceCheck)
-            .unwrap_or(false);
-        if !required {
+        let gate: Option<ComplianceGateConfig> = env.storage().instance().get(&COMPLIANCE_CFG);
+        let Some(gate) = gate else {
+            return Ok(());
+        };
+        if !gate.required {
             return Ok(());
         }
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::ComplianceRegistry)
-            .ok_or(PoolError::ComplianceCheckFailed)?;
-        let client = ComplianceClient::new(env, &registry);
+        let client = ComplianceClient::new(env, &gate.registry);
         match client.try_is_cleared(address) {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(PoolError::ComplianceNotCleared),
@@ -5031,9 +5463,16 @@ impl FundingPool {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
-        env.storage()
+        let mut gate: ComplianceGateConfig = env
+            .storage()
             .instance()
-            .set(&DataKey::ComplianceRegistry, &registry);
+            .get(&COMPLIANCE_CFG)
+            .unwrap_or(ComplianceGateConfig {
+                registry: registry.clone(),
+                required: false,
+            });
+        gate.registry = registry.clone();
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
         env.events()
             .publish((EVT, symbol_short!("cmp_set")), (admin, registry));
         Ok(())
@@ -5041,12 +5480,15 @@ impl FundingPool {
 
     pub fn get_compliance_registry(env: Env) -> Option<Address> {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::ComplianceRegistry)
+        env.storage()
+            .instance()
+            .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
+            .map(|g| g.registry)
     }
 
     /// Toggle the fatal compliance gate on deposit / withdraw /
     /// request_withdrawal / fund_invoice. Default false — opt-in so existing
-    /// deployments and tests are unaffected.
+    /// deployments and tests are unaffected. Requires registry to be set first.
     pub fn set_require_compliance_check(
         env: Env,
         admin: Address,
@@ -5055,9 +5497,13 @@ impl FundingPool {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
-        env.storage()
+        let mut gate: ComplianceGateConfig = env
+            .storage()
             .instance()
-            .set(&DataKey::RequireComplianceCheck, &required);
+            .get(&COMPLIANCE_CFG)
+            .ok_or(PoolError::ComplianceCheckFailed)?;
+        gate.required = required;
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
         env.events()
             .publish((EVT, symbol_short!("cmp_req")), (admin, required));
         Ok(())
@@ -5067,7 +5513,8 @@ impl FundingPool {
         bump_instance(&env);
         env.storage()
             .instance()
-            .get(&DataKey::RequireComplianceCheck)
+            .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
+            .map(|g| g.required)
             .unwrap_or(false)
     }
 
@@ -7473,6 +7920,9 @@ mod test {
             due_date: u64::MAX,
             repaid_amount: 0,
             co_funding_round_id: None,
+            // #863: interest now accrues at the locked rate, so the extreme
+            // value lives here to keep exercising the overflow path.
+            locked_yield_bps: u32::MAX,
         };
         let config = PoolConfig {
             invoice_contract: Address::generate(&env),

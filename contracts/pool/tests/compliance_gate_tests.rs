@@ -3,9 +3,7 @@
 //! #867: pool compliance gate — opt-in fatal check on deposit / withdraw /
 //! request_withdrawal / fund_invoice. With the flag off, behavior is unchanged.
 
-use compliance::{
-    ComplianceContract, ComplianceContractClient, ComplianceStatus, RiskTier,
-};
+use compliance::{ComplianceContract, ComplianceContractClient, ComplianceStatus, RiskTier};
 use pool::{FundingPool, FundingPoolClient, PoolError};
 use soroban_sdk::{
     contract, contractimpl,

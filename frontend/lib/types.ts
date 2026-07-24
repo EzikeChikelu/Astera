@@ -98,6 +98,29 @@ export interface LiquidityForecastPoint {
   projectedAvailable: bigint;
 }
 
+// ── #863: utilization-driven kinked interest-rate model ─────────────────────
+
+/** Curve parameters for one token, as returned by `get_rate_model_config`. */
+export interface RateModelConfig {
+  /** Rate (bps) at 0% utilization. */
+  baseRateBps: number;
+  /** The "kink" point in bps (e.g. 8000 = 80%). */
+  optimalUtilizationBps: number;
+  /** Rate increase (bps) spread across the 0..optimal span. */
+  slope1Bps: number;
+  /** Rate increase (bps) spread across the optimal..100% span (steeper). */
+  slope2Bps: number;
+  /** Hard ceiling on the computed rate. */
+  maxRateBps: number;
+}
+
+/** One sample from the on-chain rate-history ring buffer. */
+export interface RateSnapshot {
+  timestamp: number;
+  utilizationBps: number;
+  rateBps: number;
+}
+
 export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';
 
 export interface GovernanceProposal {

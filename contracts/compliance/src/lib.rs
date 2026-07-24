@@ -166,8 +166,7 @@ impl ComplianceContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((EVT, symbol_short!("paused")), admin);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
         Ok(())
     }
 
@@ -300,9 +299,7 @@ impl ComplianceContract {
     }
 
     pub fn is_screener(env: Env, address: Address) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::Screener(address))
+        env.storage().persistent().has(&DataKey::Screener(address))
     }
 
     pub fn list_screeners(env: Env) -> Vec<Address> {
@@ -408,9 +405,11 @@ impl ComplianceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Record(address.clone()), &record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Record(address.clone()), REGISTRY_TTL, REGISTRY_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Record(address.clone()),
+            REGISTRY_TTL,
+            REGISTRY_TTL,
+        );
 
         Self::append_history(
             &env,
@@ -456,7 +455,8 @@ impl ComplianceContract {
         // Only interrupt an actively-cleared (non-expired) record.
         let was_cleared = match &existing {
             Some(r) => {
-                matches!(r.status, ComplianceStatus::Cleared) && (r.expires_at == 0 || now < r.expires_at)
+                matches!(r.status, ComplianceStatus::Cleared)
+                    && (r.expires_at == 0 || now < r.expires_at)
             }
             None => false,
         };
@@ -478,9 +478,11 @@ impl ComplianceContract {
         env.storage()
             .persistent()
             .set(&DataKey::Record(address.clone()), &record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Record(address.clone()), REGISTRY_TTL, REGISTRY_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Record(address.clone()),
+            REGISTRY_TTL,
+            REGISTRY_TTL,
+        );
 
         Self::append_history(
             &env,
@@ -679,11 +681,7 @@ impl ComplianceContract {
     }
 
     fn add_to_list(env: &Env, key: &DataKey, address: &Address, max: u32) {
-        let mut list: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(key)
-            .unwrap_or(Vec::new(env));
+        let mut list: Vec<Address> = env.storage().instance().get(key).unwrap_or(Vec::new(env));
         for i in 0..list.len() {
             if let Some(a) = list.get(i) {
                 if &a == address {
@@ -706,11 +704,7 @@ impl ComplianceContract {
     }
 
     fn remove_from_list(env: &Env, key: &DataKey, address: &Address) {
-        let list: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(key)
-            .unwrap_or(Vec::new(env));
+        let list: Vec<Address> = env.storage().instance().get(key).unwrap_or(Vec::new(env));
         let mut next = Vec::new(env);
         for i in 0..list.len() {
             if let Some(a) = list.get(i) {

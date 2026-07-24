@@ -422,9 +422,7 @@ fn require_compliance_cleared(env: &Env, address: &Address) {
         .storage()
         .instance()
         .get(&DataKey::ComplianceRegistry)
-        .unwrap_or_else(|| {
-            panic_with_error!(env, InvoiceError::ComplianceRegistryNotConfigured)
-        });
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::ComplianceRegistryNotConfigured));
     let client = ComplianceClient::new(env, &registry);
     match client.try_is_cleared(address) {
         Ok(Ok(true)) => {}
