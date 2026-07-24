@@ -414,6 +414,52 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
+  // #863: utilization-driven rate model — the pool contract emits a
+  // `rate_snap` event with value (token, timestamp, utilization_bps, rate_bps)
+  // whenever a new sample lands in its on-chain ring buffer (on funding,
+  // repayment, and rate-model execution). This endpoint reconstructs the
+  // time series for one token from those events; `from`/`to` are optional
+  // unix-second bounds applied to the contract-side sample timestamp.
+  app.get('/pool/:token/rate-history', (req, res) => {
+    try {
+      const { token } = req.params;
+      if (!token) {
+        return res.status(400).json({ error: 'token path param is required' });
+      }
+      const from = typeof req.query.from === 'string' ? Number(req.query.from) : undefined;
+      const to = typeof req.query.to === 'string' ? Number(req.query.to) : undefined;
+      if ((from !== undefined && Number.isNaN(from)) || (to !== undefined && Number.isNaN(to))) {
+        return res.status(400).json({ error: 'from/to must be unix timestamps in seconds' });
+      }
+
+      const events = getEvents(db, {
+        contractType: 'pool',
+        eventType: 'rate_snap',
+        limit: 10_000,
+        offset: 0,
+      });
+
+      const samples = events
+        .filter((evt) => Array.isArray(evt.value) && evt.value[0] === token)
+        .map((evt) => {
+          const value = evt.value as any[];
+          return {
+            timestamp: Number(value[1]),
+            utilizationBps: Number(value[2]),
+            rateBps: Number(value[3]),
+            ledgerSequence: evt.ledgerSequence,
+            txHash: evt.txHash,
+          };
+        })
+        .filter((s) => (from === undefined || s.timestamp >= from) && (to === undefined || s.timestamp <= to))
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+      return res.json({ token, samples, count: samples.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get latest ledger
   app.get('/ledger/latest', (_req, res) => {
     try {

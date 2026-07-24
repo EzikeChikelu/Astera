@@ -52,6 +52,27 @@ export interface PoolConfig {
   compoundInterest: boolean;
 }
 
+// #863: utilization-driven kinked interest-rate model
+
+export interface RateModelConfig {
+  /** Rate (bps) at 0% utilization. */
+  baseRateBps: number;
+  /** The "kink" point in bps (e.g. 8000 = 80%). */
+  optimalUtilizationBps: number;
+  /** Rate increase (bps) spread across the 0..optimal span. */
+  slope1Bps: number;
+  /** Rate increase (bps) spread across the optimal..100% span (steeper). */
+  slope2Bps: number;
+  /** Hard ceiling on the computed rate. */
+  maxRateBps: number;
+}
+
+export interface RateSnapshot {
+  timestamp: number;
+  utilizationBps: number;
+  rateBps: number;
+}
+
 // #865: withdrawal-queue completion + liquidity forecasting
 
 export interface WithdrawalRequest {

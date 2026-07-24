@@ -2,10 +2,11 @@
 
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { usePoolConfig } from '@/lib/cache';
 import { formatApyPercent, projectedInterestStroops } from '@/lib/apy';
 import { formatUSDC, toStroops } from '@/lib/stellar';
+import { getCurrentRate } from '@/lib/contracts';
 import { Skeleton } from '@/components/Skeleton';
 
 const DEFAULT_LOCK_DAYS = '30';
@@ -17,15 +18,44 @@ const DEFAULT_YIELD_BPS = 800;
  * Fetches the live `yield_bps` from the pool contract’s `get_config()` on mount
  * (via SWR-backed `usePoolConfig`). Falls back to {@link DEFAULT_YIELD_BPS} when
  * the contract read fails, and shows a loading skeleton during initial fetch.
+ *
+ * #863: when `token` is provided and that token has a utilization-driven rate
+ * model configured, the live curve rate (`get_current_rate`) is used instead of
+ * the flat `yield_bps`, so projections track real-time supply/demand.
  */
-export function APYCalculator({ className = '' }: { className?: string }) {
+export function APYCalculator({
+  className = '',
+  token,
+}: {
+  className?: string;
+  token?: string;
+}) {
   const [depositInput, setDepositInput] = useState('');
   const [lockDaysInput, setLockDaysInput] = useState(DEFAULT_LOCK_DAYS);
   const { data: poolConfig, isLoading } = usePoolConfig();
+  const [liveCurveRate, setLiveCurveRate] = useState<number | null>(null);
 
-  const yieldBps = poolConfig?.yieldBps ?? DEFAULT_YIELD_BPS;
+  useEffect(() => {
+    let cancelled = false;
+    if (!token) {
+      setLiveCurveRate(null);
+      return;
+    }
+    getCurrentRate(token)
+      .then((rate) => {
+        if (!cancelled) setLiveCurveRate(rate);
+      })
+      .catch(() => {
+        if (!cancelled) setLiveCurveRate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const yieldBps = liveCurveRate ?? poolConfig?.yieldBps ?? DEFAULT_YIELD_BPS;
   const hasValidPoolRate = yieldBps >= 0;
-  const isFallbackRate = !poolConfig;
+  const isFallbackRate = !poolConfig && liveCurveRate === null;
 
   const { interestStroops, totalStroops } = useMemo(() => {
     if (yieldBps === null || yieldBps < 0) {
@@ -58,7 +88,8 @@ export function APYCalculator({ className = '' }: { className?: string }) {
     <div className={`p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl ${className}`.trim()}>
       <h2 className="text-lg font-semibold mb-1 text-[var(--text-primary)]">Earnings calculator</h2>
       <p className="text-xs text-[var(--muted)] mb-4">
-        Model projected returns using the pool&apos;s current rate (
+        Model projected returns using the pool&apos;s{' '}
+        {liveCurveRate !== null ? 'live utilization-driven rate' : 'current rate'} (
         {hasValidPoolRate ? `${formatApyPercent(yieldBps!)}% APY` : 'rate unavailable'}
         ).
       </p>
@@ -129,7 +160,7 @@ export function APYCalculator({ className = '' }: { className?: string }) {
 
       <p className="mt-4 text-xs text-[var(--muted)] leading-relaxed border-t border-[var(--border)] pt-4">
         <strong className="text-[var(--muted)]">Disclaimer:</strong> This projection uses the
-        pool&apos;s configured yield rate and assumes continuous linear accrual like on-chain
+        pool&apos;s {liveCurveRate !== null ? 'live curve rate at current utilization' : 'configured yield rate'} and assumes continuous linear accrual like on-chain
         invoice interest. Actual returns depend on invoice repayment timing, utilization, and pool
         parameters -- nothing is guaranteed.
       </p>

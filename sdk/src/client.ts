@@ -14,6 +14,9 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   TransactionProgress,
+  WithdrawalRequest,
+  WaitEstimate,
+  LiquidityForecastPoint,
   CoFundingRound,
   OracleInfo,
   VerificationRound,
@@ -21,6 +24,8 @@ import type {
   AttestorInfo,
   Attestation,
   CreditScoreResponse,
+  RateModelConfig,
+  RateSnapshot,
 } from './types';
 
 const SIMULATION_SOURCE_ACCOUNT = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
@@ -68,6 +73,34 @@ function coFundingRoundFromScVal(raw: Record<string, unknown>): CoFundingRound {
     minCommitment: BigInt(String(raw.min_commitment)),
     maxInvestorBps: Number(raw.max_investor_bps),
     participants: (raw.participants as string[]) ?? [],
+  };
+}
+
+// #863: RateModelConfig struct -> ScVal. Soroban encodes named-field structs
+// as an ScMap keyed by field-name Symbols in alphabetical order:
+// (base_rate_bps, max_rate_bps, optimal_utilization_bps, slope1_bps, slope2_bps).
+function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
+    entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
+    entry(
+      'optimal_utilization_bps',
+      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
+    ),
+    entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
+    entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
+  ]);
+}
+
+function rateModelConfigFromScVal(raw: Record<string, unknown>): RateModelConfig {
+  return {
+    baseRateBps: Number(raw.base_rate_bps),
+    optimalUtilizationBps: Number(raw.optimal_utilization_bps),
+    slope1Bps: Number(raw.slope1_bps),
+    slope2Bps: Number(raw.slope2_bps),
+    maxRateBps: Number(raw.max_rate_bps),
   };
 }
 
@@ -715,6 +748,184 @@ export class AsteraClient {
         day: Number(r.day),
         projectedAvailable: BigInt(String(r.projected_available)),
       }));
+    },
+
+    // #863: utilization-driven kinked interest-rate model
+
+    /** Rate (bps) a new funding for `token` would lock right now. Throws when
+     * the token has no rate model configured — fall back to
+     * `getConfig().yieldBps` in that case. */
+    getCurrentRate: async (token: string): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_current_rate',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    /** The token's curve parameters, or null when no rate model is configured. */
+    getRateModelConfig: async (token: string): Promise<RateModelConfig | null> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_rate_model_config',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return rateModelConfigFromScVal(raw as Record<string, unknown>);
+    },
+
+    /** Up to `limit` most recent rate samples, chronological (oldest-first). */
+    getRateHistory: async (token: string, limit: number): Promise<RateSnapshot[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_rate_history',
+        [new Address(token).toScVal(), nativeToScVal(limit, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return (raw ?? []).map((r) => ({
+        timestamp: Number(r.timestamp),
+        utilizationBps: Number(r.utilization_bps),
+        rateBps: Number(r.rate_bps),
+      }));
+    },
+
+    /** What the rate would be at a hypothetical utilization (bps). */
+    previewRateAtUtilization: async (token: string, utilizationBps: number): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'preview_rate_at_utilization',
+        [new Address(token).toScVal(), nativeToScVal(utilizationBps, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    /** Admin: propose new curve parameters (executable after the yield timelock). */
+    proposeRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      config: RateModelConfig;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'propose_rate_model_change',
+            new Address(params.admin).toScVal(),
+            new Address(params.token).toScVal(),
+            rateModelConfigToScVal(params.config),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Anyone: execute a rate-model proposal once its timelock has elapsed. */
+    executeRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call('execute_rate_model_change', new Address(params.token).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Admin: cancel a pending rate-model proposal. */
+    cancelRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'cancel_rate_model_change',
+            new Address(params.admin).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
     },
 
     requestWithdrawal: async (params: {

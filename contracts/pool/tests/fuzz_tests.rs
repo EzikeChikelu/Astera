@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, IntoVal, Symbol,
 };
 
-use pool::{FundingPool, FundingPoolClient};
+use pool::{compute_current_rate, FundingPool, FundingPoolClient, RateModelConfig};
 
 #[contract]
 pub struct DummyShare;
@@ -89,6 +89,42 @@ fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
+
+    // ---- #863: kinked rate curve is monotonically non-decreasing ----
+
+    /// For any valid curve config, higher utilization never lowers the rate,
+    /// and the rate never exceeds the configured ceiling.
+    #[test]
+    fn prop_rate_curve_monotonic_in_utilization(
+        base in 0u32..=5_000,
+        optimal in 1u32..=10_000,
+        slope1 in 0u32..=5_000,
+        slope2 in 0u32..=5_000,
+        max_rate in 1u32..=5_000,
+        util_a in 0u32..=10_000,
+        util_b in 0u32..=10_000,
+    ) {
+        let config = RateModelConfig {
+            base_rate_bps: base.min(max_rate),
+            optimal_utilization_bps: optimal,
+            slope1_bps: slope1,
+            slope2_bps: slope2,
+            max_rate_bps: max_rate,
+        };
+        let (lo, hi) = if util_a <= util_b { (util_a, util_b) } else { (util_b, util_a) };
+        let rate_lo = compute_current_rate(lo, &config);
+        let rate_hi = compute_current_rate(hi, &config);
+        prop_assert!(
+            rate_lo <= rate_hi,
+            "monotonicity violated: rate({})={} > rate({})={}",
+            lo, rate_lo, hi, rate_hi
+        );
+        prop_assert!(
+            rate_hi <= max_rate,
+            "ceiling violated: rate({})={} > max_rate={}",
+            hi, rate_hi, max_rate
+        );
+    }
 
     // ---- #110: Pool invariant – pool_value >= total_deployed ----
 
