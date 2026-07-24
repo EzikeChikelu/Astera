@@ -156,6 +156,9 @@ pub enum PoolError {
     RateModelNotConfigured = 80,
     RateModelProposalNotFound = 81,
     RateModelChangeNotReady = 82,
+    // #867: on-chain compliance / sanctions screening gate
+    ComplianceNotCleared = 83,
+    ComplianceCheckFailed = 84,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -583,6 +586,14 @@ pub enum KycStatus {
     Rejected,
 }
 
+/// #867: compliance gate config (registry address + require flag).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComplianceGateConfig {
+    pub registry: Address,
+    pub required: bool,
+}
+
 /// Record of collateral deposited for a specific invoice.
 #[contracttype]
 #[derive(Clone)]
@@ -699,6 +710,9 @@ pub enum DataKey {
 }
 
 const EVT: Symbol = symbol_short!("POOL");
+// #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
+// the Soroban 50-variant ceiling after #863.
+const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -711,6 +725,12 @@ pub trait CreditScoreContract {
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
+}
+
+/// #867: cross-contract interface to the compliance registry.
+#[contractclient(name = "ComplianceClient")]
+pub trait ComplianceContract {
+    fn is_cleared(env: Env, address: Address) -> bool;
 }
 
 // Cache for config to reduce storage reads
@@ -1977,6 +1997,9 @@ impl FundingPool {
             }
         }
 
+        // #867: opt-in compliance / sanctions screening gate (fatal when enabled)
+        Self::require_compliance_cleared(&env, &investor)?;
+
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token_key = DataKey::ShareToken(token.clone());
@@ -2117,6 +2140,9 @@ impl FundingPool {
             return Err(PoolError::InvalidAmount);
         }
         Self::assert_accepted_token(&env, &token)?;
+
+        // #867: opt-in compliance gate on fund outflow
+        Self::require_compliance_cleared(&env, &investor)?;
 
         Self::non_reentrant_start(&env); // <- ADD GUARD START
 
@@ -2259,6 +2285,9 @@ impl FundingPool {
             return Err(PoolError::ZeroAmount);
         }
         Self::assert_accepted_token(&env, &token)?;
+
+        // #867: opt-in compliance gate on withdrawal requests
+        Self::require_compliance_cleared(&env, &investor)?;
 
         // Check if investor already has a pending request for this token
         let queue_key = DataKey::WithdrawalQueue(token.clone());
@@ -3016,6 +3045,9 @@ impl FundingPool {
                 }
             }
         }
+
+        // #867: gate invoice funding on SME compliance when enabled
+        Self::require_compliance_cleared(&env, &sme)?;
 
         let mut stats: PoolStorageStats = env
             .storage()
@@ -5298,6 +5330,24 @@ impl FundingPool {
         Ok(())
     }
 
+    /// #867: when compliance gate `required` is true, call the configured
+    /// registry's `is_cleared`. Fatal on not-cleared or call failure.
+    fn require_compliance_cleared(env: &Env, address: &Address) -> PoolResult<()> {
+        let gate: Option<ComplianceGateConfig> = env.storage().instance().get(&COMPLIANCE_CFG);
+        let Some(gate) = gate else {
+            return Ok(());
+        };
+        if !gate.required {
+            return Ok(());
+        }
+        let client = ComplianceClient::new(env, &gate.registry);
+        match client.try_is_cleared(address) {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(PoolError::ComplianceNotCleared),
+            _ => Err(PoolError::ComplianceCheckFailed),
+        }
+    }
+
     fn require_not_paused(env: &Env) {
         require_not_paused(env);
     }
@@ -5399,6 +5449,73 @@ impl FundingPool {
                 min_bps: 10_000u32,
                 max_bps: 10_000u32,
             })
+    }
+
+    // ---- #867: Compliance registry integration ----
+
+    /// Set the compliance registry contract address used when
+    /// `require_compliance_check` is enabled.
+    pub fn set_compliance_registry(
+        env: Env,
+        admin: Address,
+        registry: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut gate: ComplianceGateConfig = env
+            .storage()
+            .instance()
+            .get(&COMPLIANCE_CFG)
+            .unwrap_or(ComplianceGateConfig {
+                registry: registry.clone(),
+                required: false,
+            });
+        gate.registry = registry.clone();
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
+        env.events()
+            .publish((EVT, symbol_short!("cmp_set")), (admin, registry));
+        Ok(())
+    }
+
+    pub fn get_compliance_registry(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
+            .map(|g| g.registry)
+    }
+
+    /// Toggle the fatal compliance gate on deposit / withdraw /
+    /// request_withdrawal / fund_invoice. Default false — opt-in so existing
+    /// deployments and tests are unaffected. Requires registry to be set first.
+    pub fn set_require_compliance_check(
+        env: Env,
+        admin: Address,
+        required: bool,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut gate: ComplianceGateConfig = env
+            .storage()
+            .instance()
+            .get(&COMPLIANCE_CFG)
+            .ok_or(PoolError::ComplianceCheckFailed)?;
+        gate.required = required;
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
+        env.events()
+            .publish((EVT, symbol_short!("cmp_req")), (admin, required));
+        Ok(())
+    }
+
+    pub fn require_compliance_check(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
+            .map(|g| g.required)
+            .unwrap_or(false)
     }
 
     // ---- #109: Investor KYC / whitelist methods ----

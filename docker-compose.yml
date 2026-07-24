@@ -141,6 +141,37 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # ── Compliance service (#867) ──────────────────────────────────────────────
+  compliance-service:
+    build:
+      context: ./compliance-service
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=http://stellar:8000/soroban/rpc
+      - HORIZON_URL=http://stellar:8000
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - COMPLIANCE_SCREENER_SECRET_KEY=${COMPLIANCE_SCREENER_SECRET_KEY:-}
+      - COMPLIANCE_CONTRACT_ID=${COMPLIANCE_CONTRACT_ID:-}
+      - POOL_CONTRACT_ID=${POOL_CONTRACT_ID:-}
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
+      - HEALTH_PORT=8081
+      - COMPLIANCE_ADMIN_TOKEN=${COMPLIANCE_ADMIN_TOKEN:-}
+    depends_on:
+      stellar:
+        condition: service_healthy
+      contracts:
+        condition: service_started
+    volumes:
+      - ./compliance-service:/app
+      - ./sdk:/sdk
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8081}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
 volumes:
   stellar-data:
   # Shared volume so the deployer can pass contract IDs to the frontend.

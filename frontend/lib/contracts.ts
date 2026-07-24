@@ -7,6 +7,7 @@ import {
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
+  COMPLIANCE_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -81,6 +82,9 @@ if (GOVERNANCE_CONTRACT_ID) {
 }
 if (ORACLE_REGISTRY_CONTRACT_ID) {
   validateContractId(ORACLE_REGISTRY_CONTRACT_ID, 'oracle_registry');
+}
+if (COMPLIANCE_CONTRACT_ID) {
+  validateContractId(COMPLIANCE_CONTRACT_ID, 'compliance');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -2313,6 +2317,177 @@ export async function buildSlashOracleTx(params: {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #867: Compliance registry ----
+
+export type ComplianceStatusUi =
+  | 'Unscreened'
+  | 'Cleared'
+  | 'Flagged'
+  | 'Blocked'
+  | 'PendingReview';
+
+export type RiskTierUi = 'Low' | 'Medium' | 'High';
+
+export interface ComplianceRecordUi {
+  address: string;
+  status: ComplianceStatusUi;
+  reasonCode: number;
+  riskTier: RiskTierUi;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
+}
+
+function requireComplianceContractId(): string {
+  if (!COMPLIANCE_CONTRACT_ID) {
+    throw new Error('NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID is not configured');
+  }
+  return COMPLIANCE_CONTRACT_ID;
+}
+
+function unitEnumToScVal(variant: string): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(variant, { type: 'symbol' })]);
+}
+
+export async function getComplianceIsCleared(address: StellarAddress): Promise<boolean> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'is_cleared',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function getComplianceRecord(
+  address: StellarAddress,
+): Promise<ComplianceRecordUi | null> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'get_compliance_record',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
+  if (!raw) return null;
+  return {
+    address: String(raw.address ?? address),
+    status: (raw.status as ComplianceStatusUi) ?? 'Unscreened',
+    reasonCode: Number(raw.reason_code ?? 0),
+    riskTier: (raw.risk_tier as RiskTierUi) ?? 'Low',
+    screenedAt: Number(raw.screened_at ?? 0),
+    screenedBy: String(raw.screened_by ?? ''),
+    expiresAt: Number(raw.expires_at ?? 0),
+    notesHash: String(raw.notes_hash ?? ''),
+  };
+}
+
+export async function getComplianceHistory(
+  address: StellarAddress,
+): Promise<ComplianceRecordUi[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'get_screening_history',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = (scValToNative(result!.retval) as Record<string, unknown>[]) ?? [];
+  return raw.map((e) => ({
+    address,
+    status: (e.status as ComplianceStatusUi) ?? 'Unscreened',
+    reasonCode: Number(e.reason_code ?? 0),
+    riskTier: (e.risk_tier as RiskTierUi) ?? 'Low',
+    screenedAt: Number(e.screened_at ?? 0),
+    screenedBy: String(e.screened_by ?? ''),
+    expiresAt: Number(e.expires_at ?? 0),
+    notesHash: String(e.notes_hash ?? ''),
+  }));
+}
+
+export async function listComplianceFlagged(): Promise<string[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'list_flagged',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return (scValToNative(result!.retval) as string[]) ?? [];
+}
+
+export async function listCompliancePendingReview(): Promise<string[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'list_pending_review',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return (scValToNative(result!.retval) as string[]) ?? [];
+}
+
+export async function buildSubmitScreeningResultTx(params: {
+  screener: StellarAddress;
+  address: StellarAddress;
+  status: ComplianceStatusUi;
+  reasonCode: number;
+  riskTier: RiskTierUi;
+  expiresAt: number;
+  notesHash: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.screener);
+  const contract = new Contract(requireComplianceContractId());
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'submit_screening_result',
+        new Address(params.screener).toScVal(),
+        new Address(params.address).toScVal(),
+        unitEnumToScVal(params.status),
+        nativeToScVal(params.reasonCode, { type: 'u32' }),
+        unitEnumToScVal(params.riskTier),
+        nativeToScVal(params.expiresAt, { type: 'u64' }),
+        nativeToScVal(params.notesHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function fetchComplianceServiceFlags(): Promise<
+  Array<{ id: string; address: string; reason: string; at: string; pattern: string }>
+> {
+  const base = process.env.NEXT_PUBLIC_COMPLIANCE_SERVICE_URL ?? 'http://localhost:8081';
+  const token = process.env.NEXT_PUBLIC_COMPLIANCE_ADMIN_TOKEN ?? '';
+  try {
+    const res = await fetch(`${base}/flags`, {
+      headers: token ? { 'x-admin-token': token } : {},
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      alerts?: Array<{ id: string; address: string; reason: string; at: string; pattern: string }>;
+    };
+    return body.alerts ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export { submitTx };

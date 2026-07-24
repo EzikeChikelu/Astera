@@ -26,6 +26,10 @@ import type {
   CreditScoreResponse,
   RateModelConfig,
   RateSnapshot,
+  ComplianceStatus,
+  RiskTier,
+  ComplianceRecord,
+  ScreeningHistoryEntry,
 } from './types';
 
 const SIMULATION_SOURCE_ACCOUNT = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
@@ -1524,6 +1528,194 @@ export class AsteraClient {
     },
   };
 
+  // ---- Compliance Registry (#867) ----
+
+  public readonly compliance = {
+    isCleared: async (address: string): Promise<boolean> => {
+      const contractId = this.requireComplianceContractId();
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT).catch(() => {
+          // Simulation source may not exist on some networks; build with a dummy.
+          throw new Error('Unable to load simulation source account');
+        }),
+        { fee: BASE_FEE, networkPassphrase: this.config.network },
+      )
+        .addOperation(contract.call('is_cleared', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return Boolean(scValToNative(result));
+    },
+
+    getRecord: async (address: string): Promise<ComplianceRecord | null> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('get_compliance_record', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      const raw = scValToNative(result) as Record<string, unknown> | null;
+      if (!raw) return null;
+      return {
+        address: raw.address as string,
+        status: (raw.status as ComplianceStatus) ?? 'Unscreened',
+        reasonCode: Number(raw.reason_code ?? 0),
+        riskTier: (raw.risk_tier as RiskTier) ?? 'Low',
+        screenedAt: Number(raw.screened_at ?? 0),
+        screenedBy: raw.screened_by as string,
+        expiresAt: Number(raw.expires_at ?? 0),
+        notesHash: String(raw.notes_hash ?? ''),
+      };
+    },
+
+    getHistory: async (address: string): Promise<ScreeningHistoryEntry[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('get_screening_history', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      const raw = (scValToNative(result) as Record<string, unknown>[]) ?? [];
+      return raw.map((e) => ({
+        status: (e.status as ComplianceStatus) ?? 'Unscreened',
+        reasonCode: Number(e.reason_code ?? 0),
+        riskTier: (e.risk_tier as RiskTier) ?? 'Low',
+        screenedAt: Number(e.screened_at ?? 0),
+        screenedBy: e.screened_by as string,
+        expiresAt: Number(e.expires_at ?? 0),
+        notesHash: String(e.notes_hash ?? ''),
+      }));
+    },
+
+    listFlagged: async (): Promise<string[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('list_flagged'))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return (scValToNative(result) as string[]) ?? [];
+    },
+
+    listPendingReview: async (): Promise<string[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('list_pending_review'))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return (scValToNative(result) as string[]) ?? [];
+    },
+
+    submitScreeningResult: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      screener: string;
+      address: string;
+      status: ComplianceStatus;
+      reasonCode: number;
+      riskTier: RiskTier;
+      expiresAt: number;
+      notesHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(params.screener);
+      const contract = new Contract(contractId);
+
+      const statusScVal = xdr.ScVal.scvVec([
+        nativeToScVal(params.status, { type: 'symbol' }),
+      ]);
+      const riskScVal = xdr.ScVal.scvVec([
+        nativeToScVal(params.riskTier, { type: 'symbol' }),
+      ]);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'submit_screening_result',
+            new Address(params.screener).toScVal(),
+            new Address(params.address).toScVal(),
+            statusScVal,
+            nativeToScVal(params.reasonCode, { type: 'u32' }),
+            riskScVal,
+            nativeToScVal(params.expiresAt, { type: 'u64' }),
+            nativeToScVal(params.notesHash, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    requestReview: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      address: string;
+      reason: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'request_review',
+            new Address(params.caller).toScVal(),
+            new Address(params.address).toScVal(),
+            nativeToScVal(params.reason, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+  };
+
   private requireCreditScoreContractId(): string {
     if (!this.config.creditScoreContractId) {
       throw new Error('creditScoreContractId is not configured on this AsteraClient');
@@ -1536,6 +1728,13 @@ export class AsteraClient {
       throw new Error('oracleRegistryContractId is not configured on this AsteraClient');
     }
     return this.config.oracleRegistryContractId;
+  }
+
+  private requireComplianceContractId(): string {
+    if (!this.config.complianceContractId) {
+      throw new Error('complianceContractId is not configured on this AsteraClient');
+    }
+    return this.config.complianceContractId;
   }
 
   private async submitTx(

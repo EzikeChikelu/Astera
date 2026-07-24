@@ -267,6 +267,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "compliance"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1049,6 +1056,7 @@ dependencies = [
 name = "pool"
 version = "0.1.0"
 dependencies = [
+ "compliance",
  "proptest",
  "soroban-sdk",
 ]
