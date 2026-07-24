@@ -7,7 +7,13 @@
  * route credit_score events (#700) separately from invoice/pool events so
  * the REST API can filter by contract type.
  */
-export type ContractType = 'invoice' | 'pool' | 'credit_score' | 'oracle_registry' | 'unknown';
+export type ContractType =
+  | 'invoice'
+  | 'pool'
+  | 'credit_score'
+  | 'oracle_registry'
+  | 'compliance'
+  | 'unknown';
 
 export interface IndexedEvent {
   id: string;
@@ -27,6 +33,8 @@ const INVOICE_CONTRACT_ID = (process.env.INVOICE_CONTRACT_ID || '').trim();
 const POOL_CONTRACT_ID = (process.env.POOL_CONTRACT_ID || '').trim();
 // #861: N-of-M staked oracle consensus network
 const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || '').trim();
+// #867: on-chain compliance / sanctions screening registry
+const COMPLIANCE_CONTRACT_ID = (process.env.COMPLIANCE_CONTRACT_ID || '').trim();
 
 // #861: oracle_registry contract emits these event subtypes under the
 // "ORACLE" topic (see `EVT` in contracts/oracle_registry/src/lib.rs).
@@ -42,6 +50,20 @@ const ORACLE_REGISTRY_EVENT_TYPES = new Set([
   'fallback',
   'inv_set',
   'cfg_upd',
+  'paused',
+  'unpaused',
+]);
+
+// #867: compliance contract emits under the "COMPLY" topic
+const COMPLIANCE_EVENT_TYPES = new Set([
+  'screened',
+  'review',
+  'scr_prop',
+  'scr_reg',
+  'scr_del',
+  'scr_can',
+  'int_set',
+  'tl_set',
   'paused',
   'unpaused',
 ]);
@@ -75,13 +97,20 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (ORACLE_REGISTRY_CONTRACT_ID && contractId === ORACLE_REGISTRY_CONTRACT_ID) {
     return 'oracle_registry';
   }
+  if (COMPLIANCE_CONTRACT_ID && contractId === COMPLIANCE_CONTRACT_ID) {
+    return 'compliance';
+  }
   // Fallback: infer from topic. credit_score events publish under "CREDIT",
-  // oracle_registry events publish under "ORACLE" (#861).
+  // oracle_registry events publish under "ORACLE" (#861),
+  // compliance events publish under "COMPLY" (#867).
   if (contractType === 'CREDIT' || CREDIT_SCORE_EVENT_TYPES.has(eventType)) {
     return 'credit_score';
   }
   if (contractType === 'ORACLE' || ORACLE_REGISTRY_EVENT_TYPES.has(eventType)) {
     return 'oracle_registry';
+  }
+  if (contractType === 'COMPLY' || COMPLIANCE_EVENT_TYPES.has(eventType)) {
+    return 'compliance';
   }
   if (contractType === 'invoice') return 'invoice';
   if (contractType === 'pool') return 'pool';

@@ -25,6 +25,12 @@ pub trait PoolContract {
     );
 }
 
+/// #867: cross-contract interface to the compliance registry.
+#[contractclient(name = "ComplianceClient")]
+pub trait ComplianceContract {
+    fn is_cleared(env: Env, address: Address) -> bool;
+}
+
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
 // #446: completed invoices must outlive active ones — default to 5 years so
@@ -149,6 +155,10 @@ pub enum InvoiceError {
     ConsensusVerificationRequired = 35,
     OracleRegistryNotConfigured = 36,
     UnauthorizedRegistry = 37,
+    // #867: on-chain compliance / sanctions screening gate
+    ComplianceNotCleared = 38,
+    ComplianceCheckFailed = 39,
+    ComplianceRegistryNotConfigured = 40,
 }
 
 #[contracttype]
@@ -302,6 +312,9 @@ pub enum DataKey {
     // #861: N-of-M staked oracle consensus network
     OracleRegistry,
     RequireConsensusVerification,
+    // #867: optional compliance registry + opt-in gate
+    ComplianceRegistry,
+    RequireComplianceCheck,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -392,6 +405,31 @@ fn require_not_paused(env: &Env) {
         .unwrap_or(false)
     {
         panic_with_error!(env, InvoiceError::ContractPaused);
+    }
+}
+
+/// #867: when RequireComplianceCheck is true, call compliance.is_cleared.
+fn require_compliance_cleared(env: &Env, address: &Address) {
+    let required: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::RequireComplianceCheck)
+        .unwrap_or(false);
+    if !required {
+        return;
+    }
+    let registry: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::ComplianceRegistry)
+        .unwrap_or_else(|| {
+            panic_with_error!(env, InvoiceError::ComplianceRegistryNotConfigured)
+        });
+    let client = ComplianceClient::new(env, &registry);
+    match client.try_is_cleared(address) {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => panic_with_error!(env, InvoiceError::ComplianceNotCleared),
+        _ => panic_with_error!(env, InvoiceError::ComplianceCheckFailed),
     }
 }
 
@@ -1018,6 +1056,59 @@ impl InvoiceContract {
             .unwrap_or(false)
     }
 
+    /// #867: set the compliance registry used when `require_compliance_check` is on.
+    pub fn set_compliance_registry(env: Env, admin: Address, registry: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ComplianceRegistry, &registry);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "cmp_set")), (admin, registry));
+    }
+
+    pub fn get_compliance_registry(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::ComplianceRegistry)
+    }
+
+    /// #867: opt-in fatal compliance gate on `create_invoice`. Default false.
+    pub fn set_require_compliance_check(env: Env, admin: Address, required: bool) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireComplianceCheck, &required);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "cmp_req")), (admin, required));
+    }
+
+    pub fn require_compliance_check(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::RequireComplianceCheck)
+            .unwrap_or(false)
+    }
+
     pub fn get_metadata_image_uri(env: Env) -> String {
         env.storage()
             .persistent()
@@ -1087,6 +1178,9 @@ impl InvoiceContract {
         owner.require_auth();
         require_not_paused(&env);
         validate_invoice_strings(&env, &debtor, &description, &verification_hash);
+
+        // #867: opt-in compliance gate on SME creating invoices
+        require_compliance_cleared(&env, &owner);
 
         if let Some(uri) = metadata_uri.as_ref() {
             if !is_valid_metadata_uri(&env, uri) {

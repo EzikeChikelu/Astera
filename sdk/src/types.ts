@@ -122,6 +122,39 @@ export interface AsteraConfig {
   creditScoreContractId?: string;
   // #861: N-of-M staked oracle consensus network
   oracleRegistryContractId?: string;
+  // #867: on-chain compliance / sanctions screening registry
+  complianceContractId?: string;
+}
+
+// #867: compliance registry types
+export type ComplianceStatus =
+  | 'Unscreened'
+  | 'Cleared'
+  | 'Flagged'
+  | 'Blocked'
+  | 'PendingReview';
+
+export type RiskTier = 'Low' | 'Medium' | 'High';
+
+export interface ComplianceRecord {
+  address: string;
+  status: ComplianceStatus;
+  reasonCode: number;
+  riskTier: RiskTier;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
+}
+
+export interface ScreeningHistoryEntry {
+  status: ComplianceStatus;
+  reasonCode: number;
+  riskTier: RiskTier;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
 }
 
 // #861: N-of-M staked oracle consensus network

@@ -414,6 +414,69 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
+  // #867: flagged / blocked addresses reconstructed from compliance events
+  app.get('/compliance/flagged', (req, res) => {
+    try {
+      const { limit = '100' } = req.query;
+      const events = getEvents(db, {
+        contractType: 'compliance',
+        eventType: 'screened',
+        limit: parseInt(limit as string, 10),
+        offset: 0,
+      });
+      const latest = new Map<string, { address: string; status: string; reasonCode: unknown; at: string; txHash: string }>();
+      for (const evt of events) {
+        const value = evt.value;
+        const address = Array.isArray(value) ? String(value[0] ?? '') : '';
+        if (!address) continue;
+        const status = Array.isArray(value) ? String(value[1] ?? '') : '';
+        if (status !== 'Flagged' && status !== 'Blocked') continue;
+        // First hit is newest when events are returned newest-first; keep first.
+        if (!latest.has(address)) {
+          latest.set(address, {
+            address,
+            status,
+            reasonCode: Array.isArray(value) ? value[2] : null,
+            at: evt.ledgerCloseAt,
+            txHash: evt.txHash,
+          });
+        }
+      }
+      res.json({ flagged: Array.from(latest.values()) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #867: full screening history for an address from COMPLY events
+  app.get('/compliance/history/:address', (req, res) => {
+    try {
+      const { address } = req.params;
+      const { limit = '100' } = req.query;
+      const events = getEvents(db, {
+        contractType: 'compliance',
+        limit: parseInt(limit as string, 10),
+        offset: 0,
+      });
+      const history = events
+        .filter((evt) => {
+          const value = evt.value;
+          if (!Array.isArray(value)) return false;
+          return String(value[0] ?? '') === address;
+        })
+        .map((evt) => ({
+          eventType: evt.eventType,
+          value: evt.value,
+          ledgerSequence: evt.ledgerSequence,
+          ledgerCloseAt: evt.ledgerCloseAt,
+          txHash: evt.txHash,
+        }));
+      res.json({ address, history });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get latest ledger
   app.get('/ledger/latest', (_req, res) => {
     try {
