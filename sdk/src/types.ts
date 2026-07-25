@@ -52,6 +52,51 @@ export interface PoolConfig {
   compoundInterest: boolean;
 }
 
+// #863: utilization-driven kinked interest-rate model
+
+export interface RateModelConfig {
+  /** Rate (bps) at 0% utilization. */
+  baseRateBps: number;
+  /** The "kink" point in bps (e.g. 8000 = 80%). */
+  optimalUtilizationBps: number;
+  /** Rate increase (bps) spread across the 0..optimal span. */
+  slope1Bps: number;
+  /** Rate increase (bps) spread across the optimal..100% span (steeper). */
+  slope2Bps: number;
+  /** Hard ceiling on the computed rate. */
+  maxRateBps: number;
+}
+
+export interface RateSnapshot {
+  timestamp: number;
+  utilizationBps: number;
+  rateBps: number;
+}
+
+// #865: withdrawal-queue completion + liquidity forecasting
+
+export interface WithdrawalRequest {
+  investor: string;
+  token: string;
+  shares: bigint;
+  requestedAt: number;
+  requestId: bigint;
+}
+
+export interface WaitEstimate {
+  queuePosition: number;
+  capitalAhead: bigint;
+  nearestInvoiceDueDate: number;
+  /** Predicted seconds until this request is likely to clear. An estimate, not a guarantee. */
+  estimatedWaitSecs: number;
+}
+
+export interface LiquidityForecastPoint {
+  /** Days from now (1-indexed). */
+  day: number;
+  projectedAvailable: bigint;
+}
+
 export interface PoolTokenTotals {
   totalDeposited: bigint;
   totalDeployed: bigint;
@@ -69,6 +114,25 @@ export interface FundedInvoice {
   factoringFee: bigint;
   dueDate: number;
   repaidAmount: bigint;
+  /** #860: set when this invoice was funded through a co-funding round. */
+  coFundingRoundId?: bigint;
+}
+
+// #860: multi-investor co-funding rounds
+export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
+
+export interface CoFundingRound {
+  invoiceId: bigint;
+  token: string;
+  sme: string;
+  dueDate: number;
+  targetPrincipal: bigint;
+  committedPrincipal: bigint;
+  fundingDeadline: number;
+  status: CoFundingStatus;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+  participants: string[];
 }
 
 export interface AsteraConfig {
@@ -79,6 +143,39 @@ export interface AsteraConfig {
   creditScoreContractId?: string;
   // #861: N-of-M staked oracle consensus network
   oracleRegistryContractId?: string;
+  // #867: on-chain compliance / sanctions screening registry
+  complianceContractId?: string;
+}
+
+// #867: compliance registry types
+export type ComplianceStatus =
+  | 'Unscreened'
+  | 'Cleared'
+  | 'Flagged'
+  | 'Blocked'
+  | 'PendingReview';
+
+export type RiskTier = 'Low' | 'Medium' | 'High';
+
+export interface ComplianceRecord {
+  address: string;
+  status: ComplianceStatus;
+  reasonCode: number;
+  riskTier: RiskTier;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
+}
+
+export interface ScreeningHistoryEntry {
+  status: ComplianceStatus;
+  reasonCode: number;
+  riskTier: RiskTier;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
 }
 
 // #861: N-of-M staked oracle consensus network
@@ -113,4 +210,45 @@ export interface TransactionProgress {
   status: 'pending' | 'confirmed' | 'failed';
   hash: string;
   error?: string;
+}
+
+// #868: credit_score v2 — external attestations + dispute mechanism
+export type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
+export type AttestationStatus = 'Active' | 'Disputed' | 'Revoked' | 'Expired';
+
+export interface AttestorInfo {
+  address: string;
+  attestorType: AttestorType;
+  isActive: boolean;
+  weightBps: number;
+  registeredAt: number;
+}
+
+export interface Attestation {
+  id: bigint;
+  sme: string;
+  attestor: string;
+  attestationType: AttestorType;
+  scoreContribution: number;
+  evidenceHash: string;
+  submittedAt: number;
+  expiresAt: number;
+  status: AttestationStatus;
+}
+
+export interface CreditScoreResponse {
+  sme: string;
+  score: number;
+  totalInvoices: number;
+  paidOnTime: number;
+  paidLate: number;
+  defaulted: number;
+  totalVolume: bigint;
+  averagePaymentDays: number;
+  lastUpdated: number;
+  scoreVersion: number;
+  configVersion: number;
+  isStale: boolean;
+  /** Internal score blended with the SME's active external attestations. */
+  blendedScore: number;
 }

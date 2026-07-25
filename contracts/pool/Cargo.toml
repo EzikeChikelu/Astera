@@ -12,7 +12,12 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
+compliance = { path = "../compliance" }
 
 [[test]]
 name = "fuzz_tests"
 path = "tests/fuzz_tests.rs"
+
+[[test]]
+name = "compliance_gate_tests"
+path = "tests/compliance_gate_tests.rs"

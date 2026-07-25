@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { PoolStatsSkeleton } from '@/components/PoolStats';
@@ -19,10 +20,13 @@ import {
   submitTx,
   getKycRequired,
   getInvestorKyc,
+  getRateModelConfig,
+  getCurrentRate,
 } from '@/lib/contracts';
 import { parseStellarAddress } from '@/lib/types';
 import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
-import type { PoolTokenTotals } from '@/lib/types';
+import type { PoolTokenTotals, RateModelConfig } from '@/lib/types';
+import { RateCurveChart } from '@/components/analytics';
 import { useTranslations } from 'next-intl';
 
 export default function InvestPage() {
@@ -41,6 +45,11 @@ export default function InvestPage() {
   const [tokenTotals, setTokenTotals] = useState<PoolTokenTotals | null>(null);
   const [tokenDepositCap, setTokenDepositCap] = useState<bigint>(0n);
 
+  // #863: utilization-driven rate model for the selected token (null when
+  // the token has no curve configured — the static yield_bps applies).
+  const [rateModel, setRateModel] = useState<RateModelConfig | null>(null);
+  const [liveRateBps, setLiveRateBps] = useState<number | null>(null);
+
   // #109: KYC status
   const [kycRequired, setKycRequired] = useState(false);
   const [kycApproved, setKycApproved] = useState(false);
@@ -52,6 +61,7 @@ export default function InvestPage() {
   useEffect(() => {
     if (!selectedToken) return;
     loadTokenTotals(selectedToken);
+    loadRateModel(selectedToken);
   }, [selectedToken, poolConfig]);
 
   useEffect(() => {
@@ -111,6 +121,20 @@ export default function InvestPage() {
     } catch {
       setTokenTotals(null);
       setTokenDepositCap(0n);
+    }
+  }
+
+  // #863: live curve for the selected token; falls back to the static yield
+  // when no rate model is configured for it.
+  async function loadRateModel(token: string) {
+    if (!POOL_CONFIGURED) return;
+    try {
+      const model = await getRateModelConfig(token);
+      setRateModel(model);
+      setLiveRateBps(model ? await getCurrentRate(token) : null);
+    } catch {
+      setRateModel(null);
+      setLiveRateBps(null);
     }
   }
 
@@ -196,9 +220,17 @@ export default function InvestPage() {
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-5xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
-          <p className="text-brand-muted">{t('description')}</p>
+        <div className="mb-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted">{t('description')}</p>
+          </div>
+          <Link
+            href="/invest/co-funding"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+          >
+            Browse Co-Funding Rounds →
+          </Link>
         </div>
 
         {/* ── Top grid: Pool stats + deposit form ── */}
@@ -218,8 +250,23 @@ export default function InvestPage() {
               </div>
             )}
 
-            {/* Earnings calculator */}
-            <APYCalculator />
+            {/* Earnings calculator — uses the live curve rate when the
+                selected token has a rate model configured (#863). */}
+            <APYCalculator token={selectedToken || undefined} />
+
+            {/* #863: live utilization-driven rate curve for the selected token */}
+            {rateModel && (
+              <RateCurveChart
+                config={rateModel}
+                currentUtilizationBps={
+                  tokenTotals && tokenTotals.totalDeposited > 0n
+                    ? Number((tokenTotals.totalDeployed * 10_000n) / tokenTotals.totalDeposited)
+                    : 0
+                }
+                currentRateBps={liveRateBps ?? undefined}
+                title={`Rate Curve — ${stablecoinLabel(selectedToken)}`}
+              />
+            )}
 
             {wallet.connected && position && selectedToken && (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
@@ -464,7 +511,10 @@ export default function InvestPage() {
               assumptions before you invest.
             </p>
           </div>
-          <ScenarioModeler yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
+          <ScenarioModeler
+            yieldBps={liveRateBps ?? poolConfig?.yieldBps ?? null}
+            loading={loading}
+          />
         </section>
       </div>
     </div>

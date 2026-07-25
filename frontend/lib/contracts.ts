@@ -7,6 +7,7 @@ import {
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
+  COMPLIANCE_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -26,15 +27,24 @@ import type {
   PoolConfig,
   PoolTokenTotals,
   WaitEstimate,
+  WithdrawalRequest,
+  LiquidityForecastPoint,
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
   GovernanceConfig,
   GovernanceProposal,
   StellarAddress,
+  CoFundingRound,
   OracleInfo,
   VerificationRound,
   OracleRegistryConfig,
+  AttestorType,
+  AttestorInfo,
+  Attestation,
+  FullCreditScore,
+  RateModelConfig,
+  RateSnapshot,
 } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
@@ -72,6 +82,9 @@ if (GOVERNANCE_CONTRACT_ID) {
 }
 if (ORACLE_REGISTRY_CONTRACT_ID) {
   validateContractId(ORACLE_REGISTRY_CONTRACT_ID, 'oracle_registry');
+}
+if (COMPLIANCE_CONTRACT_ID) {
+  validateContractId(COMPLIANCE_CONTRACT_ID, 'compliance');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -276,6 +289,7 @@ export async function getPoolConfig(): Promise<PoolConfig> {
     yieldTimelockSecs: Number(raw.yield_timelock_secs ?? 0),
     maxSingleInvestorBps: Number(raw.max_single_investor_bps ?? 0),
     maxWithdrawalQueueAgeDays: Number(raw.max_withdrawal_queue_age_days ?? 0),
+    maxWithdrawalQueueDepth: Number(raw.max_withdrawal_queue_depth ?? 0),
   };
 }
 
@@ -299,7 +313,50 @@ export async function estimateWithdrawalWait(
     queuePosition: Number(estimate.queue_position ?? 0),
     capitalAhead: BigInt(String(estimate.capital_ahead ?? 0)),
     nearestInvoiceDueDate: Number(estimate.nearest_invoice_due_date ?? 0),
+    estimatedWaitSecs: Number(estimate.estimated_wait_secs ?? 0),
   };
+}
+
+export async function getWithdrawalQueue(token: string): Promise<WithdrawalRequest[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_withdrawal_queue',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((r) => ({
+    investor: r.investor as string,
+    token: r.token as string,
+    shares: BigInt(String(r.shares ?? 0)),
+    requestedAt: Number(r.requested_at ?? 0),
+    requestId: Number(r.request_id ?? 0),
+  }));
+}
+
+export async function getLiquidityForecast(
+  token: string,
+  horizonDays: number,
+): Promise<LiquidityForecastPoint[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_liquidity_forecast',
+    [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((r) => ({
+    day: Number(r.day ?? 0),
+    projectedAvailable: BigInt(String(r.projected_available ?? 0)),
+  }));
 }
 
 export async function getAcceptedTokens(): Promise<string[]> {
@@ -425,16 +482,71 @@ export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice
     factoringFee: BigInt((r.factoring_fee as string | number | bigint) ?? 0),
     dueDate: Number(r.due_date),
     repaidAmount: BigInt((r.repaid_amount as string | number | bigint) ?? 0),
+    coFundingRoundId:
+      r.co_funding_round_id !== undefined && r.co_funding_round_id !== null
+        ? Number(r.co_funding_round_id)
+        : undefined,
   };
 }
 
-export async function buildInitCoFundingTx(params: {
-  admin: string;
+// ---- #860: multi-investor co-funding rounds ----
+//
+// `open_co_funding` takes a single OpenCoFundingRequest struct rather than
+// individual scalar params. Soroban encodes named-field #[contracttype]
+// structs as an ScMap keyed by field-name Symbols in alphabetical order —
+// NOT declaration order — so the entries below are deliberately sorted
+// (due_date, funding_deadline, invoice_id, max_investor_bps, min_commitment,
+// sme, target_principal, token).
+function openCoFundingRequestToScVal(params: {
   invoiceId: number;
-  principal: bigint;
+  token: string;
+  targetPrincipal: bigint;
   sme: string;
   dueDate: number;
+  fundingDeadline: number;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+}): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('due_date', nativeToScVal(params.dueDate, { type: 'u64' })),
+    entry('funding_deadline', nativeToScVal(params.fundingDeadline, { type: 'u64' })),
+    entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    entry('max_investor_bps', nativeToScVal(params.maxInvestorBps, { type: 'u32' })),
+    entry('min_commitment', nativeToScVal(params.minCommitment, { type: 'i128' })),
+    entry('sme', new Address(params.sme).toScVal()),
+    entry('target_principal', nativeToScVal(params.targetPrincipal, { type: 'i128' })),
+    entry('token', new Address(params.token).toScVal()),
+  ]);
+}
+
+function coFundingRoundFromScVal(raw: Record<string, unknown>): CoFundingRound {
+  return {
+    invoiceId: Number(raw.invoice_id),
+    token: raw.token as string,
+    sme: raw.sme as string,
+    dueDate: Number(raw.due_date),
+    targetPrincipal: BigInt(String(raw.target_principal)),
+    committedPrincipal: BigInt(String(raw.committed_principal)),
+    fundingDeadline: Number(raw.funding_deadline),
+    status: raw.status as CoFundingRound['status'],
+    minCommitment: BigInt(String(raw.min_commitment)),
+    maxInvestorBps: Number(raw.max_investor_bps),
+    participants: (raw.participants as string[]) ?? [],
+  };
+}
+
+export async function buildOpenCoFundingTx(params: {
+  admin: string;
+  invoiceId: number;
   token: string;
+  targetPrincipal: bigint;
+  sme: string;
+  dueDate: number;
+  fundingDeadline: number;
+  minCommitment: bigint;
+  maxInvestorBps: number;
 }): Promise<string> {
   const account = await getRpcAccount(params.admin);
   const contract = new Contract(POOL_CONTRACT_ID);
@@ -445,13 +557,9 @@ export async function buildInitCoFundingTx(params: {
   })
     .addOperation(
       contract.call(
-        'init_co_funding',
+        'open_co_funding',
         new Address(params.admin).toScVal(),
-        nativeToScVal(params.invoiceId, { type: 'u64' }),
-        nativeToScVal(params.principal, { type: 'i128' }),
-        new Address(params.sme).toScVal(),
-        nativeToScVal(params.dueDate, { type: 'u64' }),
-        new Address(params.token).toScVal(),
+        openCoFundingRequestToScVal(params),
       ),
     )
     .setTimeout(30)
@@ -496,6 +604,182 @@ export async function buildCommitToInvoiceTx(params: {
 
   const prepared = StellarRpc.assembleTransaction(tx, sim).build();
   return prepared.toXDR();
+}
+
+export async function buildFinalizeCoFundingTx(params: {
+  caller: string;
+  invoiceId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'finalize_co_funding',
+        new Address(params.caller).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildWithdrawCoFundingCommitmentTx(params: {
+  investor: string;
+  invoiceId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'withdraw_co_funding_commitment',
+        new Address(params.investor).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildCancelCoFundingRoundTx(params: {
+  admin: string;
+  invoiceId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_co_funding_round',
+        new Address(params.admin).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildTransferCoFundShareTx(params: {
+  from: string;
+  invoiceId: number;
+  token: string;
+  to: string;
+  bps: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.from);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'transfer_co_fund_share',
+        new Address(params.from).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.token).toScVal(),
+        new Address(params.to).toScVal(),
+        nativeToScVal(params.bps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function getCoFundingRound(invoiceId: number): Promise<CoFundingRound | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_co_funding_round',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return coFundingRoundFromScVal(raw as Record<string, unknown>);
+}
+
+export async function listCoFundingRounds(): Promise<number[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'list_co_funding_rounds',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  return (raw ?? []).map((id) => Number(id));
+}
+
+export async function getInvestorCoFundPositions(
+  investor: string,
+): Promise<Array<{ invoiceId: number; bps: number }>> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_investor_co_fund_positions',
+    [new Address(investor).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as [number | string | bigint, number][];
+  return (raw ?? []).map(([invoiceId, bps]) => ({ invoiceId: Number(invoiceId), bps }));
+}
+
+export async function getCoFundShare(invoiceId: number, investor: string): Promise<number> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_co_fund_share',
+    [nativeToScVal(invoiceId, { type: 'u64' }), new Address(investor).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
 }
 
 export async function buildRepayTx(params: {
@@ -562,6 +846,99 @@ export async function buildWithdrawTx(
   return prepared.toXDR();
 }
 
+export async function buildRequestWithdrawalTx(
+  investor: string,
+  token: string,
+  shares: bigint,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'request_withdrawal',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(shares, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildCancelWithdrawalRequestTx(
+  investor: string,
+  token: string,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_withdrawal_request',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Permissionless: anyone can trigger a drain attempt against current liquidity. */
+export async function buildDrainWithdrawalQueueTx(
+  caller: string,
+  token: string,
+): Promise<string> {
+  const account = await getRpcAccount(caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'drain_withdrawal_queue',
+        new Address(caller).toScVal(),
+        new Address(token).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
 export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<string> {
   const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
@@ -575,6 +952,188 @@ export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<
         'set_yield',
         new Address(admin).toScVal(),
         nativeToScVal(yieldBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+// ── #863: utilization-driven kinked interest-rate model ─────────────────────
+
+// Soroban encodes named-field structs as an ScMap keyed by field-name Symbols
+// in alphabetical order: (base_rate_bps, max_rate_bps,
+// optimal_utilization_bps, slope1_bps, slope2_bps).
+function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
+    entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
+    entry(
+      'optimal_utilization_bps',
+      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
+    ),
+    entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
+    entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
+  ]);
+}
+
+function rateModelConfigFromRaw(raw: Record<string, unknown>): RateModelConfig {
+  return {
+    baseRateBps: Number(raw.base_rate_bps ?? 0),
+    optimalUtilizationBps: Number(raw.optimal_utilization_bps ?? 0),
+    slope1Bps: Number(raw.slope1_bps ?? 0),
+    slope2Bps: Number(raw.slope2_bps ?? 0),
+    maxRateBps: Number(raw.max_rate_bps ?? 0),
+  };
+}
+
+/** Rate (bps) a new funding for `token` would lock right now, or null when
+ * the token has no rate model configured (caller falls back to the static
+ * `PoolConfig.yieldBps`). */
+export async function getCurrentRate(token: string): Promise<number | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_current_rate',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    // RateModelNotConfigured (80) — treated as "no curve" by callers.
+    return null;
+  }
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+/** The token's curve parameters, or null when no rate model is configured. */
+export async function getRateModelConfig(token: string): Promise<RateModelConfig | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_rate_model_config',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  if (StellarRpc.Api.isSimulationError(sim)) return null;
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return rateModelConfigFromRaw(raw as Record<string, unknown>);
+}
+
+/** Up to `limit` most recent rate samples, chronological (oldest-first). */
+export async function getRateHistory(token: string, limit: number): Promise<RateSnapshot[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_rate_history',
+    [new Address(token).toScVal(), nativeToScVal(limit, { type: 'u32' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  if (StellarRpc.Api.isSimulationError(sim)) return [];
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((r) => ({
+    timestamp: Number(r.timestamp ?? 0),
+    utilizationBps: Number(r.utilization_bps ?? 0),
+    rateBps: Number(r.rate_bps ?? 0),
+  }));
+}
+
+/** What the rate would be at a hypothetical utilization, or null when the
+ * token has no rate model configured. */
+export async function previewRateAtUtilization(
+  token: string,
+  utilizationBps: number,
+): Promise<number | null> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'preview_rate_at_utilization',
+    [new Address(token).toScVal(), nativeToScVal(utilizationBps, { type: 'u32' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  if (StellarRpc.Api.isSimulationError(sim)) return null;
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+/** Admin: propose new curve parameters; executable after the yield timelock. */
+export async function buildProposeRateModelTx(
+  admin: string,
+  token: string,
+  config: RateModelConfig,
+): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'propose_rate_model_change',
+        new Address(admin).toScVal(),
+        new Address(token).toScVal(),
+        rateModelConfigToScVal(config),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Anyone: execute a rate-model proposal once its timelock has elapsed. */
+export async function buildExecuteRateModelTx(caller: string, token: string): Promise<string> {
+  const account = await getRpcAccount(caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('execute_rate_model_change', new Address(token).toScVal()))
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Admin: cancel a pending rate-model proposal. */
+export async function buildCancelRateModelTx(admin: string, token: string): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_rate_model_change',
+        new Address(admin).toScVal(),
+        new Address(token).toScVal(),
       ),
     )
     .setTimeout(30)
@@ -1141,6 +1700,292 @@ export async function getCreditScoreStatus(
   }
 }
 
+// #868: credit_score v2 — external attestations + dispute mechanism.
+// Soroban encodes a unit-variant Rust enum (no associated data, e.g.
+// `AttestorType`/`AttestationStatus`) as a one-element ScVec containing the
+// variant name as an ScSymbol. Raw `scValToNative` (unlike the generated
+// contract Client, which has the full spec) decodes that vec to a
+// one-element JS array rather than a bare string, so reads are unwrapped
+// defensively and writes are built by hand.
+function attestorTypeToScVal(variant: AttestorType): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(variant, { type: 'symbol' })]);
+}
+
+function enumTagFromNative<T extends string>(raw: unknown): T {
+  return (Array.isArray(raw) ? raw[0] : raw) as T;
+}
+
+function attestationFromScVal(raw: Record<string, unknown>): Attestation {
+  return {
+    id: Number(raw.id),
+    sme: raw.sme as StellarAddress,
+    attestor: raw.attestor as StellarAddress,
+    attestationType: enumTagFromNative(raw.attestation_type),
+    scoreContribution: Number(raw.score_contribution),
+    evidenceHash: raw.evidence_hash as string,
+    submittedAt: Number(raw.submitted_at),
+    expiresAt: Number(raw.expires_at),
+    status: enumTagFromNative(raw.status),
+  };
+}
+
+function attestorInfoFromScVal(raw: Record<string, unknown>): AttestorInfo {
+  return {
+    address: raw.address as StellarAddress,
+    attestorType: enumTagFromNative(raw.attestor_type),
+    isActive: Boolean(raw.is_active),
+    weightBps: Number(raw.weight_bps),
+    registeredAt: Number(raw.registered_at),
+  };
+}
+
+function fullCreditScoreFromScVal(raw: Record<string, unknown>): FullCreditScore {
+  return {
+    sme: raw.sme as StellarAddress,
+    score: Number(raw.score),
+    totalInvoices: Number(raw.total_invoices),
+    paidOnTime: Number(raw.paid_on_time),
+    paidLate: Number(raw.paid_late),
+    defaulted: Number(raw.defaulted),
+    totalVolume: BigInt(String(raw.total_volume)),
+    averagePaymentDays: Number(raw.average_payment_days),
+    lastUpdated: Number(raw.last_updated),
+    scoreVersion: Number(raw.score_version),
+    configVersion: Number(raw.config_version),
+    isStale: Boolean(raw.is_stale),
+    blendedScore: Number(raw.blended_score),
+  };
+}
+
+export async function getFullCreditScore(sme: string): Promise<FullCreditScore | null> {
+  if (!CREDIT_SCORE_CONTRACT_ID) return null;
+  try {
+    const sim = await simulateTx(
+      CREDIT_SCORE_CONTRACT_ID,
+      'get_credit_score',
+      [new Address(sme).toScVal()],
+      sme,
+    );
+    const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+    return fullCreditScoreFromScVal(scValToNative(result!.retval) as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttestation(id: number): Promise<Attestation | null> {
+  const sim = await simulateTx(
+    CREDIT_SCORE_CONTRACT_ID,
+    'get_attestation',
+    [nativeToScVal(id, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return attestationFromScVal(raw as Record<string, unknown>);
+}
+
+export async function listSmeAttestations(sme: string): Promise<Attestation[]> {
+  const sim = await simulateTx(
+    CREDIT_SCORE_CONTRACT_ID,
+    'list_sme_attestations',
+    [new Address(sme).toScVal()],
+    sme,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  return (raw ?? []).map(attestationFromScVal);
+}
+
+export async function getAttestorInfo(address: string): Promise<AttestorInfo | null> {
+  const sim = await simulateTx(
+    CREDIT_SCORE_CONTRACT_ID,
+    'get_attestor_info',
+    [new Address(address).toScVal()],
+    address,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return attestorInfoFromScVal(raw as Record<string, unknown>);
+}
+
+export async function listActiveAttestors(): Promise<AttestorInfo[]> {
+  const sim = await simulateTx(
+    CREDIT_SCORE_CONTRACT_ID,
+    'list_active_attestors',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  return (raw ?? []).map(attestorInfoFromScVal);
+}
+
+export async function simulateScoreWithAttestations(
+  sme: string,
+  hypothetical: Array<{ weightBps: number; scoreContribution: number }>,
+): Promise<number> {
+  const hypotheticalScVal = xdr.ScVal.scvVec(
+    hypothetical.map((h) =>
+      xdr.ScVal.scvVec([
+        nativeToScVal(h.weightBps, { type: 'u32' }),
+        nativeToScVal(h.scoreContribution, { type: 'u32' }),
+      ]),
+    ),
+  );
+  const sim = await simulateTx(
+    CREDIT_SCORE_CONTRACT_ID,
+    'simulate_score_with_attestations',
+    [new Address(sme).toScVal(), hypotheticalScVal],
+    sme,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+export async function buildRegisterAttestorTx(params: {
+  admin: string;
+  address: string;
+  attestorType: AttestorType;
+  weightBps: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'register_attestor',
+        new Address(params.admin).toScVal(),
+        new Address(params.address).toScVal(),
+        attestorTypeToScVal(params.attestorType),
+        nativeToScVal(params.weightBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildDeactivateAttestorTx(params: {
+  admin: string;
+  address: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'deactivate_attestor',
+        new Address(params.admin).toScVal(),
+        new Address(params.address).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildSubmitAttestationTx(params: {
+  attestor: string;
+  sme: string;
+  attestationType: AttestorType;
+  scoreContribution: number;
+  evidenceHash: string;
+  expiresAt: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.attestor);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'submit_attestation',
+        new Address(params.attestor).toScVal(),
+        new Address(params.sme).toScVal(),
+        attestorTypeToScVal(params.attestationType),
+        nativeToScVal(params.scoreContribution, { type: 'u32' }),
+        nativeToScVal(params.evidenceHash, { type: 'string' }),
+        nativeToScVal(params.expiresAt, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildDisputeAttestationTx(params: {
+  caller: string;
+  attestationId: number;
+  reasonHash: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'dispute_attestation',
+        new Address(params.caller).toScVal(),
+        nativeToScVal(params.attestationId, { type: 'u64' }),
+        nativeToScVal(params.reasonHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildResolveAttestationDisputeTx(params: {
+  admin: string;
+  attestationId: number;
+  upheld: boolean;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'resolve_attestation_dispute',
+        new Address(params.admin).toScVal(),
+        nativeToScVal(params.attestationId, { type: 'u64' }),
+        nativeToScVal(params.upheld, { type: 'bool' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 // ---- Governance ----
 
 export async function getGovernanceConfig(): Promise<GovernanceConfig | null> {
@@ -1472,6 +2317,177 @@ export async function buildSlashOracleTx(params: {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #867: Compliance registry ----
+
+export type ComplianceStatusUi =
+  | 'Unscreened'
+  | 'Cleared'
+  | 'Flagged'
+  | 'Blocked'
+  | 'PendingReview';
+
+export type RiskTierUi = 'Low' | 'Medium' | 'High';
+
+export interface ComplianceRecordUi {
+  address: string;
+  status: ComplianceStatusUi;
+  reasonCode: number;
+  riskTier: RiskTierUi;
+  screenedAt: number;
+  screenedBy: string;
+  expiresAt: number;
+  notesHash: string;
+}
+
+function requireComplianceContractId(): string {
+  if (!COMPLIANCE_CONTRACT_ID) {
+    throw new Error('NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID is not configured');
+  }
+  return COMPLIANCE_CONTRACT_ID;
+}
+
+function unitEnumToScVal(variant: string): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(variant, { type: 'symbol' })]);
+}
+
+export async function getComplianceIsCleared(address: StellarAddress): Promise<boolean> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'is_cleared',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function getComplianceRecord(
+  address: StellarAddress,
+): Promise<ComplianceRecordUi | null> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'get_compliance_record',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
+  if (!raw) return null;
+  return {
+    address: String(raw.address ?? address),
+    status: (raw.status as ComplianceStatusUi) ?? 'Unscreened',
+    reasonCode: Number(raw.reason_code ?? 0),
+    riskTier: (raw.risk_tier as RiskTierUi) ?? 'Low',
+    screenedAt: Number(raw.screened_at ?? 0),
+    screenedBy: String(raw.screened_by ?? ''),
+    expiresAt: Number(raw.expires_at ?? 0),
+    notesHash: String(raw.notes_hash ?? ''),
+  };
+}
+
+export async function getComplianceHistory(
+  address: StellarAddress,
+): Promise<ComplianceRecordUi[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'get_screening_history',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = (scValToNative(result!.retval) as Record<string, unknown>[]) ?? [];
+  return raw.map((e) => ({
+    address,
+    status: (e.status as ComplianceStatusUi) ?? 'Unscreened',
+    reasonCode: Number(e.reason_code ?? 0),
+    riskTier: (e.risk_tier as RiskTierUi) ?? 'Low',
+    screenedAt: Number(e.screened_at ?? 0),
+    screenedBy: String(e.screened_by ?? ''),
+    expiresAt: Number(e.expires_at ?? 0),
+    notesHash: String(e.notes_hash ?? ''),
+  }));
+}
+
+export async function listComplianceFlagged(): Promise<string[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'list_flagged',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return (scValToNative(result!.retval) as string[]) ?? [];
+}
+
+export async function listCompliancePendingReview(): Promise<string[]> {
+  const sim = await simulateTx(
+    requireComplianceContractId(),
+    'list_pending_review',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return (scValToNative(result!.retval) as string[]) ?? [];
+}
+
+export async function buildSubmitScreeningResultTx(params: {
+  screener: StellarAddress;
+  address: StellarAddress;
+  status: ComplianceStatusUi;
+  reasonCode: number;
+  riskTier: RiskTierUi;
+  expiresAt: number;
+  notesHash: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.screener);
+  const contract = new Contract(requireComplianceContractId());
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'submit_screening_result',
+        new Address(params.screener).toScVal(),
+        new Address(params.address).toScVal(),
+        unitEnumToScVal(params.status),
+        nativeToScVal(params.reasonCode, { type: 'u32' }),
+        unitEnumToScVal(params.riskTier),
+        nativeToScVal(params.expiresAt, { type: 'u64' }),
+        nativeToScVal(params.notesHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function fetchComplianceServiceFlags(): Promise<
+  Array<{ id: string; address: string; reason: string; at: string; pattern: string }>
+> {
+  const base = process.env.NEXT_PUBLIC_COMPLIANCE_SERVICE_URL ?? 'http://localhost:8081';
+  const token = process.env.NEXT_PUBLIC_COMPLIANCE_ADMIN_TOKEN ?? '';
+  try {
+    const res = await fetch(`${base}/flags`, {
+      headers: token ? { 'x-admin-token': token } : {},
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      alerts?: Array<{ id: string; address: string; reason: string; at: string; pattern: string }>;
+    };
+    return body.alerts ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export { submitTx };

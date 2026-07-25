@@ -14,11 +14,154 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   TransactionProgress,
+  WithdrawalRequest,
+  WaitEstimate,
+  LiquidityForecastPoint,
+  CoFundingRound,
   OracleInfo,
   VerificationRound,
+  AttestorType,
+  AttestorInfo,
+  Attestation,
+  CreditScoreResponse,
+  RateModelConfig,
+  RateSnapshot,
+  ComplianceStatus,
+  RiskTier,
+  ComplianceRecord,
+  ScreeningHistoryEntry,
 } from './types';
 
 const SIMULATION_SOURCE_ACCOUNT = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+
+// #860: `open_co_funding` takes a single OpenCoFundingRequest struct rather
+// than individual scalar params. Soroban encodes named-field #[contracttype]
+// structs as an ScMap keyed by field-name Symbols in alphabetical order —
+// NOT declaration order — so the entries below are deliberately sorted
+// (due_date, funding_deadline, invoice_id, max_investor_bps, min_commitment,
+// sme, target_principal, token).
+function openCoFundingRequestToScVal(params: {
+  invoiceId: bigint | number;
+  token: string;
+  targetPrincipal: bigint;
+  sme: string;
+  dueDate: number;
+  fundingDeadline: number;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+}): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('due_date', nativeToScVal(params.dueDate, { type: 'u64' })),
+    entry('funding_deadline', nativeToScVal(params.fundingDeadline, { type: 'u64' })),
+    entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    entry('max_investor_bps', nativeToScVal(params.maxInvestorBps, { type: 'u32' })),
+    entry('min_commitment', nativeToScVal(params.minCommitment, { type: 'i128' })),
+    entry('sme', new Address(params.sme).toScVal()),
+    entry('target_principal', nativeToScVal(params.targetPrincipal, { type: 'i128' })),
+    entry('token', new Address(params.token).toScVal()),
+  ]);
+}
+
+function coFundingRoundFromScVal(raw: Record<string, unknown>): CoFundingRound {
+  return {
+    invoiceId: BigInt(String(raw.invoice_id)),
+    token: raw.token as string,
+    sme: raw.sme as string,
+    dueDate: Number(raw.due_date),
+    targetPrincipal: BigInt(String(raw.target_principal)),
+    committedPrincipal: BigInt(String(raw.committed_principal)),
+    fundingDeadline: Number(raw.funding_deadline),
+    status: raw.status as CoFundingRound['status'],
+    minCommitment: BigInt(String(raw.min_commitment)),
+    maxInvestorBps: Number(raw.max_investor_bps),
+    participants: (raw.participants as string[]) ?? [],
+  };
+}
+
+// #863: RateModelConfig struct -> ScVal. Soroban encodes named-field structs
+// as an ScMap keyed by field-name Symbols in alphabetical order:
+// (base_rate_bps, max_rate_bps, optimal_utilization_bps, slope1_bps, slope2_bps).
+function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
+    entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
+    entry(
+      'optimal_utilization_bps',
+      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
+    ),
+    entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
+    entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
+  ]);
+}
+
+function rateModelConfigFromScVal(raw: Record<string, unknown>): RateModelConfig {
+  return {
+    baseRateBps: Number(raw.base_rate_bps),
+    optimalUtilizationBps: Number(raw.optimal_utilization_bps),
+    slope1Bps: Number(raw.slope1_bps),
+    slope2Bps: Number(raw.slope2_bps),
+    maxRateBps: Number(raw.max_rate_bps),
+  };
+}
+
+// #868: credit_score v2 — external attestations + dispute mechanism.
+// Soroban encodes a unit-variant Rust enum (no associated data, e.g.
+// `AttestorType`/`AttestationStatus`) as a one-element ScVec containing the
+// variant name as an ScSymbol — there is no `nativeToScVal({type: 'enum'})`
+// shorthand for this, so we build/unwrap it by hand.
+function attestorTypeToScVal(variant: AttestorType): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(variant, { type: 'symbol' })]);
+}
+
+function enumTagFromNative<T extends string>(raw: unknown): T {
+  return (Array.isArray(raw) ? raw[0] : raw) as T;
+}
+
+function attestationFromScVal(raw: Record<string, unknown>): Attestation {
+  return {
+    id: BigInt(String(raw.id)),
+    sme: raw.sme as string,
+    attestor: raw.attestor as string,
+    attestationType: enumTagFromNative(raw.attestation_type),
+    scoreContribution: Number(raw.score_contribution),
+    evidenceHash: raw.evidence_hash as string,
+    submittedAt: Number(raw.submitted_at),
+    expiresAt: Number(raw.expires_at),
+    status: enumTagFromNative(raw.status),
+  };
+}
+
+function attestorInfoFromScVal(raw: Record<string, unknown>): AttestorInfo {
+  return {
+    address: raw.address as string,
+    attestorType: enumTagFromNative(raw.attestor_type),
+    isActive: Boolean(raw.is_active),
+    weightBps: Number(raw.weight_bps),
+    registeredAt: Number(raw.registered_at),
+  };
+}
+
+function creditScoreResponseFromScVal(raw: Record<string, unknown>): CreditScoreResponse {
+  return {
+    sme: raw.sme as string,
+    score: Number(raw.score),
+    totalInvoices: Number(raw.total_invoices),
+    paidOnTime: Number(raw.paid_on_time),
+    paidLate: Number(raw.paid_late),
+    defaulted: Number(raw.defaulted),
+    totalVolume: BigInt(String(raw.total_volume)),
+    averagePaymentDays: Number(raw.average_payment_days),
+    lastUpdated: Number(raw.last_updated),
+    scoreVersion: Number(raw.score_version),
+    configVersion: Number(raw.config_version),
+    isStale: Boolean(raw.is_stale),
+    blendedScore: Number(raw.blended_score),
+  };
+}
 
 export class AsteraClient {
   private server: StellarRpc.Server;
@@ -284,6 +427,615 @@ export class AsteraClient {
       const result = await this.submitTx(signedXdr, params.onProgress);
       return result.hash;
     },
+
+    // ---- #860: multi-investor co-funding rounds ----
+
+    openCoFunding: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      invoiceId: bigint | number;
+      token: string;
+      targetPrincipal: bigint;
+      sme: string;
+      dueDate: number;
+      fundingDeadline: number;
+      minCommitment: bigint;
+      maxInvestorBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'open_co_funding',
+            new Address(params.admin).toScVal(),
+            openCoFundingRequestToScVal(params),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    commitToInvoice: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      invoiceId: bigint | number;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'commit_to_invoice',
+            new Address(params.investor).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            nativeToScVal(params.amount, { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    finalizeCoFunding: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'finalize_co_funding',
+            new Address(params.caller).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    withdrawCommitment: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'withdraw_co_funding_commitment',
+            new Address(params.investor).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    transferCoFundShare: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      from: string;
+      invoiceId: bigint | number;
+      token: string;
+      to: string;
+      bps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.from);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'transfer_co_fund_share',
+            new Address(params.from).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            new Address(params.token).toScVal(),
+            new Address(params.to).toScVal(),
+            nativeToScVal(params.bps, { type: 'u32' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    getCoFundingRound: async (invoiceId: bigint | number): Promise<CoFundingRound | null> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_co_funding_round',
+        [nativeToScVal(invoiceId, { type: 'u64' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return coFundingRoundFromScVal(raw as Record<string, unknown>);
+    },
+
+    listCoFundingRounds: async (): Promise<bigint[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'list_co_funding_rounds',
+        [],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as unknown[];
+      return (raw ?? []).map((id) => BigInt(String(id)));
+    },
+
+    getInvestorCoFundPositions: async (
+      investor: string,
+    ): Promise<Array<{ invoiceId: bigint; bps: number }>> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_investor_co_fund_positions',
+        [new Address(investor).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as [bigint | string, number][];
+      return (raw ?? []).map(([invoiceId, bps]) => ({
+        invoiceId: BigInt(String(invoiceId)),
+        bps,
+      }));
+    },
+
+    getCoFundShare: async (invoiceId: bigint | number, investor: string): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_co_fund_share',
+        [nativeToScVal(invoiceId, { type: 'u64' }), new Address(investor).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    // #865: withdrawal-queue completion + liquidity forecasting
+
+    getWithdrawalQueue: async (token: string): Promise<WithdrawalRequest[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_withdrawal_queue',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return raw.map((r) => ({
+        investor: r.investor as string,
+        token: r.token as string,
+        shares: BigInt(String(r.shares)),
+        requestedAt: Number(r.requested_at),
+        requestId: BigInt(String(r.request_id)),
+      }));
+    },
+
+    estimateWithdrawalWait: async (investor: string, token: string): Promise<WaitEstimate> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'estimate_withdrawal_wait',
+        [new Address(investor).toScVal(), new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+      return {
+        queuePosition: Number(raw.queue_position),
+        capitalAhead: BigInt(String(raw.capital_ahead)),
+        nearestInvoiceDueDate: Number(raw.nearest_invoice_due_date),
+        estimatedWaitSecs: Number(raw.estimated_wait_secs),
+      };
+    },
+
+    getLiquidityForecast: async (
+      token: string,
+      horizonDays: number,
+    ): Promise<LiquidityForecastPoint[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_liquidity_forecast',
+        [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return raw.map((r) => ({
+        day: Number(r.day),
+        projectedAvailable: BigInt(String(r.projected_available)),
+      }));
+    },
+
+    // #863: utilization-driven kinked interest-rate model
+
+    /** Rate (bps) a new funding for `token` would lock right now. Throws when
+     * the token has no rate model configured — fall back to
+     * `getConfig().yieldBps` in that case. */
+    getCurrentRate: async (token: string): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_current_rate',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    /** The token's curve parameters, or null when no rate model is configured. */
+    getRateModelConfig: async (token: string): Promise<RateModelConfig | null> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_rate_model_config',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return rateModelConfigFromScVal(raw as Record<string, unknown>);
+    },
+
+    /** Up to `limit` most recent rate samples, chronological (oldest-first). */
+    getRateHistory: async (token: string, limit: number): Promise<RateSnapshot[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_rate_history',
+        [new Address(token).toScVal(), nativeToScVal(limit, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return (raw ?? []).map((r) => ({
+        timestamp: Number(r.timestamp),
+        utilizationBps: Number(r.utilization_bps),
+        rateBps: Number(r.rate_bps),
+      }));
+    },
+
+    /** What the rate would be at a hypothetical utilization (bps). */
+    previewRateAtUtilization: async (token: string, utilizationBps: number): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'preview_rate_at_utilization',
+        [new Address(token).toScVal(), nativeToScVal(utilizationBps, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    /** Admin: propose new curve parameters (executable after the yield timelock). */
+    proposeRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      config: RateModelConfig;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'propose_rate_model_change',
+            new Address(params.admin).toScVal(),
+            new Address(params.token).toScVal(),
+            rateModelConfigToScVal(params.config),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Anyone: execute a rate-model proposal once its timelock has elapsed. */
+    executeRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call('execute_rate_model_change', new Address(params.token).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Admin: cancel a pending rate-model proposal. */
+    cancelRateModelChange: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'cancel_rate_model_change',
+            new Address(params.admin).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    requestWithdrawal: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      shares: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'request_withdrawal',
+            new Address(params.investor).toScVal(),
+            new Address(params.token).toScVal(),
+            nativeToScVal(params.shares, { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    cancelWithdrawalRequest: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'cancel_withdrawal_request',
+            new Address(params.investor).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Permissionless: anyone can trigger a drain attempt against current liquidity. */
+    drainWithdrawalQueue: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'drain_withdrawal_queue',
+            new Address(params.caller).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
   };
 
   // ---- Oracle Registry Contract (#861) ----
@@ -467,11 +1219,522 @@ export class AsteraClient {
     },
   };
 
+  // ---- Credit Score Contract (#868: v2 external attestations) ----
+
+  public readonly creditScore = {
+    getCreditScore: async (sme: string): Promise<CreditScoreResponse> => {
+      const contractId = this.requireCreditScoreContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'get_credit_score',
+        [new Address(sme).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+      return creditScoreResponseFromScVal(raw);
+    },
+
+    simulateScoreWithAttestations: async (
+      sme: string,
+      hypothetical: Array<{ weightBps: number; scoreContribution: number }>,
+    ): Promise<number> => {
+      const contractId = this.requireCreditScoreContractId();
+      const hypotheticalScVal = xdr.ScVal.scvVec(
+        hypothetical.map((h) =>
+          xdr.ScVal.scvVec([
+            nativeToScVal(h.weightBps, { type: 'u32' }),
+            nativeToScVal(h.scoreContribution, { type: 'u32' }),
+          ]),
+        ),
+      );
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'simulate_score_with_attestations',
+        [new Address(sme).toScVal(), hypotheticalScVal],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
+    },
+
+    getAttestorInfo: async (address: string): Promise<AttestorInfo | null> => {
+      const contractId = this.requireCreditScoreContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'get_attestor_info',
+        [new Address(address).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return attestorInfoFromScVal(raw as Record<string, unknown>);
+    },
+
+    listActiveAttestors: async (): Promise<AttestorInfo[]> => {
+      const contractId = this.requireCreditScoreContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'list_active_attestors',
+        [],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return (raw ?? []).map(attestorInfoFromScVal);
+    },
+
+    getAttestation: async (id: bigint | number): Promise<Attestation | null> => {
+      const contractId = this.requireCreditScoreContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'get_attestation',
+        [nativeToScVal(id, { type: 'u64' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return attestationFromScVal(raw as Record<string, unknown>);
+    },
+
+    listSmeAttestations: async (sme: string): Promise<Attestation[]> => {
+      const contractId = this.requireCreditScoreContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'list_sme_attestations',
+        [new Address(sme).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return (raw ?? []).map(attestationFromScVal);
+    },
+
+    registerAttestor: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      address: string;
+      attestorType: AttestorType;
+      weightBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireCreditScoreContractId();
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'register_attestor',
+            new Address(params.admin).toScVal(),
+            new Address(params.address).toScVal(),
+            attestorTypeToScVal(params.attestorType),
+            nativeToScVal(params.weightBps, { type: 'u32' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    deactivateAttestor: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      address: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireCreditScoreContractId();
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'deactivate_attestor',
+            new Address(params.admin).toScVal(),
+            new Address(params.address).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    submitAttestation: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      attestor: string;
+      sme: string;
+      attestationType: AttestorType;
+      scoreContribution: number;
+      evidenceHash: string;
+      expiresAt: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireCreditScoreContractId();
+      const account = await this.server.getAccount(params.attestor);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'submit_attestation',
+            new Address(params.attestor).toScVal(),
+            new Address(params.sme).toScVal(),
+            attestorTypeToScVal(params.attestationType),
+            nativeToScVal(params.scoreContribution, { type: 'u32' }),
+            nativeToScVal(params.evidenceHash, { type: 'string' }),
+            nativeToScVal(params.expiresAt, { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    disputeAttestation: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      attestationId: bigint | number;
+      reasonHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireCreditScoreContractId();
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'dispute_attestation',
+            new Address(params.caller).toScVal(),
+            nativeToScVal(params.attestationId, { type: 'u64' }),
+            nativeToScVal(params.reasonHash, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    resolveAttestationDispute: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      attestationId: bigint | number;
+      upheld: boolean;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireCreditScoreContractId();
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'resolve_attestation_dispute',
+            new Address(params.admin).toScVal(),
+            nativeToScVal(params.attestationId, { type: 'u64' }),
+            nativeToScVal(params.upheld, { type: 'bool' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+  };
+
+  // ---- Compliance Registry (#867) ----
+
+  public readonly compliance = {
+    isCleared: async (address: string): Promise<boolean> => {
+      const contractId = this.requireComplianceContractId();
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT).catch(() => {
+          // Simulation source may not exist on some networks; build with a dummy.
+          throw new Error('Unable to load simulation source account');
+        }),
+        { fee: BASE_FEE, networkPassphrase: this.config.network },
+      )
+        .addOperation(contract.call('is_cleared', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return Boolean(scValToNative(result));
+    },
+
+    getRecord: async (address: string): Promise<ComplianceRecord | null> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('get_compliance_record', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      const raw = scValToNative(result) as Record<string, unknown> | null;
+      if (!raw) return null;
+      return {
+        address: raw.address as string,
+        status: (raw.status as ComplianceStatus) ?? 'Unscreened',
+        reasonCode: Number(raw.reason_code ?? 0),
+        riskTier: (raw.risk_tier as RiskTier) ?? 'Low',
+        screenedAt: Number(raw.screened_at ?? 0),
+        screenedBy: raw.screened_by as string,
+        expiresAt: Number(raw.expires_at ?? 0),
+        notesHash: String(raw.notes_hash ?? ''),
+      };
+    },
+
+    getHistory: async (address: string): Promise<ScreeningHistoryEntry[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('get_screening_history', new Address(address).toScVal()))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      const raw = (scValToNative(result) as Record<string, unknown>[]) ?? [];
+      return raw.map((e) => ({
+        status: (e.status as ComplianceStatus) ?? 'Unscreened',
+        reasonCode: Number(e.reason_code ?? 0),
+        riskTier: (e.risk_tier as RiskTier) ?? 'Low',
+        screenedAt: Number(e.screened_at ?? 0),
+        screenedBy: e.screened_by as string,
+        expiresAt: Number(e.expires_at ?? 0),
+        notesHash: String(e.notes_hash ?? ''),
+      }));
+    },
+
+    listFlagged: async (): Promise<string[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('list_flagged'))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return (scValToNative(result) as string[]) ?? [];
+    },
+
+    listPendingReview: async (): Promise<string[]> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(SIMULATION_SOURCE_ACCOUNT);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(contract.call('list_pending_review'))
+        .setTimeout(30)
+        .build();
+      const result = await simulateTx(this.server, tx);
+      return (scValToNative(result) as string[]) ?? [];
+    },
+
+    submitScreeningResult: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      screener: string;
+      address: string;
+      status: ComplianceStatus;
+      reasonCode: number;
+      riskTier: RiskTier;
+      expiresAt: number;
+      notesHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(params.screener);
+      const contract = new Contract(contractId);
+
+      const statusScVal = xdr.ScVal.scvVec([
+        nativeToScVal(params.status, { type: 'symbol' }),
+      ]);
+      const riskScVal = xdr.ScVal.scvVec([
+        nativeToScVal(params.riskTier, { type: 'symbol' }),
+      ]);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'submit_screening_result',
+            new Address(params.screener).toScVal(),
+            new Address(params.address).toScVal(),
+            statusScVal,
+            nativeToScVal(params.reasonCode, { type: 'u32' }),
+            riskScVal,
+            nativeToScVal(params.expiresAt, { type: 'u64' }),
+            nativeToScVal(params.notesHash, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    requestReview: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      address: string;
+      reason: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireComplianceContractId();
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'request_review',
+            new Address(params.caller).toScVal(),
+            new Address(params.address).toScVal(),
+            nativeToScVal(params.reason, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+  };
+
+  private requireCreditScoreContractId(): string {
+    if (!this.config.creditScoreContractId) {
+      throw new Error('creditScoreContractId is not configured on this AsteraClient');
+    }
+    return this.config.creditScoreContractId;
+  }
+
   private requireOracleRegistryContractId(): string {
     if (!this.config.oracleRegistryContractId) {
       throw new Error('oracleRegistryContractId is not configured on this AsteraClient');
     }
     return this.config.oracleRegistryContractId;
+  }
+
+  private requireComplianceContractId(): string {
+    if (!this.config.complianceContractId) {
+      throw new Error('complianceContractId is not configured on this AsteraClient');
+    }
+    return this.config.complianceContractId;
   }
 
   private async submitTx(
