@@ -1058,6 +1058,7 @@ version = "0.1.0"
 dependencies = [
  "compliance",
  "proptest",
+ "referral",
  "soroban-sdk",
 ]
 
@@ -1236,6 +1237,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "referral"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]

@@ -713,6 +713,9 @@ const EVT: Symbol = symbol_short!("POOL");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
+// #799: referral registry address — also stored under a Symbol key rather
+// than a DataKey variant, for the same reason as COMPLIANCE_CFG above.
+const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -731,6 +734,22 @@ pub trait InvoiceContract {
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
     fn is_cleared(env: Env, address: Address) -> bool;
+}
+
+/// #799: cross-contract interface to the referral program. `kind` is
+/// `"borrow"` or `"deposit"`; returns the reward amount (if any) credited
+/// to the referee's referrer, which the pool must then transfer to the
+/// referral contract.
+#[contractclient(name = "ReferralClient")]
+pub trait ReferralContract {
+    fn record_activity(
+        env: Env,
+        caller: Address,
+        referee: Address,
+        kind: Symbol,
+        fee_amount: i128,
+        token: Address,
+    ) -> i128;
 }
 
 // Cache for config to reduce storage reads
@@ -2112,6 +2131,11 @@ impl FundingPool {
         // has arrived — don't wait solely for the next repayment (mirrors the same
         // best-effort, non-blocking pattern used in repay_invoice_request).
         record_inflow_event(&env, &token, usdc_received);
+        // #799: activates the referral on this investor's first deposit.
+        // The pool has no separate yield fee to share yet, so fee_amount is
+        // 0 here — record_referral_activity is a no-op reward-wise but
+        // still records the qualifying activity / referral count.
+        Self::record_referral_activity(&env, &investor, symbol_short!("deposit"), 0, &token);
         let post_deposit_liquidity = available_liquidity(&tt).unwrap_or(0);
         if let Err(e) = Self::process_withdrawal_queue(&env, token, post_deposit_liquidity) {
             let _ = e;
@@ -3357,6 +3381,16 @@ impl FundingPool {
                 let _ = e;
                 env.logs().add("Failed to process withdrawal queue", &[]);
             }
+
+            // #799: pay the referrer (if any) their cut of the
+            // factoring fee just realized above.
+            Self::record_referral_activity(
+                env,
+                &record.sme,
+                symbol_short!("borrow"),
+                record.factoring_fee,
+                &token,
+            );
 
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
@@ -5348,6 +5382,49 @@ impl FundingPool {
         }
     }
 
+    /// #799: best-effort referral hook. If a referral registry is
+    /// configured, records `kind` ("borrow" or "deposit") activity for
+    /// `referee` and — if a reward was credited — moves that amount of
+    /// `token` from the pool's own balance to the referral contract so
+    /// `claim_rewards()` can pay it out, debiting the same amount from
+    /// `protocol_revenue` (the reward is a redistributed slice of the fee
+    /// already credited there, not new inflation). Never fails the caller:
+    /// an unset registry or any cross-contract error is swallowed.
+    fn record_referral_activity(env: &Env, referee: &Address, kind: Symbol, fee_amount: i128, token: &Address) {
+        if fee_amount < 0 {
+            return;
+        }
+        let registry: Option<Address> = env.storage().instance().get(&REFERRAL_CFG);
+        let Some(registry) = registry else {
+            return;
+        };
+        let client = ReferralClient::new(env, &registry);
+        let reward = match client.try_record_activity(
+            &env.current_contract_address(),
+            referee,
+            &kind,
+            &fee_amount,
+            token,
+        ) {
+            Ok(Ok(amount)) if amount > 0 => amount,
+            _ => return,
+        };
+
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        tt.protocol_revenue = tt.protocol_revenue.saturating_sub(reward);
+        env.storage().instance().set(&token_totals_key, &tt);
+
+        let token_client = token::Client::new(env, token);
+        token_client.transfer(&env.current_contract_address(), &registry, &reward);
+        env.events()
+            .publish((EVT, symbol_short!("ref_pay")), (referee.clone(), reward));
+    }
+
     fn require_not_paused(env: &Env) {
         require_not_paused(env);
     }
@@ -5516,6 +5593,27 @@ impl FundingPool {
             .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
             .map(|g| g.required)
             .unwrap_or(false)
+    }
+
+    // ---- #799: Referral program integration ----
+
+    /// Set the referral contract address. When set, a referrer's cut of a
+    /// referee's factoring fee (on invoice repayment) or deposit is routed
+    /// there automatically. Unset by default — existing deployments and
+    /// tests are unaffected until an admin opts in.
+    pub fn set_referral_registry(env: Env, admin: Address, registry: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&REFERRAL_CFG, &registry);
+        env.events()
+            .publish((EVT, symbol_short!("ref_set")), (admin, registry));
+        Ok(())
+    }
+
+    pub fn get_referral_registry(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&REFERRAL_CFG)
     }
 
     // ---- #109: Investor KYC / whitelist methods ----
@@ -6477,6 +6575,91 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    // #799: referral program integration — the pool contract pays a
+    // referrer their configured cut of a referee's factoring fee.
+    #[test]
+    fn test_referral_reward_paid_on_invoice_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let referrer = Address::generate(&env);
+
+        let referral_id = env.register(referral::ReferralContract, ());
+        let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
+        referral_client.initialize(&admin, &client.address);
+        referral_client.register(&sme, &referrer);
+        client.set_referral_registry(&admin, &referral_id);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        // 2.5% factoring fee; default referral borrow reward is 5% of that fee.
+        client.set_factoring_fee(&admin, &250);
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+
+        let expected_fee = principal * 250 / BPS_DENOM as i128;
+        let expected_reward = expected_fee * 500 / BPS_DENOM as i128;
+
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        // Referrer's reward is credited and actually funded on the referral contract.
+        assert_eq!(
+            referral_client.get_pending_reward(&referrer, &usdc_id),
+            expected_reward
+        );
+        assert_eq!(referral_client.get_stats(&referrer).referral_count, 1);
+        let usdc_client = soroban_sdk::token::Client::new(&env, &usdc_id);
+        assert_eq!(usdc_client.balance(&referral_id), expected_reward);
+
+        // The reward is carved out of protocol_revenue, not paid on top of it.
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.total_fee_revenue, expected_fee);
+        assert_eq!(tt.protocol_revenue, expected_fee - expected_reward);
+
+        // Referrer can claim it.
+        let claimed = referral_client.claim_rewards(&referrer, &usdc_id);
+        assert_eq!(claimed, expected_reward);
+        assert_eq!(usdc_client.balance(&referrer), expected_reward);
+    }
+
+    #[test]
+    fn test_referral_activates_on_first_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let referrer = Address::generate(&env);
+
+        let referral_id = env.register(referral::ReferralContract, ());
+        let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
+        referral_client.initialize(&admin, &client.address);
+        referral_client.register(&investor, &referrer);
+        client.set_referral_registry(&admin, &referral_id);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &1_000i128);
+
+        // No pool-level yield fee exists yet, so the deposit earns no
+        // reward — but the referral is still activated/counted.
+        assert_eq!(referral_client.get_stats(&referrer).referral_count, 1);
+        assert_eq!(referral_client.get_pending_reward(&referrer, &usdc_id), 0);
     }
 
     #[test]
