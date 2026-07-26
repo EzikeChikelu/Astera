@@ -62,6 +62,85 @@ export interface ShareApproveEvent {
   amount: bigint;
 }
 
+// #985 — governance contract events (topic namespace "gov")
+export interface GovernanceProposalCreatedEvent {
+  type: 'governance:proposal_created';
+  proposalId: bigint;
+  proposer: string;
+}
+
+export interface GovernanceVoteCastEvent {
+  type: 'governance:vote_cast';
+  proposalId: bigint;
+  voter: string;
+  inFavor: boolean;
+  weight: bigint;
+}
+
+export interface GovernanceProposalExecutedEvent {
+  type: 'governance:proposal_executed';
+  proposalId: bigint;
+  targetContract: string;
+  functionName: string;
+  calldata: unknown[];
+}
+
+export interface GovernanceProposalCancelledEvent {
+  type: 'governance:proposal_cancelled';
+  proposalId: bigint;
+  caller: string;
+}
+
+// #985 — insurance contract events (topic namespace "INSURNCE", matching
+// the on-chain `symbol_short!("INSURNCE")` EVT constant exactly)
+export interface InsuranceInitializedEvent {
+  type: 'insurance:initialized';
+  admin: string;
+}
+
+export interface InsurancePremiumConfigSetEvent {
+  type: 'insurance:premium_config_set';
+  admin: string;
+}
+
+export interface InsuranceMinCoverageRatioSetEvent {
+  type: 'insurance:min_coverage_ratio_set';
+  admin: string;
+  token: string;
+  minRatioBps: number;
+}
+
+export interface InsurancePausedEvent {
+  type: 'insurance:paused';
+  admin: string;
+}
+
+export interface InsuranceUnpausedEvent {
+  type: 'insurance:unpaused';
+  admin: string;
+}
+
+export interface InsuranceReserveFundedEvent {
+  type: 'insurance:reserve_funded';
+  admin: string;
+  token: string;
+  amount: bigint;
+}
+
+export interface InsuranceCoveragePurchasedEvent {
+  type: 'insurance:coverage_purchased';
+  invoiceId: bigint;
+  payer: string;
+  premium: bigint;
+  coverageBps: number;
+}
+
+export interface InsuranceClaimPaidEvent {
+  type: 'insurance:claim_paid';
+  invoiceId: bigint;
+  payout: bigint;
+}
+
 export type ContractEventType =
   | PoolDepositEvent
   | PoolWithdrawalEvent
@@ -69,7 +148,19 @@ export type ContractEventType =
   | ShareMintEvent
   | ShareBurnEvent
   | ShareTransferEvent
-  | ShareApproveEvent;
+  | ShareApproveEvent
+  | GovernanceProposalCreatedEvent
+  | GovernanceVoteCastEvent
+  | GovernanceProposalExecutedEvent
+  | GovernanceProposalCancelledEvent
+  | InsuranceInitializedEvent
+  | InsurancePremiumConfigSetEvent
+  | InsuranceMinCoverageRatioSetEvent
+  | InsurancePausedEvent
+  | InsuranceUnpausedEvent
+  | InsuranceReserveFundedEvent
+  | InsuranceCoveragePurchasedEvent
+  | InsuranceClaimPaidEvent;
 
 export function parseContractEvent(event: {
   topic: string[];
@@ -169,6 +260,132 @@ export function parseContractEvent(event: {
             spender: String(spender),
             amount: BigInt(String(amount)),
           } as ShareApproveEvent;
+        }
+      }
+    }
+
+    // #985 — governance contract events (EVT = symbol_short!("gov"))
+    if (namespace === 'gov') {
+      const values = event.value.map((v) => scValToNative(v));
+
+      switch (action) {
+        case 'create': {
+          const [id, proposer] = values;
+          return {
+            type: 'governance:proposal_created',
+            proposalId: BigInt(String(id)),
+            proposer: String(proposer),
+          } as GovernanceProposalCreatedEvent;
+        }
+
+        case 'vote': {
+          const [proposalId, voter, inFavor, weight] = values;
+          return {
+            type: 'governance:vote_cast',
+            proposalId: BigInt(String(proposalId)),
+            voter: String(voter),
+            inFavor: Boolean(inFavor),
+            weight: BigInt(String(weight)),
+          } as GovernanceVoteCastEvent;
+        }
+
+        case 'execute': {
+          const [proposalId, targetContract, functionName, calldata] = values;
+          return {
+            type: 'governance:proposal_executed',
+            proposalId: BigInt(String(proposalId)),
+            targetContract: String(targetContract),
+            functionName: String(functionName),
+            calldata: Array.isArray(calldata) ? calldata : [calldata],
+          } as GovernanceProposalExecutedEvent;
+        }
+
+        case 'cancel': {
+          const [proposalId, caller] = values;
+          return {
+            type: 'governance:proposal_cancelled',
+            proposalId: BigInt(String(proposalId)),
+            caller: String(caller),
+          } as GovernanceProposalCancelledEvent;
+        }
+      }
+    }
+
+    // #985 — insurance contract events (EVT = symbol_short!("INSURNCE"))
+    if (namespace === 'INSURNCE') {
+      const values = event.value.map((v) => scValToNative(v));
+
+      switch (action) {
+        case 'init': {
+          const [admin] = values;
+          return {
+            type: 'insurance:initialized',
+            admin: String(admin),
+          } as InsuranceInitializedEvent;
+        }
+
+        case 'cfg_set': {
+          const [admin] = values;
+          return {
+            type: 'insurance:premium_config_set',
+            admin: String(admin),
+          } as InsurancePremiumConfigSetEvent;
+        }
+
+        case 'mcr_set': {
+          const [admin, token, minRatioBps] = values;
+          return {
+            type: 'insurance:min_coverage_ratio_set',
+            admin: String(admin),
+            token: String(token),
+            minRatioBps: Number(minRatioBps),
+          } as InsuranceMinCoverageRatioSetEvent;
+        }
+
+        case 'paused': {
+          const [admin] = values;
+          return {
+            type: 'insurance:paused',
+            admin: String(admin),
+          } as InsurancePausedEvent;
+        }
+
+        case 'unpaused': {
+          const [admin] = values;
+          return {
+            type: 'insurance:unpaused',
+            admin: String(admin),
+          } as InsuranceUnpausedEvent;
+        }
+
+        case 'funded': {
+          const [admin, token, amount] = values;
+          return {
+            type: 'insurance:reserve_funded',
+            admin: String(admin),
+            token: String(token),
+            amount: BigInt(String(amount)),
+          } as InsuranceReserveFundedEvent;
+        }
+
+        case 'covered': {
+          const [invoiceId, payer, premium, coverageBps] = values;
+          return {
+            type: 'insurance:coverage_purchased',
+            invoiceId: BigInt(String(invoiceId)),
+            payer: String(payer),
+            premium: BigInt(String(premium)),
+            coverageBps: Number(coverageBps),
+          } as InsuranceCoveragePurchasedEvent;
+        }
+
+        case 'claimed': {
+          const [invoiceId, payout] = values;
+          return {
+            type: 'insurance:claim_paid',
+            invoiceId: BigInt(String(invoiceId)),
+            payout: BigInt(String(payout)),
+          } as InsuranceClaimPaidEvent;
         }
       }
     }
