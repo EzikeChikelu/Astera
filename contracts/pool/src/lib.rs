@@ -8,7 +8,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, IntoVal, Symbol, Vec,
+    Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -159,6 +159,9 @@ pub enum PoolError {
     // #867: on-chain compliance / sanctions screening gate
     ComplianceNotCleared = 83,
     ComplianceCheckFailed = 84,
+    // #777: Reflector oracle collateral price feed — neither the oracle
+    // nor the admin fallback has a usable price for the requested token.
+    OraclePriceUnavailable = 85,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -713,9 +716,15 @@ const EVT: Symbol = symbol_short!("POOL");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
-// #799: referral registry address — also stored under a Symbol key rather
-// than a DataKey variant, for the same reason as COMPLIANCE_CFG above.
-const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
+// #777: Reflector Oracle config, same Symbol-key workaround as #867 above.
+const REFLECTOR_ORACLE: Symbol = symbol_short!("rflector");
+const ORACLE_STALE_SECS: Symbol = symbol_short!("o_stale");
+// #777: per-token admin fallback price, stored as a single Map so it
+// doesn't need its own DataKey variant either.
+const ORACLE_FALLBACK_PX: Symbol = symbol_short!("fb_price");
+// #777: default max age (seconds) a Reflector price may have before it's
+// treated as stale and the admin fallback price is used instead.
+const DEFAULT_ORACLE_STALE_SECS: u64 = 3600;
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -736,20 +745,33 @@ pub trait ComplianceContract {
     fn is_cleared(env: Env, address: Address) -> bool;
 }
 
-/// #799: cross-contract interface to the referral program. `kind` is
-/// `"borrow"` or `"deposit"`; returns the reward amount (if any) credited
-/// to the referee's referrer, which the pool must then transfer to the
-/// referral contract.
-#[contractclient(name = "ReferralClient")]
-pub trait ReferralContract {
-    fn record_activity(
-        env: Env,
-        caller: Address,
-        referee: Address,
-        kind: Symbol,
-        fee_amount: i128,
-        token: Address,
-    ) -> i128;
+/// #777: Reflector Oracle's price-feed asset identifier
+/// (https://reflector.network). `Stellar` wraps a Soroban token contract
+/// address; `Other` identifies a non-Stellar asset by symbol (e.g. "USD").
+/// Collateral pricing here only ever looks up `Stellar` assets, but both
+/// variants must be present (and in this order) to match Reflector's
+/// deployed contract interface byte-for-byte.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReflectorAsset {
+    Stellar(Address),
+    Other(Symbol),
+}
+
+/// #777: mirrors Reflector's `PriceData` return type. `price` is scaled by
+/// the oracle's `decimals()`; `timestamp` is the Unix time the price was
+/// recorded (used for staleness checks).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReflectorPriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// #777: cross-contract interface to a Reflector-compatible price oracle.
+#[contractclient(name = "ReflectorClient")]
+pub trait ReflectorContract {
+    fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPriceData>;
 }
 
 // Cache for config to reduce storage reads
@@ -5262,6 +5284,131 @@ impl FundingPool {
             .unwrap_or_default()
     }
 
+    /// #776: live on-chain balance of `token` held by this pool contract,
+    /// read directly from the token contract. Distinct from
+    /// `get_token_totals().pool_value`/`total_deployed`, which track
+    /// normalized *deposited/deployed capital* through the protocol's own
+    /// accounting — tokens sent to the pool address outside of `deposit()`
+    /// (donations, dust, accidental direct transfers) affect the balance
+    /// returned here immediately even though they never touch that internal
+    /// counter.
+    pub fn get_pool_balance(env: Env, token: Address) -> i128 {
+        let token_client = token::Client::new(&env, &token);
+        token_client.balance(&env.current_contract_address())
+    }
+
+    /// #777: admin setter — configures the Reflector Oracle contract used
+    /// for live collateral price feeds via `get_asset_price()`. Settable via
+    /// governance (the pool admin), matching the existing `set_treasury`
+    /// style of direct admin setter.
+    pub fn set_oracle_contract(env: Env, admin: Address, oracle: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&REFLECTOR_ORACLE, &oracle);
+        env.events()
+            .publish((EVT, symbol_short!("set_orcl")), (admin, oracle));
+        Ok(())
+    }
+
+    /// #777: currently configured Reflector Oracle contract, if any.
+    pub fn get_oracle_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&REFLECTOR_ORACLE)
+    }
+
+    /// #777: admin setter — max age (seconds) a Reflector price may have
+    /// before `get_asset_price()` treats it as stale and falls back to the
+    /// admin-set price instead.
+    pub fn set_oracle_stale_threshold(
+        env: Env,
+        admin: Address,
+        threshold_secs: u64,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if threshold_secs == 0 {
+            return Err(PoolError::InvalidThreshold);
+        }
+        env.storage()
+            .instance()
+            .set(&ORACLE_STALE_SECS, &threshold_secs);
+        env.events()
+            .publish((EVT, symbol_short!("orcl_stl")), (admin, threshold_secs));
+        Ok(())
+    }
+
+    /// #777: currently configured staleness threshold (seconds), or the
+    /// default if never set.
+    pub fn get_oracle_stale_threshold(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&ORACLE_STALE_SECS)
+            .unwrap_or(DEFAULT_ORACLE_STALE_SECS)
+    }
+
+    /// #777: admin setter — fallback collateral price for `token`, used by
+    /// `get_asset_price()` when the Reflector oracle is unconfigured,
+    /// returns no price, or its price is stale. Must be set using the same
+    /// scale (decimals) as the configured Reflector oracle's `lastprice()`
+    /// so collateral valuations stay consistent across the fallback.
+    pub fn set_fallback_price(
+        env: Env,
+        admin: Address,
+        token: Address,
+        price: i128,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if price <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut prices: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&ORACLE_FALLBACK_PX)
+            .unwrap_or_else(|| Map::new(&env));
+        prices.set(token.clone(), price);
+        env.storage().instance().set(&ORACLE_FALLBACK_PX, &prices);
+        env.events()
+            .publish((EVT, symbol_short!("fb_price")), (admin, token, price));
+        Ok(())
+    }
+
+    /// #777: currently configured admin fallback price for `token`, if any.
+    pub fn get_fallback_price(env: Env, token: Address) -> Option<i128> {
+        let prices: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&ORACLE_FALLBACK_PX)
+            .unwrap_or_else(|| Map::new(&env));
+        prices.get(token)
+    }
+
+    /// #777: collateral price for `token`. Tries the configured Reflector
+    /// Oracle first (`ReflectorAsset::Stellar(token)`); if the oracle is
+    /// unconfigured, returns no price, or the price is older than
+    /// `get_oracle_stale_threshold()`, falls back to the admin-set price
+    /// from `set_fallback_price()`. Returns `OraclePriceUnavailable` if
+    /// neither source has a usable price.
+    pub fn get_asset_price(env: Env, token: Address) -> Result<i128, PoolError> {
+        if let Some(oracle) = Self::get_oracle_contract(env.clone()) {
+            let reflector = ReflectorClient::new(&env, &oracle);
+            if let Some(price_data) = reflector.lastprice(&ReflectorAsset::Stellar(token.clone())) {
+                let now = env.ledger().timestamp();
+                let age = now.saturating_sub(price_data.timestamp);
+                if age <= Self::get_oracle_stale_threshold(env.clone()) {
+                    return Ok(price_data.price);
+                }
+            }
+        }
+        Self::get_fallback_price(env, token).ok_or(PoolError::OraclePriceUnavailable)
+    }
+
     /// #275: returns utilization for a token in basis points (0-10_000).
     pub fn get_utilization(env: Env, token: Address) -> u32 {
         let tt = Self::get_token_totals(env, token);
@@ -6490,6 +6637,32 @@ mod test {
     }
     pub use dummy_invoice_contract::{DummyInvoice, DummyInvoiceClient};
 
+    /// #777: mock Reflector-compatible oracle for testing `get_asset_price()`.
+    mod mock_reflector_contract {
+        use super::*;
+
+        #[contract]
+        pub struct MockReflector;
+        #[contractimpl]
+        impl MockReflector {
+            pub fn set_price(env: Env, asset: ReflectorAsset, price: i128, timestamp: u64) {
+                let ReflectorAsset::Stellar(token) = asset else {
+                    panic!("mock only supports Stellar assets");
+                };
+                env.storage()
+                    .persistent()
+                    .set(&token, &ReflectorPriceData { price, timestamp });
+            }
+            pub fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPriceData> {
+                let ReflectorAsset::Stellar(token) = asset else {
+                    return None;
+                };
+                env.storage().persistent().get(&token)
+            }
+        }
+    }
+    pub use mock_reflector_contract::{MockReflector, MockReflectorClient};
+
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
         let contract_id = env.register(FundingPool, ());
@@ -6934,6 +7107,91 @@ mod test {
         let unknown_token = Address::generate(&env);
         let result = client.try_deposit(&investor, &unknown_token, &1_000i128);
         assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+    }
+
+    #[test]
+    fn test_get_pool_balance_reflects_direct_token_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+
+        // Sanity: nothing deposited yet.
+        assert_eq!(client.get_pool_balance(&usdc_id), 0);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 0);
+
+        // Tokens sent directly to the pool contract address, bypassing
+        // deposit() entirely (e.g. a donation or accidental transfer).
+        mint(&env, &usdc_id, &client.address, 5_000i128);
+
+        // get_pool_balance() must reflect the live token balance immediately,
+        // even though the internal `pool_value` counter (deposited/deployed
+        // capital accounting) never saw this transfer since deposit() was
+        // never called.
+        assert_eq!(client.get_pool_balance(&usdc_id), 5_000i128);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 0);
+    }
+
+    #[test]
+    fn test_get_asset_price_uses_fresh_reflector_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        let oracle_id = env.register(MockReflector, ());
+        let oracle_client = MockReflectorClient::new(&env, &oracle_id);
+        client.set_oracle_contract(&admin, &oracle_id);
+
+        let now = env.ledger().timestamp();
+        oracle_client.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
+
+        assert_eq!(client.get_asset_price(&usdc_id), 1_000_000i128);
+    }
+
+    #[test]
+    fn test_get_asset_price_falls_back_when_reflector_price_is_stale() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        let oracle_id = env.register(MockReflector, ());
+        let oracle_client = MockReflectorClient::new(&env, &oracle_id);
+        client.set_oracle_contract(&admin, &oracle_id);
+        client.set_fallback_price(&admin, &usdc_id, &500_000i128);
+
+        // Default staleness threshold is 3600s; this price is 7200s old.
+        let now = env.ledger().timestamp();
+        oracle_client.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now.saturating_sub(7_200),
+        );
+
+        assert_eq!(client.get_asset_price(&usdc_id), 500_000i128);
+    }
+
+    #[test]
+    fn test_get_asset_price_falls_back_when_oracle_unconfigured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        client.set_fallback_price(&admin, &usdc_id, &250_000i128);
+
+        assert_eq!(client.get_asset_price(&usdc_id), 250_000i128);
+    }
+
+    #[test]
+    fn test_get_asset_price_errors_when_no_price_available() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+
+        let result = client.try_get_asset_price(&usdc_id);
+        assert_eq!(result, Err(Ok(PoolError::OraclePriceUnavailable)));
     }
 
     #[test]

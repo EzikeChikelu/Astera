@@ -12,14 +12,33 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
+// #765: base URL used to resolve relative OG/Twitter image paths into the
+// absolute URLs social platforms require. Falls back to the Vercel preview
+// URL, then localhost, so previews still render correctly in development.
+const APP_URL =
+  process.env.NEXT_PUBLIC_APP_URL ??
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+
+const SITE_TITLE = 'Astera — Real World Assets on Stellar';
+const SITE_DESCRIPTION =
+  'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.';
+
 export const metadata: Metadata = {
-  title: 'Astera — Real World Assets on Stellar',
-  description:
-    'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.',
+  metadataBase: new URL(APP_URL),
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
   openGraph: {
-    title: 'Astera',
-    description: 'Invoice financing for emerging markets, powered by Stellar.',
+    type: 'website',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
     siteName: 'Astera',
+    images: [{ url: '/og-image.png', width: 1200, height: 630, alt: SITE_TITLE }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: ['/og-image.png'],
   },
 };
 

@@ -400,11 +400,30 @@ export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   const raw = scValToNative(result!.retval) as Record<string, unknown>;
   return {
-    totalDeposited: BigInt(raw.total_deposited as string),
+    // Rust struct field is `pool_value` (normalized deposited/deployed
+    // capital across accepted tokens), not `total_deposited`.
+    totalDeposited: BigInt(raw.pool_value as string),
     totalDeployed: BigInt(raw.total_deployed as string),
     totalPaidOut: BigInt(raw.total_paid_out as string),
     totalFeeRevenue: BigInt((raw.total_fee_revenue as string | number | bigint) ?? 0),
   };
+}
+
+/**
+ * #776: live on-chain token balance held by the pool contract, read
+ * directly from the token contract rather than from the normalized
+ * `pool_value`/`total_deployed` accounting in `getPoolTokenTotals()`.
+ */
+export async function getPoolBalance(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_pool_balance',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval) ?? 0));
 }
 
 export async function getTokenDepositCap(token: string): Promise<bigint> {

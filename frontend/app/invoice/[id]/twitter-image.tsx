@@ -5,9 +5,10 @@ export const alt = 'Astera Invoice';
 export const size = OG_IMAGE_SIZE;
 export const contentType = 'image/png';
 
-// #765: dynamic per-invoice OG image showing amount, token, and status, so
-// shared invoice links render a rich preview instead of the generic
-// site-wide default.
+// #765: Twitter Card counterpart of ./opengraph-image.tsx — Next.js does not
+// fall back to a route's own opengraph-image for the Twitter card, so this
+// mirrors it to make sure the per-invoice image (not the site-wide default)
+// shows up when invoice links are shared on Twitter/X.
 export default async function Image({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
