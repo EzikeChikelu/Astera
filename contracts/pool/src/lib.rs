@@ -617,6 +617,14 @@ pub struct CollateralDeposit {
     pub released_at: u64,
     /// When the collateral was seized after default (0 = not seized).
     pub seized_at: u64,
+    // #764: the CollateralConfig in effect when this deposit was made,
+    // snapshotted so a later admin change to the pool's collateral ratio
+    // can't retroactively make an already-posted deposit "insufficient" at
+    // funding time. fund_invoice_request validates the deposit against
+    // *this* snapshot, not whatever CollateralConfig is live when funding
+    // is attempted.
+    pub collateral_bps_at_deposit: u32,
+    pub threshold_at_deposit: i128,
 }
 
 #[contracttype]
@@ -704,15 +712,20 @@ pub enum DataKey {
     // #863: timestamp of the last executed rate-model change per token —
     // enforces the same cooldown pattern as yield changes.
     RateModelChangedAt(Address),
-    // #863: rate-history ring buffer bookkeeping (token -> length / start),
-    // mirroring the InflowHistory pattern above.
-    RateHistoryLen(Address),
-    RateHistoryStart(Address),
+    // #863: rate-history ring buffer bookkeeping (token -> (length, start)),
+    // mirroring the InflowHistory pattern above. Combined into one (u32, u32)
+    // tuple (rather than two separate keys) to stay within the #[contracttype]
+    // union's 50-case cap alongside #866's InsuranceContract addition.
+    RateHistoryBounds(Address),
     // #863: individual rate-history ring-buffer slot: (token, slot_index) -> RateSnapshot.
     RateRecord(Address, u32),
+    // #866: optional default-insurance reserve integration
+    InsuranceContract,
 }
 
 const EVT: Symbol = symbol_short!("pool");
+// #799: referral registry contract address, if configured.
+const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
@@ -774,6 +787,64 @@ pub struct ReflectorPriceData {
 #[contractclient(name = "ReflectorClient")]
 pub trait ReflectorContract {
     fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPriceData>;
+}
+
+/// Cross-contract interface to the optional default-insurance reserve (#866).
+///
+/// `file_claim` is deliberately *not* declared/called here: Soroban disallows
+/// A→B→A re-entrancy, and `insurance.file_claim` itself calls back into this
+/// pool contract (`get_funded_invoice`, `get_collateral_deposit`,
+/// `receive_insurance_payout`) to independently re-derive the shortfall. If
+/// pool called `file_claim` from inside `execute_seize_collateral`, that
+/// callback into pool while pool is still on the call stack would trap. This
+/// is exactly why `file_claim` is designed to be permissionless — anyone
+/// (a keeper, the SME, the frontend) calls it directly against the insurance
+/// contract as a follow-up transaction after collateral has been seized.
+#[contractclient(name = "InsuranceClient")]
+pub trait InsuranceContract {
+    fn purchase_coverage(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        principal: i128,
+        sme: Address,
+        due_date: u64,
+        token: Address,
+    ) -> InsuranceCoverageRecord;
+}
+
+/// Local mirror of insurance::CoverageRecord. Cross-contract return-value
+/// decoding requires the field set to match exactly (not a subset) — unlike
+/// struct *arguments*, which do tolerate extra fields on the callee's side —
+/// so every field must be reproduced here even though pool only reads
+/// `premium_paid` (to keep protocol_revenue accounting in sync with what was
+/// actually drawn).
+#[contracttype]
+#[derive(Clone)]
+pub struct InsuranceCoverageRecord {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub principal: i128,
+    pub premium_paid: i128,
+    pub coverage_bps: u32,
+    pub purchased_at: u64,
+    pub claimed: bool,
+}
+
+/// #799: cross-contract interface to the referral program. `kind` is
+/// `"borrow"` or `"deposit"`; returns the reward amount (if any) credited
+/// to the referee's referrer, which the pool must then transfer to the
+/// referral contract.
+#[contractclient(name = "ReferralClient")]
+pub trait ReferralContract {
+    fn record_activity(
+        env: Env,
+        caller: Address,
+        referee: Address,
+        kind: Symbol,
+        fee_amount: i128,
+        token: Address,
+    ) -> i128;
 }
 
 // Cache for config to reduce storage reads
@@ -1013,10 +1084,8 @@ fn record_rate_snapshot(env: &Env, token: &Address) {
     let util = utilization_bps(&tt);
     let rate = compute_current_rate(util, &model);
 
-    let len_key = DataKey::RateHistoryLen(token.clone());
-    let start_key = DataKey::RateHistoryStart(token.clone());
-    let len: u32 = env.storage().instance().get(&len_key).unwrap_or(0);
-    let start: u32 = env.storage().instance().get(&start_key).unwrap_or(0);
+    let bounds_key = DataKey::RateHistoryBounds(token.clone());
+    let (len, start): (u32, u32) = env.storage().instance().get(&bounds_key).unwrap_or((0, 0));
 
     // Collapse consecutive duplicates: read the newest slot if any.
     if len > 0 {
@@ -1041,13 +1110,17 @@ fn record_rate_snapshot(env: &Env, token: &Address) {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), len), &snapshot);
-        env.storage().instance().set(&len_key, &(len + 1));
+        env.storage()
+            .instance()
+            .set(&bounds_key, &(len + 1, start));
     } else {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), start), &snapshot);
         let new_start = (start + 1) % MAX_RATE_HISTORY;
-        env.storage().instance().set(&start_key, &new_start);
+        env.storage()
+            .instance()
+            .set(&bounds_key, &(len, new_start));
     }
 
     // Indexed off-chain into a time-series table for the rate-history API.
@@ -3140,20 +3213,38 @@ impl FundingPool {
             .ok_or(PoolError::NotInitialized)?;
 
         // Collateral check: high-value invoices must have collateral deposited first.
-        let collateral_cfg: CollateralConfig = env
+        let deposit: Option<CollateralDeposit> = env
             .storage()
-            .instance()
-            .get(&DataKey::CollateralConfig)
-            .unwrap_or(CollateralConfig {
-                threshold: DEFAULT_COLLATERAL_THRESHOLD,
-                collateral_bps: DEFAULT_COLLATERAL_BPS,
-            });
-        let req_collateral = required_collateral(principal, &collateral_cfg);
+            .persistent()
+            .get(&DataKey::CollateralDeposit(invoice_id));
+
+        // #764: if collateral was already deposited, validate against the
+        // CollateralConfig snapshotted at deposit time, not whatever is live
+        // now — a later admin change to collateral_bps must not retroactively
+        // invalidate a deposit the SME already posted in good faith. An
+        // invoice with no deposit at all has no prior commitment to honor,
+        // so it falls back to whatever config is live right now.
+        let req_collateral = match &deposit {
+            Some(d) => required_collateral(
+                principal,
+                &CollateralConfig {
+                    threshold: d.threshold_at_deposit,
+                    collateral_bps: d.collateral_bps_at_deposit,
+                },
+            ),
+            None => {
+                let collateral_cfg: CollateralConfig = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::CollateralConfig)
+                    .unwrap_or(CollateralConfig {
+                        threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                        collateral_bps: DEFAULT_COLLATERAL_BPS,
+                    });
+                required_collateral(principal, &collateral_cfg)
+            }
+        };
         if req_collateral > 0 {
-            let deposit: Option<CollateralDeposit> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::CollateralDeposit(invoice_id));
             match deposit {
                 None => return Err(PoolError::CollateralNotFound),
                 Some(d) => {
@@ -3661,6 +3752,18 @@ impl FundingPool {
             let token_client = token::Client::new(&env, &token);
             token_client.transfer(&depositor, &env.current_contract_address(), &amount);
 
+            // #764: snapshot the collateral config in effect right now, so a
+            // later admin change to collateral_bps can't retroactively make
+            // this deposit "insufficient" when fund_invoice_request checks it.
+            let collateral_cfg: CollateralConfig = env
+                .storage()
+                .instance()
+                .get(&DataKey::CollateralConfig)
+                .unwrap_or(CollateralConfig {
+                    threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                    collateral_bps: DEFAULT_COLLATERAL_BPS,
+                });
+
             let record = CollateralDeposit {
                 invoice_id,
                 depositor: depositor.clone(),
@@ -3670,6 +3773,8 @@ impl FundingPool {
                 posted_at: env.ledger().timestamp(),
                 released_at: 0,
                 seized_at: 0,
+                collateral_bps_at_deposit: collateral_cfg.collateral_bps,
+                threshold_at_deposit: collateral_cfg.threshold,
             };
             env.storage()
                 .persistent()
@@ -4126,19 +4231,14 @@ impl FundingPool {
     /// chronological (oldest-first) order — ready for the frontend chart.
     pub fn get_rate_history(env: Env, token: Address, limit: u32) -> Vec<RateSnapshot> {
         let mut out = Vec::new(&env);
-        let len: u32 = env
+        let (len, start): (u32, u32) = env
             .storage()
             .instance()
-            .get(&DataKey::RateHistoryLen(token.clone()))
-            .unwrap_or(0);
+            .get(&DataKey::RateHistoryBounds(token.clone()))
+            .unwrap_or((0, 0));
         if len == 0 || limit == 0 {
             return out;
         }
-        let start: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RateHistoryStart(token.clone()))
-            .unwrap_or(0);
         let take = len.min(limit);
         // Skip the oldest `len - take` samples so the most recent `take` remain.
         let skip = len - take;

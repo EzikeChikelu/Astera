@@ -165,6 +165,9 @@ pub enum InvoiceError {
     ComplianceRegistryNotConfigured = 40,
     // #766: per-address daily invoice creation rate limit exceeded
     RateLimitExceeded = 41,
+    // #798: create_invoice() input validation
+    InvalidAmount = 42,
+    InvalidDueDate = 43,
 }
 
 #[contracttype]
@@ -296,7 +299,6 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
-    Dispute(u64),
     ContractVersion,
     MigrationVersion,
     RequireRegisteredDebtor,
@@ -324,6 +326,11 @@ pub enum DataKey {
     RequireComplianceCheck,
     // Tracks cumulative funded amount across partial fundings
     InvoiceFunding(u64),
+    // #820: keeper addresses authorized to call mark_defaulted() on behalf of
+    // an automated monitor (e.g. Stellar Turrets), in addition to the pool contract.
+    KeeperIds,
+    // #775: borrower opt-out from the public invoice sharing link
+    Private(u64),
 }
 
 const EVT: Symbol = symbol_short!("invoice");
@@ -3070,7 +3077,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        Env,
+        Env, IntoVal,
     };
 
     mod mock_pool_true {
