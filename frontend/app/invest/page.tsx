@@ -9,6 +9,7 @@ import { PoolStatsSkeleton } from '@/components/PoolStats';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
 import { ScenarioModeler } from '@/components/ScenarioModeler';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getPoolConfig,
   getInvestorPosition,
@@ -42,6 +43,10 @@ export default function InvestPage() {
   const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirmed' | 'failed'>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
+  // #780: withdrawals sign and submit immediately with no chance to back out —
+  // route them through a confirmation dialog first (deposits stay direct, since
+  // they're easily reversed by a later withdrawal).
+  const [confirmWithdrawOpen, setConfirmWithdrawOpen] = useState(false);
 
   const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
   const [selectedToken, setSelectedToken] = useState<string>('');
@@ -241,6 +246,15 @@ export default function InvestPage() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (mode === 'withdraw') {
+      setConfirmWithdrawOpen(true);
+      return;
+    }
+    await submitTransaction();
+  }
+
+  async function handleConfirmWithdraw() {
+    setConfirmWithdrawOpen(false);
     await submitTransaction();
   }
 
@@ -547,6 +561,16 @@ export default function InvestPage() {
           />
         </section>
       </div>
+
+      <ConfirmActionModal
+        title={`Withdraw ${amount ? formatUSDC(toStroops(parseFloat(amount))) : ''} ${stablecoinLabel(selectedToken)}`}
+        description="This will submit an on-chain withdrawal from the pool for wallet signing. Withdrawn funds leave the pool immediately and stop earning yield. This action cannot be undone."
+        onConfirm={() => void handleConfirmWithdraw()}
+        onCancel={() => setConfirmWithdrawOpen(false)}
+        variant="destructive"
+        isOpen={confirmWithdrawOpen}
+        confirmLabel="Withdraw"
+      />
     </div>
   );
 }

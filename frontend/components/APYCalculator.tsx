@@ -8,6 +8,7 @@ import { formatApyPercent, projectedInterestStroops } from '@/lib/apy';
 import { formatUSDC, toStroops } from '@/lib/stellar';
 import { getCurrentRate } from '@/lib/contracts';
 import { Skeleton } from '@/components/Skeleton';
+import { RetryIndicator } from '@/components/RetryIndicator';
 
 const DEFAULT_LOCK_DAYS = '30';
 const DEFAULT_YIELD_BPS = 800;
@@ -23,16 +24,16 @@ const DEFAULT_YIELD_BPS = 800;
  * model configured, the live curve rate (`get_current_rate`) is used instead of
  * the flat `yield_bps`, so projections track real-time supply/demand.
  */
-export function APYCalculator({
-  className = '',
-  token,
-}: {
-  className?: string;
-  token?: string;
-}) {
+export function APYCalculator({ className = '', token }: { className?: string; token?: string }) {
   const [depositInput, setDepositInput] = useState('');
   const [lockDaysInput, setLockDaysInput] = useState(DEFAULT_LOCK_DAYS);
-  const { data: poolConfig, isLoading } = usePoolConfig();
+  const {
+    data: poolConfig,
+    isLoading,
+    error: poolConfigError,
+    isValidating: isPoolConfigValidating,
+    mutate: retryPoolConfig,
+  } = usePoolConfig();
   const [liveCurveRate, setLiveCurveRate] = useState<number | null>(null);
 
   useEffect(() => {
@@ -85,7 +86,9 @@ export function APYCalculator({
   }
 
   return (
-    <div className={`p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl ${className}`.trim()}>
+    <div
+      className={`p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl ${className}`.trim()}
+    >
       <h2 className="text-lg font-semibold mb-1 text-[var(--text-primary)]">Earnings calculator</h2>
       <p className="text-xs text-[var(--muted)] mb-4">
         Model projected returns using the pool&apos;s{' '}
@@ -157,12 +160,21 @@ export function APYCalculator({
           {formatApyPercent(DEFAULT_YIELD_BPS)}%.
         </p>
       )}
+      <RetryIndicator
+        error={poolConfigError}
+        isValidating={isPoolConfigValidating}
+        onRetry={() => retryPoolConfig?.()}
+        className="mt-2"
+      />
 
       <p className="mt-4 text-xs text-[var(--muted)] leading-relaxed border-t border-[var(--border)] pt-4">
         <strong className="text-[var(--muted)]">Disclaimer:</strong> This projection uses the
-        pool&apos;s {liveCurveRate !== null ? 'live curve rate at current utilization' : 'configured yield rate'} and assumes continuous linear accrual like on-chain
-        invoice interest. Actual returns depend on invoice repayment timing, utilization, and pool
-        parameters -- nothing is guaranteed.
+        pool&apos;s{' '}
+        {liveCurveRate !== null
+          ? 'live curve rate at current utilization'
+          : 'configured yield rate'}{' '}
+        and assumes continuous linear accrual like on-chain invoice interest. Actual returns depend
+        on invoice repayment timing, utilization, and pool parameters -- nothing is guaranteed.
       </p>
     </div>
   );

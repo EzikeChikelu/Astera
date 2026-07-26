@@ -3,6 +3,8 @@ type EnvConfig = {
   NEXT_PUBLIC_POOL_CONTRACT_ID: string;
   NEXT_PUBLIC_USDC_TOKEN_ID: string;
   NEXT_PUBLIC_EURC_TOKEN_ID?: string;
+  // #799: optional — the referral program is opt-in on the pool contract.
+  NEXT_PUBLIC_REFERRAL_CONTRACT_ID?: string;
   NEXT_PUBLIC_NETWORK: 'testnet' | 'mainnet' | 'standalone';
   NEXT_PUBLIC_HORIZON_URL?: string;
   NEXT_PUBLIC_SOROBAN_RPC_URL?: string;
@@ -96,6 +98,12 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
     if (eurcError) errors.push(eurcError);
   }
 
+  const referralId = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID;
+  if (referralId) {
+    const referralError = validateContractId(referralId, 'NEXT_PUBLIC_REFERRAL_CONTRACT_ID');
+    if (referralError) errors.push(referralError);
+  }
+
   const networkError = validateNetwork(network);
   if (networkError) errors.push(networkError);
 
@@ -117,6 +125,7 @@ export function getEnvConfig(): EnvConfig {
     NEXT_PUBLIC_POOL_CONTRACT_ID: process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || '',
     NEXT_PUBLIC_USDC_TOKEN_ID: process.env.NEXT_PUBLIC_USDC_TOKEN_ID || '',
     NEXT_PUBLIC_EURC_TOKEN_ID: process.env.NEXT_PUBLIC_EURC_TOKEN_ID,
+    NEXT_PUBLIC_REFERRAL_CONTRACT_ID: process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID,
     NEXT_PUBLIC_NETWORK: network,
     NEXT_PUBLIC_HORIZON_URL: process.env.NEXT_PUBLIC_HORIZON_URL,
     NEXT_PUBLIC_SOROBAN_RPC_URL: process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,

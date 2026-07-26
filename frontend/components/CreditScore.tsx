@@ -61,10 +61,23 @@ export default function CreditScore({
   const score = Math.round(300 + repaymentRate * 500 + volumeBonus);
 
   const scoreChange = previousScore ? score - previousScore : null;
-  const scoreColor =
-    score >= 750 ? 'text-green-400' : score >= 600 ? 'text-yellow-400' : 'text-red-400';
-  const scoreLabel =
-    score >= 750 ? 'Excellent' : score >= 650 ? 'Good' : score >= 550 ? 'Fair' : 'Building';
+  const hasHistory = total > 0;
+  const scoreColor = !hasHistory
+    ? 'text-[var(--muted)]'
+    : score >= 750
+      ? 'text-green-400'
+      : score >= 600
+        ? 'text-yellow-400'
+        : 'text-red-400';
+  const scoreLabel = !hasHistory
+    ? 'No history'
+    : score >= 750
+      ? 'Excellent'
+      : score >= 650
+        ? 'Good'
+        : score >= 550
+          ? 'Fair'
+          : 'Building';
 
   const arc = Math.round(((score - 300) / 550) * 180);
 

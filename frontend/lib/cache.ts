@@ -17,6 +17,9 @@ import {
   buildMarkDefaultedTx,
   buildSetYieldTx,
   submitTx,
+  getReferrer,
+  getReferralStats,
+  buildRegisterReferralTx,
 } from './contracts';
 import type {
   Invoice,
@@ -25,6 +28,7 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   InvoiceMetadata,
+  ReferralStats,
 } from './types';
 
 type SWRCacheEntry = {
@@ -85,6 +89,12 @@ export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
     dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  referral: {
+    refreshInterval: CACHE_TTL.creditScore,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.creditScore,
   },
 };
 
@@ -198,6 +208,50 @@ export function useFundedInvoice(invoiceId: number | null) {
     },
   );
 }
+
+// ---- #799: Referral Program Cache ----
+
+export function useReferrer(referee: string | null) {
+  return useSWR<string | null, ContractError>(
+    referee ? ['referrer', referee] : null,
+    () => fetcher(() => getReferrer(referee!)),
+    {
+      ...CACHE_CONFIG.referral,
+    },
+  );
+}
+
+export function useReferralStats(referrer: string | null) {
+  return useSWR<ReferralStats, ContractError>(
+    referrer ? ['referral-stats', referrer] : null,
+    () => fetcher(() => getReferralStats(referrer!)),
+    {
+      ...CACHE_CONFIG.referral,
+    },
+  );
+}
+
+async function registerReferralMutation(
+  _: string,
+  { arg }: { arg: { referee: string; referrer: string; signedXdr: string } },
+) {
+  return submitTx(arg.signedXdr);
+}
+
+export function useRegisterReferral(referee: string) {
+  return useSWRMutation<
+    unknown,
+    ContractError,
+    string,
+    { referee: string; referrer: string; signedXdr: string }
+  >('register-referral', registerReferralMutation, {
+    onSuccess: () => {
+      mutate(['referrer', referee]);
+    },
+  });
+}
+
+export { buildRegisterReferralTx };
 
 // ---- Mutations with Cache Invalidation ----
 
@@ -354,9 +408,3 @@ export function getPositionCacheKeys(investor?: string, token?: string) {
 
   return keys;
 }
-
-// Export SWR provider config for app setup
-export const swrConfig = {
-  provider: () => new Map(),
-  ...CACHE_CONFIG.invoice,
-};
