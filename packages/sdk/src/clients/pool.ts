@@ -123,6 +123,9 @@ export class PoolClient extends BaseClient {
     investor: string;
     token: string;
     amount: bigint;
+    /** #992: reverts with RateBelowMinimum if the current rate has dropped
+     * below this since the caller last simulated the deposit. */
+    minRate?: number;
     onProgress?: (progress: TransactionProgress) => void;
   }): Promise<string> {
     return this.buildAndSendTx(
@@ -132,6 +135,9 @@ export class PoolClient extends BaseClient {
         new Address(params.investor).toScVal(),
         new Address(params.token).toScVal(),
         nativeToScVal(params.amount, { type: 'i128' }),
+        params.minRate === undefined
+          ? xdr.ScVal.scvVoid()
+          : nativeToScVal(params.minRate, { type: 'u32' }),
       ],
       params.onProgress,
     );

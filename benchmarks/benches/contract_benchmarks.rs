@@ -110,7 +110,7 @@ fn bench_deposit(c: &mut Criterion) {
             },
             |(env, client, investor)| {
                 let amount = black_box(1_000_000_000i128);
-                client.deposit(&investor, &amount)
+                client.deposit(&investor, &amount, &None)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -128,7 +128,7 @@ fn bench_commit_to_invoice(c: &mut Criterion) {
                 // Mint and deposit USDC
                 soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
                     .mint(&investor, &5_000_000_000);
-                client.deposit(&investor, &3_000_000_000);
+                client.deposit(&investor, &3_000_000_000, &None);
 
                 // Initialize co-funding
                 let invoice_id = 1u64;
@@ -161,7 +161,7 @@ fn bench_repay_invoice(c: &mut Criterion) {
                 token_client.mint(&sme, &4_000_000_000);
 
                 // Deposit and fund invoice
-                client.deposit(&investor, &3_000_000_000);
+                client.deposit(&investor, &3_000_000_000, &None);
                 let invoice_id = 1u64;
                 let principal = 3_000_000_000i128;
                 let due_date = env.ledger().timestamp() + 2_592_000;

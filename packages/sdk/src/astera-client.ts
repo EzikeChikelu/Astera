@@ -110,6 +110,7 @@ export class AsteraClient {
       investor: string;
       token: string;
       amount: bigint;
+      minRate?: number;
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.poolClient.deposit(params),
