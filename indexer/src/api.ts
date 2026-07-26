@@ -21,6 +21,7 @@ export function startApiServer(db: Database.Database, port: number): void {
       const {
         contract_id,
         event_type,
+        actor_address,
         limit = '50',
         offset = '0',
       } = req.query;
@@ -28,11 +29,30 @@ export function startApiServer(db: Database.Database, port: number): void {
       const events = getEvents(db, {
         contractId: contract_id as string | undefined,
         eventType: event_type as string | undefined,
+        actorAddress: actor_address as string | undefined,
         limit: parseInt(limit as string, 10),
         offset: parseInt(offset as string, 10),
       });
 
       res.json({ events, count: events.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get events by actor address
+  app.get('/events/actor/:actorAddress', (req, res) => {
+    try {
+      const { actorAddress } = req.params;
+      const { limit = '50', offset = '0' } = req.query;
+
+      const events = getEvents(db, {
+        actorAddress,
+        limit: parseInt(limit as string, 10),
+        offset: parseInt(offset as string, 10),
+      });
+
+      res.json({ actorAddress, events, count: events.length });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

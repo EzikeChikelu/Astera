@@ -18,6 +18,7 @@ export function initDb(dbPath: string): Database.Database {
       event_type TEXT NOT NULL,
       topic TEXT NOT NULL,
       value TEXT,
+      actor_address TEXT,
       ledger_sequence INTEGER NOT NULL,
       ledger_close_at TEXT NOT NULL,
       tx_hash TEXT NOT NULL,
@@ -30,6 +31,8 @@ export function initDb(dbPath: string): Database.Database {
       ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_events_ledger
       ON events(ledger_sequence);
+    CREATE INDEX IF NOT EXISTS idx_events_actor
+      ON events(actor_address);
   `);
 
   return db;
@@ -40,9 +43,9 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
 
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO events
-      (id, contract_id, event_type, topic, value, ledger_sequence, ledger_close_at, tx_hash, created_at)
+      (id, contract_id, event_type, topic, value, actor_address, ledger_sequence, ledger_close_at, tx_hash, created_at)
     VALUES
-      (@id, @contractId, @eventType, @topic, @value, @ledgerSequence, @ledgerCloseAt, @txHash, @createdAt)
+      (@id, @contractId, @eventType, @topic, @value, @actorAddress, @ledgerSequence, @ledgerCloseAt, @txHash, @createdAt)
   `);
 
   const insertMany = db.transaction((events: IndexedEvent[]) => {
@@ -53,6 +56,7 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
         eventType: event.eventType,
         topic: JSON.stringify(event.topic),
         value: JSON.stringify(event.value),
+        actorAddress: event.actor,
         ledgerSequence: event.ledgerSequence,
         ledgerCloseAt: event.ledgerCloseAt,
         txHash: event.txHash,
@@ -69,11 +73,12 @@ export function getEvents(
   options: {
     contractId?: string;
     eventType?: string;
+    actorAddress?: string;
     limit?: number;
     offset?: number;
   } = {}
 ): IndexedEvent[] {
-  const { contractId, eventType, limit = 50, offset = 0 } = options;
+  const { contractId, eventType, actorAddress, limit = 50, offset = 0 } = options;
 
   let query = 'SELECT * FROM events WHERE 1=1';
   const params: any[] = [];
@@ -88,6 +93,11 @@ export function getEvents(
     params.push(eventType);
   }
 
+  if (actorAddress) {
+    query += ' AND actor_address = ?';
+    params.push(actorAddress);
+  }
+
   query += ' ORDER BY ledger_sequence DESC LIMIT ? OFFSET ?';
   params.push(limit, offset);
 
@@ -99,6 +109,7 @@ export function getEvents(
     eventType: row.event_type,
     topic: JSON.parse(row.topic),
     value: row.value ? JSON.parse(row.value) : null,
+    actor: row.actor_address,
     ledgerSequence: row.ledger_sequence,
     ledgerCloseAt: row.ledger_close_at,
     txHash: row.tx_hash,

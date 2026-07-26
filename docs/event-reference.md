@@ -13,8 +13,8 @@ All contract events follow a consistent schema:
 |-------|--------|-------------|------|
 | `created` | `["INVOICE", "created"]` | `(id: u64, owner: Address, amount: i128, metadata_uri: Option<String>, timestamp: u64)` | SME mints a new invoice |
 | `funded` | `["INVOICE", "funded"]` | `(id: u64, pool: Address, timestamp: u64)` | Pool marks invoice as funded |
-| `paid` | `["INVOICE", "paid"]` | `(id: u64, timestamp: u64)` | Invoice fully repaid |
-| `defaulted` | `["INVOICE", "defaulted"]` | `(id: u64, timestamp: u64)` | Invoice marked defaulted |
+| `paid` | `["INVOICE", "paid"]` | `(id: u64, pool: Address, timestamp: u64)` | Pool marks invoice as fully repaid |
+| `defaulted` | `["INVOICE", "defaulted"]` | `(id: u64, pool: Address, timestamp: u64)` | Pool marks invoice defaulted |
 | `verified` | `["INVOICE", "verified"]` | `(id: u64, oracle_hash: String, timestamp: u64)` | Oracle approves invoice |
 | `disputed` | `["INVOICE", "disputed"]` | `(id: u64, timestamp: u64)` | Oracle rejects / dispute raised |
 | `paused` | `["INVOICE", "paused"]` | `(admin: Address, timestamp: u64)` | Admin pauses contract |
@@ -26,11 +26,11 @@ All contract events follow a consistent schema:
 
 | Event | Topics | Data Fields | When |
 |-------|--------|-------------|------|
-| `deposit` | `["POOL", "deposit"]` | `(investor: Address, amount: i128, shares: i128, timestamp: u64)` | Investor deposits stablecoin |
-| `withdraw` | `["POOL", "withdraw"]` | `(investor: Address, amount: i128, shares: i128, timestamp: u64)` | Investor withdraws |
+| `deposit` | `["POOL", "deposit"]` | `(investor: Address, token: Address, amount: i128, shares: i128, timestamp: u64)` | Investor deposits stablecoin |
+| `withdraw` | `["POOL", "withdraw"]` | `(investor: Address, token: Address, amount: i128, shares: i128, timestamp: u64)` | Investor withdraws |
 | `funded` | `["POOL", "funded"]` | `(invoice_id: u64, sme: Address, principal: i128, token: Address, timestamp: u64)` | Invoice funded from pool |
-| `repaid` | `["POOL", "repaid"]` | `(invoice_id: u64, principal: i128, interest: i128, timestamp: u64)` | Invoice fully repaid |
-| `part_pay` | `["POOL", "part_pay"]` | `(invoice_id: u64, amount: i128, total_repaid: i128, timestamp: u64)` | Partial repayment received |
+| `repaid` | `["POOL", "repaid"]` | `(invoice_id: u64, payer: Address, principal: i128, interest: i128, timestamp: u64)` | Invoice fully repaid |
+| `part_pay` | `["POOL", "part_pay"]` | `(invoice_id: u64, payer: Address, amount: i128, total_repaid: i128, timestamp: u64)` | Partial repayment received |
 | `high_util` | `["POOL", "high_util"]` | `(token: Address, utilization_bps: u32, timestamp: u64)` | Utilization exceeds warning threshold (#275) |
 | `paused` | `["POOL", "paused"]` | `(admin: Address, timestamp: u64)` | Admin pauses pool |
 | `unpaused` | `["POOL", "unpaused"]` | `(admin: Address, timestamp: u64)` | Admin unpauses pool |
@@ -50,8 +50,8 @@ All contract events follow a consistent schema:
 
 | Event | Topics | Data Fields | When |
 |-------|--------|-------------|------|
-| `payment` | `["CREDIT", "payment"]` | `(sme: Address, invoice_id: u64, status: PaymentStatus, score: u32, timestamp: u64)` | Payment recorded and score updated |
-| `default` | `["CREDIT", "default"]` | `(sme: Address, invoice_id: u64, score: u32, timestamp: u64)` | Default recorded and score updated |
+| `payment` | `["CREDIT", "payment"]` | `(caller: Address, sme: Address, invoice_id: u64, status: PaymentStatus, score: u32, timestamp: u64)` | Payment recorded and score updated |
+| `default` | `["CREDIT", "default"]` | `(caller: Address, sme: Address, invoice_id: u64, score: u32, timestamp: u64)` | Default recorded and score updated |
 | `paused` | `["CREDIT", "paused"]` | `(admin: Address, timestamp: u64)` | Admin pauses contract |
 | `unpaused` | `["CREDIT", "unpaused"]` | `(admin: Address, timestamp: u64)` | Admin unpauses contract |
 

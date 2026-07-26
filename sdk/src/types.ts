@@ -84,3 +84,66 @@ export interface TransactionProgress {
   hash: string;
   error?: string;
 }
+
+// ── Event Types ──────────────────────────────────────────────────────────────
+
+export interface PoolDepositEvent {
+  depositor: string;
+  token: string;
+  amount: bigint;
+  sharesMinted: bigint;
+  timestamp: number;
+}
+
+export interface PoolWithdrawEvent {
+  withdrawer: string;
+  token: string;
+  amount: bigint;
+  sharesBurned: bigint;
+  timestamp: number;
+}
+
+export interface PoolRepaidEvent {
+  invoiceId: bigint;
+  payer: string;
+  principal: bigint;
+  interest: bigint;
+  timestamp: number;
+}
+
+export interface PoolPartPayEvent {
+  invoiceId: bigint;
+  payer: string;
+  amount: bigint;
+  totalRepaid: bigint;
+  timestamp: number;
+}
+
+export interface InvoiceFundedEvent {
+  invoiceId: bigint;
+  funder: string;
+  timestamp: number;
+}
+
+export interface InvoicePaidEvent {
+  invoiceId: bigint;
+  caller: string;
+  timestamp: number;
+}
+
+export interface CreditPaymentEvent {
+  caller: string;
+  sme: string;
+  invoiceId: bigint;
+  status: string;
+  score: number;
+  timestamp: number;
+}
+
+export interface CreditDefaultEvent {
+  caller: string;
+  sme: string;
+  invoiceId: bigint;
+  score: number;
+  timestamp: number;
+}

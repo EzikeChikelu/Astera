@@ -355,6 +355,7 @@ impl CreditScoreContract {
         env.events().publish(
             (EVT, symbol_short!("payment")),
             (
+                caller.clone(),
                 sme,
                 invoice_id,
                 status,
@@ -449,7 +450,13 @@ impl CreditScoreContract {
 
         env.events().publish(
             (EVT, symbol_short!("default")),
-            (sme, invoice_id, credit_data.score, env.ledger().timestamp()),
+            (
+                caller.clone(),
+                sme,
+                invoice_id,
+                credit_data.score,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
