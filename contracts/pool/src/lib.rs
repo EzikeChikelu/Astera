@@ -709,7 +709,7 @@ pub enum DataKey {
     RateRecord(Address, u32),
 }
 
-const EVT: Symbol = symbol_short!("POOL");
+const EVT: Symbol = symbol_short!("pool");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");

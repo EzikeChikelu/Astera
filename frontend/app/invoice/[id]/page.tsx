@@ -85,7 +85,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
     const action = scValToNative(t1) as string;
     const value = event.value ? scValToNative(event.value) : null;
 
-    if (contract === INVOICE_CONTRACT_ID && namespace === 'INVOICE') {
+    if (contract === INVOICE_CONTRACT_ID && namespace === 'invoice') {
       if (action === 'created') {
         const [id, owner, amount] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
@@ -127,7 +127,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
       }
     }
 
-    if (contract === POOL_CONTRACT_ID && namespace === 'POOL') {
+    if (contract === POOL_CONTRACT_ID && namespace === 'pool') {
       if (action === 'funded') {
         const [id] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
