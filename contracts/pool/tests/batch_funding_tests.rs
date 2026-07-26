@@ -83,14 +83,20 @@ fn seed_liquidity(env: &Env, client: &FundingPoolClient<'_>, token: &Address, am
 }
 
 #[test]
-fn test_fund_multiple_invoices_rejects_duplicate_ids() {
+fn test_fund_multiple_invoices_duplicate_ids_accumulate_principal() {
     let env = Env::default();
     env.mock_all_auths();
 
     let (client, admin, token) = setup(&env);
     let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
 
-    // Create a batch with duplicate invoice IDs
+    // Deposit enough for both fundings
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&investor, &5_000_000);
+    client.deposit(&investor, &token, &5_000_000);
+
+    // Create a batch with duplicate invoice IDs — partial funding
     let mut requests: Vec<FundingRequest> = Vec::new(&env);
     requests.push_back(FundingRequest {
         invoice_id: 1,
@@ -100,19 +106,19 @@ fn test_fund_multiple_invoices_rejects_duplicate_ids() {
         token: token.clone(),
     });
     requests.push_back(FundingRequest {
-        invoice_id: 1, // Duplicate ID
+        invoice_id: 1, // Same ID — partial funding
         principal: 2_000_000,
         sme: sme.clone(),
         due_date: 1_000_000,
         token: token.clone(),
     });
 
-    // Should fail with DuplicateInvoiceId
+    // Should succeed — duplicate IDs accumulate principal
     let result = client.try_fund_multiple_invoices(&admin, &requests);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::DuplicateInvoiceId.into()
-    );
+    assert!(result.is_ok());
+    // Verify accumulated principal on the FundedInvoice record
+    let funded = client.get_funded_invoice(&1u64).unwrap();
+    assert_eq!(funded.principal, 3_000_000);
 }
 
 #[test]
