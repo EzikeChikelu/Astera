@@ -187,6 +187,18 @@ export async function getMaxInvoiceAmount(): Promise<number> {
   return Number(scValToNative(result!.retval));
 }
 
+/** #775: whether the borrower has opted this invoice out of the public sharing link. */
+export async function isInvoicePrivate(id: number): Promise<boolean> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'is_invoice_private',
+    [nativeToScVal(id, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
 export async function buildCreateInvoiceTx(params: {
   owner: string;
   debtor: string;
@@ -1286,6 +1298,39 @@ export async function buildDisputeTx(params: {
         nativeToScVal(false, { type: 'bool' }),
         nativeToScVal(params.reason, { type: 'string' }),
         nativeToScVal(oracleHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** #775: owner-only opt in/out of the public invoice sharing link. */
+export async function buildSetInvoicePrivateTx(params: {
+  owner: string;
+  invoiceId: number;
+  private: boolean;
+}): Promise<string> {
+  const account = await getRpcAccount(params.owner);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_invoice_private',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.owner).toScVal(),
+        nativeToScVal(params.private, { type: 'bool' }),
       ),
     )
     .setTimeout(30)

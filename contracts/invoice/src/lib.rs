@@ -315,6 +315,8 @@ pub enum DataKey {
     // #867: optional compliance registry + opt-in gate
     ComplianceRegistry,
     RequireComplianceCheck,
+    // #775: borrower opt-out from the public invoice sharing link
+    Private(u64),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -1951,6 +1953,41 @@ impl InvoiceContract {
         env.storage().persistent().get(&DataKey::Dispute(id))
     }
 
+    /// #775: let the borrower opt an invoice out of the public sharing link.
+    /// Private invoices should be hidden (404) from any viewer other than
+    /// the owner on the public `/invoice/{id}` page.
+    pub fn set_invoice_private(env: Env, id: u64, owner: Address, private: bool) {
+        owner.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
+        if invoice.owner != owner {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Private(id), &private);
+
+        env.events()
+            .publish((EVT, symbol_short!("private")), (id, private));
+    }
+
+    /// Whether the invoice has been opted out of public sharing (#775).
+    /// Defaults to `false` (public) for every invoice that hasn't called
+    /// `set_invoice_private`.
+    pub fn is_invoice_private(env: Env, id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Private(id))
+            .unwrap_or(false)
+    }
+
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
         require_not_paused(&env);
@@ -3017,6 +3054,26 @@ mod test {
         client.cancel_invoice(&id, &sme);
         let removed = client.cleanup_expired_storage(&admin, &soroban_sdk::vec![&env, id]);
         assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn test_invoice_private_defaults_to_false_and_is_owner_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+
+        assert!(!client.is_invoice_private(&id));
+
+        client.set_invoice_private(&id, &sme, &true);
+        assert!(client.is_invoice_private(&id));
+
+        client.set_invoice_private(&id, &sme, &false);
+        assert!(!client.is_invoice_private(&id));
+
+        let attacker = Address::generate(&env);
+        let result = client.try_set_invoice_private(&id, &attacker, &true);
+        assert!(result.is_err());
     }
 
     #[test]
