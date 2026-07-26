@@ -3551,6 +3551,57 @@ impl FundingPool {
         })
     }
 
+    /// Adds to an active invoice's existing collateral deposit. This is kept
+    /// separate from `deposit_collateral` so the initial collateral requirement
+    /// remains a pre-funding gate while borrowers can improve their position
+    /// after funding.
+    pub fn top_up_collateral(
+        env: Env,
+        invoice_id: u64,
+        depositor: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        depositor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        non_reentrant!(&env, {
+            let key = DataKey::CollateralDeposit(invoice_id);
+            let mut record: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
+
+            if record.settled || record.depositor != depositor || record.token != token {
+                return Err(PoolError::StorageCorrupted);
+            }
+
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&depositor, &env.current_contract_address(), &amount);
+            record.amount = record
+                .amount
+                .checked_add(amount)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            env.storage().persistent().set(&key, &record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ACTIVE_INVOICE_TTL, ACTIVE_INVOICE_TTL);
+            env.events().publish(
+                (EVT, symbol_short!("col_topup")),
+                (invoice_id, depositor, token, amount, record.amount),
+            );
+            Ok(())
+        })
+    }
+
     /// Returns the collateral deposit record for an invoice, if any.
     pub fn get_collateral_deposit(env: Env, invoice_id: u64) -> Option<CollateralDeposit> {
         bump_instance(&env);
@@ -7323,6 +7374,38 @@ mod test {
         );
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert_eq!(fi.repaid_amount, 0i128);
+    }
+
+    #[test]
+    fn test_borrower_can_top_up_active_collateral() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let principal = 5_000i128;
+        let initial_collateral = 1_000i128;
+        let top_up = 500i128;
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000, 2_000);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, initial_collateral + top_up);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &initial_collateral);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        client.top_up_collateral(&1u64, &sme, &usdc_id, &top_up);
+
+        let collateral = client.get_collateral_deposit(&1u64).unwrap();
+        assert_eq!(collateral.amount, initial_collateral + top_up);
+        assert!(!collateral.settled);
     }
 
     #[test]

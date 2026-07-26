@@ -1679,6 +1679,36 @@ export async function buildDepositCollateralTx(params: {
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
+export async function buildTopUpCollateralTx(params: {
+  invoiceId: number;
+  depositor: string;
+  token: string;
+  amount: bigint;
+}): Promise<string> {
+  const account = await getRpcAccount(params.depositor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'top_up_collateral',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.depositor).toScVal(),
+        new Address(params.token).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 // ---- Credit Score Contract ----
 
 export async function getCreditScoreStatus(
