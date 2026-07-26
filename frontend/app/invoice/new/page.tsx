@@ -1,25 +1,29 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx, getMaxInvoiceAmount } from '@/lib/contracts';
 import { toStroops } from '@/lib/stellar';
+import { getInvoiceTemplate, upsertInvoiceTemplate } from '@/lib/invoiceTemplates';
 
 const MIN_AMOUNT = 10;
 const DEFAULT_MAX_AMOUNT = 1_000_000;
 const MAX_DUE_DAYS = 365;
 const MAX_DESCRIPTION_LEN = 256;
 
-function validateForm(form: {
-  debtor: string;
-  amount: string;
-  dueDate: string;
-  description: string;
-  metadataUri: string;
-}, maxAmount: number) {
+function validateForm(
+  form: {
+    debtor: string;
+    amount: string;
+    dueDate: string;
+    description: string;
+    metadataUri: string;
+  },
+  maxAmount: number,
+) {
   const errors: Record<string, string> = {};
 
   // Debtor
@@ -82,6 +86,7 @@ function validateForm(form: {
 export default function NewInvoicePage() {
   const { wallet } = useStore();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [form, setForm] = useState({
     debtor: '',
@@ -99,6 +104,42 @@ export default function NewInvoicePage() {
       .then((amount) => setMaxAmount(amount))
       .catch(() => setMaxAmount(DEFAULT_MAX_AMOUNT));
   }, []);
+
+  useEffect(() => {
+    const id = searchParams.get('template');
+    if (!id) return;
+    const template = getInvoiceTemplate(id);
+    if (!template) return;
+    const dueDate = new Date(Date.now() + template.dueDays * 86_400_000)
+      .toISOString()
+      .split('T')[0]!;
+    setForm((current) => ({
+      ...current,
+      amount: String(template.amount),
+      dueDate,
+      description: template.description,
+    }));
+    upsertInvoiceTemplate({ ...template, lastUsedAt: new Date().toISOString() });
+  }, [searchParams]);
+
+  function saveAsTemplate() {
+    const name = window.prompt('Template name');
+    if (!name?.trim()) return;
+    const dueDays = form.dueDate
+      ? Math.max(1, Math.ceil((new Date(form.dueDate).getTime() - Date.now()) / 86_400_000))
+      : 30;
+    upsertInvoiceTemplate({
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      amount: Number(form.amount) || 0,
+      token: 'USDC',
+      dueDays,
+      description: form.description,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+    });
+    toast.success('Template saved.');
+  }
 
   const errors = validateForm(form, maxAmount);
   const isValid = Object.keys(errors).length === 0;
@@ -162,9 +203,14 @@ export default function NewInvoicePage() {
           <p className="text-brand-muted">
             Mint your unpaid invoice as a Soroban RWA token to access instant liquidity.
           </p>
-          <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline mt-2 inline-block">
-            Import multiple invoices via CSV
-          </Link>
+          <div className="mt-2 flex gap-4">
+            <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline">
+              Import multiple invoices via CSV
+            </Link>
+            <Link href="/templates" className="text-sm text-brand-gold hover:underline">
+              Template library
+            </Link>
+          </div>
         </div>
 
         {!wallet.connected ? (
@@ -247,7 +293,9 @@ export default function NewInvoicePage() {
                   onChange={handleChange}
                   onBlur={handleBlur}
                   className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold resize-none ${
-                    touched.description && errors.description ? 'border-red-500' : 'border-brand-border'
+                    touched.description && errors.description
+                      ? 'border-red-500'
+                      : 'border-brand-border'
                   }`}
                 />
                 <ErrorMsg message={touched.description ? errors.description : undefined} />
@@ -293,13 +341,22 @@ export default function NewInvoicePage() {
               </div>
             )}
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 text-lg"
-            >
-              {loading ? 'Minting on Stellar...' : 'Mint Invoice Token'}
-            </button>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={saveAsTemplate}
+                className="rounded-xl border border-brand-gold py-3.5 font-semibold text-brand-gold"
+              >
+                Save as Template
+              </button>
+              <button
+                type="submit"
+                disabled={loading}
+                className="py-3.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 text-lg"
+              >
+                {loading ? 'Minting on Stellar...' : 'Mint Invoice Token'}
+              </button>
+            </div>
 
             <p className="text-xs text-brand-muted text-center">
               Your invoice will be tokenized on Stellar Testnet. Gas fees are under $0.01.

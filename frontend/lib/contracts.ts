@@ -459,6 +459,21 @@ export async function buildDepositTx(
   return prepared.toXDR();
 }
 
+/** Build a lender yield-claim transaction for a single pool token. */
+export async function buildClaimYieldTx(investor: string, token: string): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call('claim_yield', new Address(investor).toScVal(), new Address(token).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice | null> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
@@ -909,10 +924,7 @@ export async function buildCancelWithdrawalRequestTx(
 }
 
 /** Permissionless: anyone can trigger a drain attempt against current liquidity. */
-export async function buildDrainWithdrawalQueueTx(
-  caller: string,
-  token: string,
-): Promise<string> {
+export async function buildDrainWithdrawalQueueTx(caller: string, token: string): Promise<string> {
   const account = await getRpcAccount(caller);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -977,10 +989,7 @@ function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
   return xdr.ScVal.scvMap([
     entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
     entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
-    entry(
-      'optimal_utilization_bps',
-      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
-    ),
+    entry('optimal_utilization_bps', nativeToScVal(config.optimalUtilizationBps, { type: 'u32' })),
     entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
     entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
   ]);
@@ -2321,12 +2330,7 @@ export async function buildSlashOracleTx(params: {
 
 // ---- #867: Compliance registry ----
 
-export type ComplianceStatusUi =
-  | 'Unscreened'
-  | 'Cleared'
-  | 'Flagged'
-  | 'Blocked'
-  | 'PendingReview';
+export type ComplianceStatusUi = 'Unscreened' | 'Cleared' | 'Flagged' | 'Blocked' | 'PendingReview';
 
 export type RiskTierUi = 'Low' | 'Medium' | 'High';
 
@@ -2387,9 +2391,7 @@ export async function getComplianceRecord(
   };
 }
 
-export async function getComplianceHistory(
-  address: StellarAddress,
-): Promise<ComplianceRecordUi[]> {
+export async function getComplianceHistory(address: StellarAddress): Promise<ComplianceRecordUi[]> {
   const sim = await simulateTx(
     requireComplianceContractId(),
     'get_screening_history',
