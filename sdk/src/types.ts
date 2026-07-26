@@ -212,43 +212,65 @@ export interface TransactionProgress {
   error?: string;
 }
 
-// #868: credit_score v2 — external attestations + dispute mechanism
-export type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
-export type AttestationStatus = 'Active' | 'Disputed' | 'Revoked' | 'Expired';
+// ── Event Types ──────────────────────────────────────────────────────────────
 
-export interface AttestorInfo {
-  address: string;
-  attestorType: AttestorType;
-  isActive: boolean;
-  weightBps: number;
-  registeredAt: number;
+export interface PoolDepositEvent {
+  depositor: string;
+  token: string;
+  amount: bigint;
+  sharesMinted: bigint;
+  timestamp: number;
 }
 
-export interface Attestation {
-  id: bigint;
-  sme: string;
-  attestor: string;
-  attestationType: AttestorType;
-  scoreContribution: number;
-  evidenceHash: string;
-  submittedAt: number;
-  expiresAt: number;
-  status: AttestationStatus;
+export interface PoolWithdrawEvent {
+  withdrawer: string;
+  token: string;
+  amount: bigint;
+  sharesBurned: bigint;
+  timestamp: number;
 }
 
-export interface CreditScoreResponse {
+export interface PoolRepaidEvent {
+  invoiceId: bigint;
+  payer: string;
+  principal: bigint;
+  interest: bigint;
+  timestamp: number;
+}
+
+export interface PoolPartPayEvent {
+  invoiceId: bigint;
+  payer: string;
+  amount: bigint;
+  totalRepaid: bigint;
+  timestamp: number;
+}
+
+export interface InvoiceFundedEvent {
+  invoiceId: bigint;
+  funder: string;
+  timestamp: number;
+}
+
+export interface InvoicePaidEvent {
+  invoiceId: bigint;
+  caller: string;
+  timestamp: number;
+}
+
+export interface CreditPaymentEvent {
+  caller: string;
   sme: string;
+  invoiceId: bigint;
+  status: string;
   score: number;
-  totalInvoices: number;
-  paidOnTime: number;
-  paidLate: number;
-  defaulted: number;
-  totalVolume: bigint;
-  averagePaymentDays: number;
-  lastUpdated: number;
-  scoreVersion: number;
-  configVersion: number;
-  isStale: boolean;
-  /** Internal score blended with the SME's active external attestations. */
-  blendedScore: number;
+  timestamp: number;
+}
+
+export interface CreditDefaultEvent {
+  caller: string;
+  sme: string;
+  invoiceId: bigint;
+  score: number;
+  timestamp: number;
 }

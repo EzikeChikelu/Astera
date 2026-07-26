@@ -8,6 +8,7 @@ import {
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
   COMPLIANCE_CONTRACT_ID,
+  REFERRAL_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -45,6 +46,7 @@ import type {
   FullCreditScore,
   RateModelConfig,
   RateSnapshot,
+  ReferralStats,
 } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
@@ -85,6 +87,9 @@ if (ORACLE_REGISTRY_CONTRACT_ID) {
 }
 if (COMPLIANCE_CONTRACT_ID) {
   validateContractId(COMPLIANCE_CONTRACT_ID, 'compliance');
+}
+if (REFERRAL_CONTRACT_ID) {
+  validateContractId(REFERRAL_CONTRACT_ID, 'referral');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -185,6 +190,18 @@ export async function getMaxInvoiceAmount(): Promise<number> {
   );
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   return Number(scValToNative(result!.retval));
+}
+
+/** #775: whether the borrower has opted this invoice out of the public sharing link. */
+export async function isInvoicePrivate(id: number): Promise<boolean> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'is_invoice_private',
+    [nativeToScVal(id, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
 }
 
 export async function buildCreateInvoiceTx(params: {
@@ -383,11 +400,30 @@ export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   const raw = scValToNative(result!.retval) as Record<string, unknown>;
   return {
-    totalDeposited: BigInt(raw.total_deposited as string),
+    // Rust struct field is `pool_value` (normalized deposited/deployed
+    // capital across accepted tokens), not `total_deposited`.
+    totalDeposited: BigInt(raw.pool_value as string),
     totalDeployed: BigInt(raw.total_deployed as string),
     totalPaidOut: BigInt(raw.total_paid_out as string),
     totalFeeRevenue: BigInt((raw.total_fee_revenue as string | number | bigint) ?? 0),
   };
+}
+
+/**
+ * #776: live on-chain token balance held by the pool contract, read
+ * directly from the token contract rather than from the normalized
+ * `pool_value`/`total_deployed` accounting in `getPoolTokenTotals()`.
+ */
+export async function getPoolBalance(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_pool_balance',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval) ?? 0));
 }
 
 export async function getTokenDepositCap(token: string): Promise<bigint> {
@@ -457,6 +493,21 @@ export async function buildDepositTx(
 
   const prepared = StellarRpc.assembleTransaction(tx, sim).build();
   return prepared.toXDR();
+}
+
+/** Build a lender yield-claim transaction for a single pool token. */
+export async function buildClaimYieldTx(investor: string, token: string): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call('claim_yield', new Address(investor).toScVal(), new Address(token).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
 export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice | null> {
@@ -909,10 +960,7 @@ export async function buildCancelWithdrawalRequestTx(
 }
 
 /** Permissionless: anyone can trigger a drain attempt against current liquidity. */
-export async function buildDrainWithdrawalQueueTx(
-  caller: string,
-  token: string,
-): Promise<string> {
+export async function buildDrainWithdrawalQueueTx(caller: string, token: string): Promise<string> {
   const account = await getRpcAccount(caller);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -977,10 +1025,7 @@ function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
   return xdr.ScVal.scvMap([
     entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
     entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
-    entry(
-      'optimal_utilization_bps',
-      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
-    ),
+    entry('optimal_utilization_bps', nativeToScVal(config.optimalUtilizationBps, { type: 'u32' })),
     entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
     entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
   ]);
@@ -1286,6 +1331,39 @@ export async function buildDisputeTx(params: {
         nativeToScVal(false, { type: 'bool' }),
         nativeToScVal(params.reason, { type: 'string' }),
         nativeToScVal(oracleHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** #775: owner-only opt in/out of the public invoice sharing link. */
+export async function buildSetInvoicePrivateTx(params: {
+  owner: string;
+  invoiceId: number;
+  private: boolean;
+}): Promise<string> {
+  const account = await getRpcAccount(params.owner);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_invoice_private',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.owner).toScVal(),
+        nativeToScVal(params.private, { type: 'bool' }),
       ),
     )
     .setTimeout(30)
@@ -2351,12 +2429,7 @@ export async function buildSlashOracleTx(params: {
 
 // ---- #867: Compliance registry ----
 
-export type ComplianceStatusUi =
-  | 'Unscreened'
-  | 'Cleared'
-  | 'Flagged'
-  | 'Blocked'
-  | 'PendingReview';
+export type ComplianceStatusUi = 'Unscreened' | 'Cleared' | 'Flagged' | 'Blocked' | 'PendingReview';
 
 export type RiskTierUi = 'Low' | 'Medium' | 'High';
 
@@ -2417,9 +2490,7 @@ export async function getComplianceRecord(
   };
 }
 
-export async function getComplianceHistory(
-  address: StellarAddress,
-): Promise<ComplianceRecordUi[]> {
+export async function getComplianceHistory(address: StellarAddress): Promise<ComplianceRecordUi[]> {
   const sim = await simulateTx(
     requireComplianceContractId(),
     'get_screening_history',
@@ -2518,6 +2589,56 @@ export async function fetchComplianceServiceFlags(): Promise<
   } catch {
     return [];
   }
+}
+
+// ---- #799: Referral program ----
+
+export async function getReferrer(referee: string): Promise<string | null> {
+  const sim = await simulateTx(
+    REFERRAL_CONTRACT_ID,
+    'get_referrer',
+    [new Address(referee).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  return raw ? (raw as string) : null;
+}
+
+export async function getReferralStats(referrer: string): Promise<ReferralStats> {
+  const sim = await simulateTx(
+    REFERRAL_CONTRACT_ID,
+    'get_stats',
+    [new Address(referrer).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    referrer: raw.referrer as StellarAddress,
+    referralCount: Number(raw.referral_count ?? 0),
+  };
+}
+
+export async function buildRegisterReferralTx(referee: string, referrer: string): Promise<string> {
+  const account = await getRpcAccount(referee);
+  const contract = new Contract(REFERRAL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call('register', new Address(referee).toScVal(), new Address(referrer).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
 export { submitTx };

@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import GlossaryTerm from '@/components/GlossaryTerm';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -360,18 +361,24 @@ export default function StorageMonitoringPage() {
 
               <div className="text-xs text-slate-600 font-mono leading-relaxed">
                 <p>{health.stats.active_invoices.toLocaleString()} active entries</p>
-                <p>× 1 stroop / ledger / entry</p>
-                <p>× {LEDGERS_PER_MONTH.toLocaleString()} ledgers / month</p>
+                <p>
+                  × 1 <GlossaryTerm id="stroops">stroop</GlossaryTerm> /{' '}
+                  <GlossaryTerm id="ledger" /> / entry
+                </p>
+                <p>
+                  × {LEDGERS_PER_MONTH.toLocaleString()}{' '}
+                  <GlossaryTerm id="ledger">ledgers</GlossaryTerm> / month
+                </p>
                 <p className="text-slate-500 mt-1">
-                  ÷ {STROOPS_PER_XLM.toLocaleString()} stroops / XLM
+                  ÷ {STROOPS_PER_XLM.toLocaleString()} <GlossaryTerm id="stroops" /> / XLM
                 </p>
               </div>
             </div>
 
             <p className="text-[11px] text-slate-600">
-              Approximation — actual costs vary with entry size, TTL settings, and network fee
-              schedules. XLM/USDC rate: $
-              {XLM_USDC_RATE !== null ? `$${XLM_USDC_RATE.toFixed(2)}` : '--'}.
+              Approximation — actual costs vary with entry size,{' '}
+              <GlossaryTerm id="ttl">TTL</GlossaryTerm> settings, and network fee schedules.
+              XLM/USDC rate: ${XLM_USDC_RATE !== null ? `$${XLM_USDC_RATE.toFixed(2)}` : '--'}.
             </p>
           </div>
         )}
