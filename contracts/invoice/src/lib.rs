@@ -168,6 +168,8 @@ pub enum InvoiceError {
     // #798: create_invoice() input validation
     InvalidAmount = 42,
     InvalidDueDate = 43,
+    // #747: invoice ID collision detected (counter TTL expired and reset)
+    IDCollision = 42,
 }
 
 #[contracttype]
@@ -201,6 +203,7 @@ pub struct Invoice {
     pub disputed_at: u64,
     pub grace_period_override: Option<u32>,
     pub verification_deadline: u64,
+    pub funded_amount: i128,
 }
 
 #[contracttype]
@@ -1398,6 +1401,13 @@ impl InvoiceContract {
             .get(&DataKey::InvoiceCount)
             .unwrap_or(0);
         let id = count + 1;
+
+        // #747: Refresh TTL on the invoice counter to prevent expiry and ID collisions
+        env.storage().instance().extend_ttl(
+            &DataKey::InvoiceCount,
+            INSTANCE_BUMP_AMOUNT,
+            INSTANCE_BUMP_AMOUNT,
+        );
         let pool_addr: Address = env
             .storage()
             .instance()
@@ -1437,7 +1447,13 @@ impl InvoiceContract {
             disputed_at: 0,
             grace_period_override: None,
             verification_deadline: verification_deadline_ts,
+            funded_amount: 0,
         };
+
+        // #747: Collision guard—ensure this ID does not already exist
+        if env.storage().persistent().has(&DataKey::Invoice(id)) {
+            panic_with_error!(&env, InvoiceError::IDCollision);
+        }
 
         env.storage()
             .persistent()
@@ -1818,6 +1834,10 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Funded;
         invoice.funded_at = env.ledger().timestamp();
         invoice.pool_contract = pool.clone();
+        invoice.funded_amount = invoice
+            .funded_amount
+            .checked_add(invoice.amount)
+            .ok_or(InvoiceError::AmountOverflow)?;
         let sme = invoice.owner.clone();
         let current_outstanding = get_sme_outstanding(&env, &sme);
         let new_outstanding = current_outstanding
@@ -1840,6 +1860,78 @@ impl InvoiceContract {
                 invoice.owner.clone(),
                 env.ledger().timestamp(),
             ),
+        );
+        Ok(())
+    }
+
+    pub fn record_funding(
+        env: Env,
+        id: u64,
+        amount: i128,
+        pool: Address,
+    ) -> Result<(), InvoiceError> {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        // #934: fundable states include Pending, Verified, and already Funded
+        // (for partial funding accumulations).
+        let is_fundable = invoice.status == InvoiceStatus::Pending
+            || invoice.status == InvoiceStatus::Verified
+            || invoice.status == InvoiceStatus::Funded;
+        if !is_fundable {
+            panic!("invoice is not in fundable state");
+        }
+        // First funding: transition from Pending/Verified to Funded.
+        if invoice.status != InvoiceStatus::Funded {
+            let require_oracle: bool = env
+                .storage()
+                .instance()
+                .get(&DataKey::RequireOracleVerification)
+                .unwrap_or(false);
+            if require_oracle && !invoice.oracle_verified {
+                panic_with_error!(&env, InvoiceError::Unauthorized);
+            }
+            invoice.status = InvoiceStatus::Funded;
+            invoice.funded_at = env.ledger().timestamp();
+            invoice.pool_contract = pool.clone();
+            let sme = invoice.owner.clone();
+            let current_outstanding = get_sme_outstanding(&env, &sme);
+            let new_outstanding = current_outstanding
+                .checked_add(invoice.amount)
+                .ok_or(InvoiceError::AmountOverflow)?;
+            let max_outstanding = get_max_outstanding_per_sme(&env);
+            if new_outstanding > max_outstanding {
+                return Err(InvoiceError::SmeExposureLimitExceeded);
+            }
+            set_sme_outstanding(&env, &sme, new_outstanding);
+        }
+        invoice.funded_amount = invoice
+            .funded_amount
+            .checked_add(amount)
+            .ok_or(InvoiceError::AmountOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, false);
+        env.events().publish(
+            (EVT, symbol_short!("funded")),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
         );
         Ok(())
     }
@@ -3659,6 +3751,80 @@ mod test {
         let result = client.try_mark_funded(&second, &pool);
 
         assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
+    }
+
+    // ── #934: funded_amount accumulation via record_funding ──────────────────
+
+    #[test]
+    fn test_record_funding_partial_accumulates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let (client, _admin, pool, sme) = setup(&env);
+        let due = env.ledger().timestamp() + 86_400;
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        // Two partial fundings: 300 + 200 = 500
+        client.record_funding(&id, &300i128, &pool);
+        assert_eq!(client.get_invoice(&id).funded_amount, 300);
+        client.record_funding(&id, &200i128, &pool);
+        assert_eq!(client.get_invoice(&id).funded_amount, 500);
+        // Status should be Funded after first call
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Funded);
+    }
+
+    #[test]
+    fn test_record_funding_full_amount_single() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let (client, _admin, pool, sme) = setup(&env);
+        let due = env.ledger().timestamp() + 86_400;
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        client.record_funding(&id, &1_000i128, &pool);
+        assert_eq!(client.get_invoice(&id).funded_amount, 1_000);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Funded);
+    }
+
+    #[test]
+    fn test_record_funding_checked_add_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let (client, _admin, pool, sme) = setup(&env);
+        let due = env.ledger().timestamp() + 86_400;
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &i128::MAX,
+            &due,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        // Fund with i128::MAX — funded_amount goes to i128::MAX
+        client.record_funding(&id, &i128::MAX, &pool);
+        // Second partial funding of 1 must overflow
+        let result = client.try_record_funding(&id, &1i128, &pool);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::AmountOverflow
+        );
     }
 
     #[test]

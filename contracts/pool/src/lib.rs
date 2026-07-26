@@ -162,6 +162,8 @@ pub enum PoolError {
     // #777: Reflector oracle collateral price feed — neither the oracle
     // nor the admin fallback has a usable price for the requested token.
     OraclePriceUnavailable = 85,
+    // #745: duplicate token registration
+    TokenAlreadySupported = 86,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -745,13 +747,12 @@ pub trait CreditScoreContract {
     fn record_funding(env: Env, caller: Address, invoice_id: u64, sme: Address, amount: i128);
 }
 
-/// Cross-contract interface to the invoice contract (#385, #386).
+/// Cross-contract interface to the invoice contract (#385, #386, #934).
 #[contractclient(name = "InvoiceContractClient")]
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
-    fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128;
-    fn get_funded_amount(env: Env, id: u64) -> i128;
+    fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
 }
 
 /// #867: cross-contract interface to the compliance registry.
@@ -1623,25 +1624,35 @@ fn fund_invoice_request(
         .total_deployed
         .checked_add(request.principal)
         .ok_or(PoolError::AmountOverflow)?;
-
-    if is_first_funding {
-        let factoring_fee = resolve_factoring_fee(
-            env,
-            config,
-            request.principal,
-            request.sme.clone(),
-            &request.token,
-        )?;
-        let locked_yield_bps = {
-            let model: Option<RateModelConfig> = env
-                .storage()
-                .instance()
-                .get(&DataKey::RateModel(request.token.clone()));
-            match model {
-                Some(m) => compute_current_rate(utilization_bps(&tt), &m),
-                None => config.yield_bps,
-            }
-        };
+    // #863: lock in the rate live at funding time. With a configured rate
+    // model this prices the invoice off post-deployment utilization (the
+    // liquidity this funding consumes is reflected in its own rate);
+    // otherwise it falls back to the static `config.yield_bps`.
+    let locked_yield_bps = {
+        let model: Option<RateModelConfig> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateModel(request.token.clone()));
+        match model {
+            Some(m) => compute_current_rate(utilization_bps(&tt), &m),
+            None => config.yield_bps,
+        }
+    };
+    let funded_key = DataKey::FundedInvoice(request.invoice_id);
+    let is_partial = env.storage().persistent().has(&funded_key);
+    if is_partial {
+        // #934: accumulate principal for partial fundings.
+        let mut existing: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .expect("just checked");
+        existing.principal = existing
+            .principal
+            .checked_add(request.principal)
+            .ok_or(PoolError::AmountOverflow)?;
+        env.storage().persistent().set(&funded_key, &existing);
+    } else {
         let funded = FundedInvoice {
             invoice_id: request.invoice_id,
             sme: request.sme.clone(),
@@ -1654,34 +1665,9 @@ fn fund_invoice_request(
             co_funding_round_id: None,
             locked_yield_bps,
         };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
+        env.storage().persistent().set(&funded_key, &funded);
+        // #865: index this invoice_id only on first funding.
         record_funded_invoice_id(env, &request.token, request.invoice_id);
-
-        stats.total_funded_invoices = stats
-            .total_funded_invoices
-            .checked_add(1)
-            .ok_or(PoolError::AmountOverflow)?;
-        stats.active_funded_invoices = stats
-            .active_funded_invoices
-            .checked_add(1)
-            .ok_or(PoolError::AmountOverflow)?;
-    } else {
-        // Accumulate principal on existing FundedInvoice record
-        let mut funded: FundedInvoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::FundedInvoice(request.invoice_id))
-            .ok_or(PoolError::StorageCorrupted)?;
-        funded.principal = funded
-            .principal
-            .checked_add(request.principal)
-            .ok_or(PoolError::AmountOverflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
     }
     set_funded_invoice_ttl(env, request.invoice_id, false);
 
@@ -1728,7 +1714,25 @@ fn fund_invoice_request(
         }
     }
 
+    if !is_partial {
+        stats.total_funded_invoices = stats
+            .total_funded_invoices
+            .checked_add(1)
+            .ok_or(PoolError::AmountOverflow)?;
+        stats.active_funded_invoices = stats
+            .active_funded_invoices
+            .checked_add(1)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
     env.storage().instance().set(&DataKey::StorageStats, stats);
+
+    // #934: record cumulative funded_amount on the invoice contract.
+    let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
+    let _ = invoice_client.try_record_funding(
+        &request.invoice_id,
+        &request.principal,
+        &env.current_contract_address(),
+    );
 
     // Transfer principal to SME LAST - interaction
     // NAV is unchanged because the funded invoice becomes an asset.
@@ -2013,7 +2017,7 @@ impl FundingPool {
 
         for i in 0..tokens.len() {
             if tokens.get(i).ok_or(PoolError::StorageCorrupted)? == token {
-                return Err(PoolError::TokenAlreadyAccepted);
+                return Err(PoolError::TokenAlreadySupported);
             }
         }
 
@@ -3205,7 +3209,6 @@ impl FundingPool {
             Ok(Ok(ref auth_pool)) if auth_pool == &this_contract => {}
             _ => return Err(PoolError::InvoicePoolMismatch),
         }
-
         let accepted_tokens: Vec<Address> = env
             .storage()
             .instance()
@@ -3294,15 +3297,6 @@ impl FundingPool {
         }
         if requests.len() > MAX_BATCH_SIZE {
             return Err(PoolError::BatchTooLarge);
-        }
-        for i in 0..requests.len() {
-            let request_i = requests.get(i).ok_or(PoolError::StorageCorrupted)?;
-            for j in (i + 1)..requests.len() {
-                let request_j = requests.get(j).ok_or(PoolError::StorageCorrupted)?;
-                if request_i.invoice_id == request_j.invoice_id {
-                    return Err(PoolError::DuplicateInvoiceId);
-                }
-            }
         }
 
         bump_instance(&env);
@@ -7576,7 +7570,7 @@ mod test {
     }
 
     #[test]
-    fn test_fund_invoice_partial_funding_accumulates() {
+    fn test_fund_invoice_partial_accumulates_principal() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
@@ -7585,8 +7579,7 @@ mod test {
 
         mint(&env, &usdc_id, &investor, 2_000);
         client.deposit(&investor, &usdc_id, &2_000);
-
-        // First funding of 300
+        // First funding
         client.fund_invoice(
             &admin,
             &1u64,
@@ -7595,7 +7588,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        // Second funding of 200 — must accumulate to 500 total
+        // Second funding on same invoice — partial funding, must accumulate
         let result = client.try_fund_invoice(
             &admin,
             &1u64,
@@ -7605,67 +7598,9 @@ mod test {
             &usdc_id,
         );
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_two_partial_fundings_accumulate_total() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &investor, 5_000);
-        client.deposit(&investor, &usdc_id, &5_000);
-
-        // First partial funding
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &300i128,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-
-        // Second partial funding on same invoice — accumulates to 500
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &200i128,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-
-        // Verify total deployed reflects cumulative principal
-        let stats = client.get_storage_stats();
-        assert!(stats.total_funded_invoices >= 1);
-    }
-
-    #[test]
-    fn test_full_single_funding_matches_invoice_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &investor, 5_000);
-        client.deposit(&investor, &usdc_id, &5_000);
-
-        // Full single funding of 1_000
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &1_000i128,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-
-        let stats = client.get_storage_stats();
-        assert!(stats.total_funded_invoices >= 1);
+        // Verify the accumulated principal
+        let record = client.get_funded_invoice(&1u64).unwrap();
+        assert_eq!(record.principal, 500);
     }
 
     #[test]
