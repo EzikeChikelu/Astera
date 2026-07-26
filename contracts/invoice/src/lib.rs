@@ -159,6 +159,8 @@ pub enum InvoiceError {
     ComplianceNotCleared = 38,
     ComplianceCheckFailed = 39,
     ComplianceRegistryNotConfigured = 40,
+    // #766: per-address daily invoice creation rate limit exceeded
+    RateLimitExceeded = 41,
 }
 
 #[contracttype]
@@ -1256,8 +1258,11 @@ impl InvoiceContract {
             }
         }
 
+        // #766: per-address rate limit on invoice creation — see #577 above
+        // for why this is a sliding window rather than a fixed UTC-day
+        // counter (prevents straddling the day boundary to submit 2x quota).
         if fresh.len() >= daily_limit {
-            panic!("daily invoice limit exceeded");
+            soroban_sdk::panic_with_error!(&env, InvoiceError::RateLimitExceeded);
         }
 
         bump_instance(&env);
@@ -3466,7 +3471,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "daily invoice limit exceeded")]
     fn test_midnight_boundary_exploit_blocked() {
         // #577: an SME that exhausts the quota just before UTC midnight must not
         // be able to submit more invoices immediately after midnight crosses.
@@ -3497,7 +3501,7 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp = 86_460);
 
         // The 11th invoice must be rejected even though the calendar day changed.
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "D"),
             &100i128,
@@ -3506,17 +3510,25 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::RateLimitExceeded.into()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "daily invoice limit exceeded")]
-    fn test_daily_invoice_limit_exceeded_panics() {
+    fn test_daily_invoice_limit_exceeded_returns_error() {
+        // #766: the invoice past the configured daily limit within the
+        // sliding window must be rejected with a typed
+        // InvoiceError::RateLimitExceeded, not a bare panic.
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 86_400;
-        for _ in 0..11 {
+        for _ in 0..10 {
             client.create_invoice(
                 &sme,
                 &String::from_str(&env, "D"),
@@ -3527,6 +3539,22 @@ mod test {
                 &String::from_str(&env, "https://example.com/meta"),
             );
         }
+
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &100i128,
+            &due,
+            &String::from_str(&env, "i"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::RateLimitExceeded.into()
+            ))
+        );
     }
 
     #[test]
