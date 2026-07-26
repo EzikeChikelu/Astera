@@ -1053,6 +1053,8 @@ impl CreditScoreContract {
         );
     }
 
+    /// Returns the SME's credit score, or a default (`min_score`, zeroed stats) if the
+    /// SME has no on-chain history yet. Never panics for an unknown address.
     pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
         let data = Self::get_or_create_credit_data(&env, &sme);
         let config_version = load_scoring_config(&env).core.score_version;
@@ -1974,6 +1976,30 @@ mod test {
         let score_data = client.get_credit_score(&sme);
         assert_eq!(score_data.score, MIN_SCORE);
         assert_eq!(score_data.total_invoices, 0);
+    }
+
+    #[test]
+    fn test_get_credit_score_new_borrower_returns_default_without_panic() {
+        // #768: get_credit_score() must not panic for a borrower with no payment
+        // history — it should return a default CreditScoreResponse instead.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        let new_borrower = Address::generate(&env);
+
+        let resp = client.get_credit_score(&new_borrower);
+
+        assert_eq!(resp.sme, new_borrower);
+        assert_eq!(resp.score, MIN_SCORE);
+        assert_eq!(resp.blended_score, MIN_SCORE);
+        assert_eq!(resp.total_invoices, 0);
+        assert_eq!(resp.paid_on_time, 0);
+        assert_eq!(resp.paid_late, 0);
+        assert_eq!(resp.defaulted, 0);
+        assert_eq!(resp.total_volume, 0);
+        assert_eq!(resp.average_payment_days, 0);
+        assert!(!resp.is_stale);
     }
 
     #[test]

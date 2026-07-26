@@ -35,17 +35,26 @@ jobs:
       - run: cargo test
       - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
       - run: cargo test -p integration-tests --test integration_tests
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Check WASM size
         run: |
           cargo build --target wasm32-unknown-unknown --release
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
             SIZE=$(wc -c < "$wasm" | tr -d ' ')
-            echo "$wasm: $SIZE bytes"
             if [ "$SIZE" -gt 204800 ]; then
-              echo "ERROR: Binary too large for deployment"
+              echo "ERROR: $wasm is $SIZE bytes — too large for deployment"
               exit 1
             fi
           done
+          scripts/wasm-size-check.sh
+      - name: Upload WASM binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: target/wasm32-unknown-unknown/release/*.wasm
+          retention-days: 30
 
   frontend:
     name: Frontend

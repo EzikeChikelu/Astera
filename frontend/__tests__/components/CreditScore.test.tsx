@@ -4,10 +4,10 @@ import '@testing-library/jest-dom';
 import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 
 describe('CreditScore', () => {
-  it('shows the base 300 score and building label when no invoices exist', () => {
+  it('shows the base 300 score and a "No history" label when no invoices exist', () => {
     render(<CreditScore paid={0} funded={0} defaulted={0} totalVolume={0n} />);
     expect(screen.getByText('300')).toBeInTheDocument();
-    expect(screen.getByText('Building')).toBeInTheDocument();
+    expect(screen.getByText('No history')).toBeInTheDocument();
     expect(screen.getByText(/Create and repay invoices to build your score\./)).toBeInTheDocument();
   });
 
