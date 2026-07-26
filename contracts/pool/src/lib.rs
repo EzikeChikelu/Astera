@@ -3178,13 +3178,20 @@ impl FundingPool {
         if record.repaid_amount >= total_due {
             return Err(PoolError::AlreadyFullyRepaid);
         }
+        // A final repayment may be larger than the outstanding balance. Cap
+        // it so only the amount actually owed is transferred from the payer.
+        let remaining_amount = total_due
+            .checked_sub(record.repaid_amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        let actual_payment = if amount > remaining_amount {
+            remaining_amount
+        } else {
+            amount
+        };
         let new_repaid_amount = record
             .repaid_amount
-            .checked_add(amount)
+            .checked_add(actual_payment)
             .ok_or(PoolError::AmountOverflow)?;
-        if new_repaid_amount > total_due {
-            return Err(PoolError::Overpayment);
-        }
 
         Self::non_reentrant_start(env);
         let guarded_result = (|| -> Result<(bool, Address, i128, i128, i128), PoolError> {
@@ -3231,7 +3238,7 @@ impl FundingPool {
                     if bps == 0 {
                         continue;
                     }
-                    let holder_amount = amount
+                    let holder_amount = actual_payment
                         .checked_mul(bps as i128)
                         .ok_or(PoolError::AmountOverflow)?
                         .checked_div(BPS_DENOM as i128)
@@ -3248,7 +3255,7 @@ impl FundingPool {
                 // consistent with this contract's existing
                 // rounds-in-favor-of-protocol convention (e.g.
                 // calculate_factoring_fee's ceiling division).
-                let dust = amount
+                let dust = actual_payment
                     .checked_sub(distributed)
                     .ok_or(PoolError::AmountOverflow)?;
                 if dust > 0 {
@@ -3263,7 +3270,7 @@ impl FundingPool {
                 }
                 tt.total_paid_out = tt
                     .total_paid_out
-                    .checked_add(amount)
+                    .checked_add(actual_payment)
                     .ok_or(PoolError::AmountOverflow)?;
                 if fully_repaid {
                     stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
@@ -3321,7 +3328,7 @@ impl FundingPool {
 
             // Transfer LAST - interaction
             let token_client = token::Client::new(env, &record.token);
-            token_client.transfer(&payer, &env.current_contract_address(), &amount);
+            token_client.transfer(&payer, &env.current_contract_address(), &actual_payment);
 
             // Handle collateral release after main transfer
             if fully_repaid {
@@ -3365,7 +3372,7 @@ impl FundingPool {
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, amount, repaid_amount, now),
+                (invoice_id, actual_payment, repaid_amount, now),
             );
         }
         Ok(())
@@ -8389,7 +8396,7 @@ mod test {
     }
 
     #[test]
-    fn test_overpayment_rejected() {
+    fn test_overpayment_is_capped_at_outstanding_balance() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
@@ -8412,9 +8419,10 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp += 5_000);
         let total_due = client.estimate_repayment(&1u64, &None);
 
-        // Attempt to pay more than due
-        let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
-        assert_eq!(result, Err(Ok(PoolError::Overpayment)));
+        // The final payment is capped; the excess remains in the borrower's wallet.
+        client.repay_invoice(&1u64, &sme, &(total_due + 1));
+        let funded = client.get_funded_invoice(&1u64).unwrap();
+        assert_eq!(funded.repaid_amount, total_due);
     }
 
     #[test]

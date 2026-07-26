@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -519,6 +520,9 @@ export default function InvoiceDetailPage() {
             <div className="col-span-2">
               <p className="text-brand-muted mb-1">Owner</p>
               <p className="font-mono text-xs text-white break-all">{invoice.owner}</p>
+            </div>
+            <div className="col-span-2">
+              <BorrowerCreditBadge borrower={invoice.owner} />
             </div>
             {metadata.description && (
               <div className="col-span-2">
