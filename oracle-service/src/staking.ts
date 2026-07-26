@@ -1,5 +1,5 @@
 import { Keypair, TransactionBuilder } from '@stellar/stellar-sdk';
-import { AsteraClient } from '../../sdk/src/client';
+import { AsteraClient } from 'astera-sdk';
 import { OracleConfig } from './types';
 
 /**

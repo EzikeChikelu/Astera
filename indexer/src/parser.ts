@@ -22,6 +22,7 @@ export interface IndexedEvent {
   eventType: string;
   topic: string[];
   value: any;
+  actor: string | null;
   ledgerSequence: number;
   ledgerCloseAt: string;
   txHash: string;
@@ -130,13 +131,15 @@ export function parseEvents(records: any[]): IndexedEvent[] {
       const [contractType, eventType] = topic;
       const contractId = record.contract || '';
 
+      const value = parseValue(record);
       events.push({
         id: record.id || `${record.paging_token}`,
         contractId,
         contractType: classifyContract(contractId, contractType, eventType || ''),
         eventType: eventType || 'unknown',
         topic: [contractType, eventType],
-        value: parseValue(record),
+        value,
+        actor: extractActor(contractType, eventType, value),
         ledgerSequence: record.ledger_sequence || 0,
         ledgerCloseAt: record.created_at || new Date().toISOString(),
         txHash: record.transaction_hash || '',
@@ -168,4 +171,55 @@ function parseValue(record: any): any {
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract the actor/caller address from event value based on event type.
+ * The actor is always the first field in the value tuple for action events.
+ */
+function extractActor(contractType: string, eventType: string, value: any): string | null {
+  if (!value || !Array.isArray(value) || value.length === 0) return null;
+
+  // Pool action events: first field is the actor address
+  if (contractType === 'POOL') {
+    switch (eventType) {
+      case 'deposit':
+      case 'withdraw':
+      case 'repaid':
+      case 'part_pay':
+      case 'yld_claim':
+      case 'wd_full':
+      case 'wd_queue':
+      case 'wd_cncl':
+      case 'col_dep':
+        return value[0];
+    }
+  }
+
+  // Invoice action events: first field is often the actor
+  if (contractType === 'INVOICE') {
+    switch (eventType) {
+      case 'created':
+        return value[1]; // owner
+      case 'funded':
+      case 'paid':
+      case 'cancelled':
+      case 'resolved':
+        return value[1]; // caller/pool
+      case 'paused':
+      case 'unpaused':
+        return value[0]; // admin
+    }
+  }
+
+  // Credit score events: first field is the caller
+  if (contractType === 'CREDIT') {
+    switch (eventType) {
+      case 'payment':
+      case 'default':
+        return value[0]; // caller
+    }
+  }
+
+  return null;
 }

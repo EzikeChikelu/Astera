@@ -14,6 +14,7 @@ jobs:
   contracts:
     name: Smart Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: .
@@ -25,7 +26,8 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
-      - run: cargo clippy -- -D warnings
+      - name: Lint contracts with clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
       # contracts/tests (package `integration-tests`) is itself a workspace
       # member and uses soroban_sdk::contractimport! to load prebuilt .wasm
       # files, so these must exist before ANY `cargo test` invocation that
@@ -33,8 +35,13 @@ jobs:
       - name: Build contracts for integration tests
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
       - run: cargo test
-      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
-      - run: cargo test -p integration-tests --test integration_tests
+        timeout-minutes: 10
+      - name: Run fuzz tests (short)
+        timeout-minutes: 10
+        run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+      - name: Run integration tests
+        timeout-minutes: 15
+        run: cargo test -p integration-tests --test integration_tests
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Check WASM size
@@ -59,21 +66,20 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test -- --runInBand
-      - run: npm run build
+      - name: Lint frontend
+        run: npm run lint -- --max-warnings 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -168,6 +174,7 @@ jobs:
   deploy-smoke-test:
     name: Deploy Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [contracts]
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     env:

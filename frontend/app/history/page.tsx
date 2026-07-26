@@ -105,7 +105,7 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
       let address: string | undefined;
       let relevant = false;
 
-      if (ns === 'INVOICE' && contract === INVOICE_CONTRACT_ID) {
+      if (ns === 'invoice' && contract === INVOICE_CONTRACT_ID) {
         if (action === 'created') {
           const [id, owner, amt] = Array.isArray(val) ? val : [val, undefined, undefined];
           invoiceId = BigInt(id as bigint);
@@ -126,7 +126,7 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
           kind = 'invoice_defaulted';
           relevant = ownedInvoiceIds.has(invoiceId);
         }
-      } else if (ns === 'POOL' && contract === POOL_CONTRACT_ID) {
+      } else if (ns === 'pool' && contract === POOL_CONTRACT_ID) {
         if (action === 'deposit') {
           const [inv, amt] = Array.isArray(val) ? val : [val, undefined];
           address = String(inv);

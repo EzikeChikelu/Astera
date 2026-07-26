@@ -895,10 +895,10 @@ When reviewing a Dependabot PR:
 2. **Run all checks locally** to catch issues early:
    ```bash
    # Contracts (if you modified any)
-   cd contracts && cargo fmt && cargo clippy -- -D warnings && cargo test && cargo test --test fuzz_tests
+   cd contracts && cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test && cargo test --test fuzz_tests
 
    # Frontend (if you modified any)
-   cd frontend && npm run lint && npm run build
+   cd frontend && npm run lint -- --max-warnings 0 && npm run build
    ```
 
 3. **Clean up your commits**:
