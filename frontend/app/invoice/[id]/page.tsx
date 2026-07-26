@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
+import { downloadInvoicePDF } from '@/components/InvoicePDF';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -176,6 +177,7 @@ export default function InvoiceDetailPage() {
   const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -434,8 +436,18 @@ export default function InvoiceDetailPage() {
     }
   }
 
-  function exportInvoicePDF() {
-    window.print();
+  async function exportInvoicePDF() {
+    if (!invoice || !metadata) return;
+
+    setPdfLoading(true);
+    try {
+      await downloadInvoicePDF(invoice, metadata);
+    } catch (e) {
+      toast.error('Failed to generate PDF.');
+      console.error(e);
+    } finally {
+      setPdfLoading(false);
+    }
   }
 
   if (loading) {
@@ -472,10 +484,11 @@ export default function InvoiceDetailPage() {
           ← Back to Dashboard
         </Link>
         <button
-          onClick={exportInvoicePDF}
-          className="print:hidden text-sm text-brand-muted hover:text-white ml-4"
+          onClick={() => void exportInvoicePDF()}
+          disabled={pdfLoading}
+          className="print:hidden text-sm text-brand-muted hover:text-white ml-4 disabled:opacity-60"
         >
-          Export PDF
+          {pdfLoading ? 'Generating PDF...' : 'Export PDF'}
         </button>
 
         <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
