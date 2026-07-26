@@ -107,6 +107,22 @@ function getRpcAccount(address: string): Promise<RpcAccount> {
   return rpcExecute<RpcAccount>((server) => server.getAccount(address));
 }
 
+function getNativeBalanceStroops(account: Pick<RpcAccount, 'balances'> | undefined): bigint {
+  if (!account?.balances) return 0n;
+  const nativeBalance = account.balances.find((balance) => balance.asset_type === 'native');
+  if (!nativeBalance?.balance) return 0n;
+  return BigInt(Math.round(Number.parseFloat(nativeBalance.balance) * 1_000_000));
+}
+
+function ensureSufficientNativeBalance(
+  account: Pick<RpcAccount, 'balances'>,
+  requiredStroops = BigInt(BASE_FEE),
+) {
+  if (getNativeBalanceStroops(account) < requiredStroops) {
+    throw new Error('Insufficient balance for this transaction');
+  }
+}
+
 function simulateRpcTransaction(
   tx: RpcBuiltTransaction,
 ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
@@ -469,6 +485,7 @@ export async function buildDepositTx(
   amount: bigint,
 ): Promise<string> {
   const account = await getRpcAccount(investor);
+  ensureSufficientNativeBalance(account);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -631,6 +648,7 @@ export async function buildCommitToInvoiceTx(params: {
   amount: bigint;
 }): Promise<string> {
   const account = await getRpcAccount(params.investor);
+  ensureSufficientNativeBalance(account);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
