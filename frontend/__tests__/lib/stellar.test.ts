@@ -189,3 +189,29 @@ describe('stellar transaction submission guard', () => {
     expect(sendTransaction).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('decimal-aware amount formatting (#778)', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it('formatUSDC and formatAmount(_, 7) agree — 7-decimal behavior is unchanged', async () => {
+    const { formatUSDC, formatAmount } = await import('../../lib/stellar');
+    expect(formatAmount(1_234_5678n, 7)).toBe(formatUSDC(1_234_5678n));
+  });
+
+  it('formatAmount uses the given decimals instead of assuming 7', async () => {
+    const { formatAmount } = await import('../../lib/stellar');
+    // 1_000_000 raw units at 6 decimals is 1.00, not 0.10 (which dividing by
+    // 10^7 would wrongly produce).
+    expect(formatAmount(1_000_000n, 6)).toBe('$1.00');
+    // 1_000_000_000_000_000_000 raw units at 18 decimals is 1.00.
+    expect(formatAmount(1_000_000_000_000_000_000n, 18)).toBe('$1.00');
+  });
+
+  it('fromRaw divides by the correct power of ten for the given decimals', async () => {
+    const { fromRaw, fromStroops } = await import('../../lib/stellar');
+    expect(fromRaw(1_000_000n, 6)).toBe(1);
+    expect(fromRaw(50_000_000n, 7)).toBe(fromStroops(50_000_000n));
+  });
+});

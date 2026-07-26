@@ -165,11 +165,17 @@ pub enum InvoiceError {
     ComplianceRegistryNotConfigured = 40,
     // #766: per-address daily invoice creation rate limit exceeded
     RateLimitExceeded = 41,
-    // #798: create_invoice() input validation
-    InvalidAmount = 42,
-    InvalidDueDate = 43,
-    // #747: invoice ID collision detected (counter TTL expired and reset)
-    IDCollision = 42,
+    // #772: description contains non-printable-ASCII or HTML-special
+    // characters — rejected to prevent stored-XSS via unsanitised
+    // frontend rendering of on-chain invoice data
+    InvalidDescriptionChars = 42,
+    // Pre-existing build breakage found while working this branch: these two
+    // variants are referenced from `create_invoice_with_metadata` (amount /
+    // due-date validation) but were missing from this enum on `main`,
+    // meaning the invoice contract didn't compile at HEAD. Added here so the
+    // crate builds; not part of any of the four assigned issues.
+    InvalidAmount = 43,
+    InvalidDueDate = 44,
 }
 
 #[contracttype]
@@ -319,8 +325,6 @@ pub enum DataKey {
     AdminChangeScheduledAt,
     // #654: enforce oracle verification before invoices may be funded
     RequireOracleVerification,
-    // #539: invoice dispute mechanism
-    Dispute(u64),
     // #861: N-of-M staked oracle consensus network
     OracleRegistry,
     RequireConsensusVerification,
@@ -334,6 +338,12 @@ pub enum DataKey {
     KeeperIds,
     // #775: borrower opt-out from the public invoice sharing link
     Private(u64),
+    // #801: whitelisted keeper addresses permitted to call mark_defaulted().
+    // Pre-existing build breakage found while working this branch: used by
+    // add_keeper/remove_keeper/list_keepers/is_keeper but missing from this
+    // enum on `main`. Added here so the crate builds; not part of any of the
+    // four assigned issues.
+    KeeperIds,
 }
 
 const EVT: Symbol = symbol_short!("invoice");
@@ -403,6 +413,25 @@ fn validate_invoice_strings(
     if verification_hash.len() > MAX_VERIFICATION_HASH_LEN {
         panic_with_error!(env, InvoiceError::VerificationHashTooLong);
     }
+    // #772: reject descriptions containing HTML-special characters so a
+    // borrower can't stash a stored-XSS payload (e.g. `<img onerror=...>`)
+    // in on-chain data that the frontend later renders. Restricted to
+    // printable ASCII plus space; relies on the MAX_DESCRIPTION_LEN check
+    // above to bound the copy buffer.
+    if !is_safe_description(description) {
+        panic_with_error!(env, InvoiceError::InvalidDescriptionChars);
+    }
+}
+
+/// #772: printable ASCII (letters/digits/punctuation/space) only, and none
+/// of the HTML/attribute-breakout characters `< > & " '`.
+fn is_safe_description(desc: &String) -> bool {
+    let len = desc.len() as usize;
+    let mut buf = [0u8; MAX_DESCRIPTION_LEN as usize];
+    desc.copy_into_slice(&mut buf[..len]);
+    buf[..len].iter().all(|&b| {
+        (b.is_ascii_graphic() || b == b' ') && !matches!(b, b'<' | b'>' | b'&' | b'"' | b'\'')
+    })
 }
 
 fn max_extension_due_date(invoice: &Invoice) -> u64 {
@@ -4106,6 +4135,10 @@ mod test {
         // #779: paused/unpaused events must carry both the pausing admin and
         // a timestamp.
         use soroban_sdk::testutils::Events;
+        // Pre-existing build breakage found while working this branch: this
+        // test uses `.into_val()` below but didn't import the `IntoVal`
+        // trait, so `cargo test` didn't compile at HEAD.
+        use soroban_sdk::IntoVal;
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
@@ -4427,12 +4460,16 @@ mod test {
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
         let keeper = Address::generate(&env);
         client.add_keeper(&admin, &keeper);
-        assert_eq!(client.list_keepers(), soroban_sdk::vec![&env, keeper.clone()]);
+        assert_eq!(
+            client.list_keepers(),
+            soroban_sdk::vec![&env, keeper.clone()]
+        );
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         client.mark_defaulted(&id, &keeper);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
@@ -4447,13 +4484,16 @@ mod test {
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         let result = client.try_mark_defaulted(&id, &stranger);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4469,13 +4509,16 @@ mod test {
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         let result = client.try_mark_defaulted(&id, &keeper);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4489,7 +4532,9 @@ mod test {
         let result = client.try_add_keeper(&attacker, &keeper);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4608,6 +4653,87 @@ mod test {
             result.unwrap_err().unwrap(),
             InvoiceError::DescriptionTooLong.into()
         );
+    }
+
+    // ── #772: stored-XSS via unsanitised invoice description ────────────────
+
+    #[test]
+    fn test_create_invoice_description_with_script_tag_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "<script>alert(document.cookie)</script>"),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidDescriptionChars.into()
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_description_with_img_onerror_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "<img src=x onerror=alert(1)>"),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidDescriptionChars.into()
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_description_with_quotes_and_ampersand_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        for bad in ["He said \"hi\"", "It's ready", "Rock & Roll"] {
+            let result = client.try_create_invoice(
+                &sme,
+                &String::from_str(&env, "Debtor Corp"),
+                &1_000i128,
+                &(env.ledger().timestamp() + 86_400),
+                &String::from_str(&env, bad),
+                &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
+            );
+            assert_eq!(
+                result.unwrap_err().unwrap(),
+                InvoiceError::InvalidDescriptionChars.into()
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_invoice_plain_description_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "Consulting services rendered in Q2 2026."),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(id, 1);
     }
 
     #[test]

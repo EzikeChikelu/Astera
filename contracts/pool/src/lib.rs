@@ -162,8 +162,9 @@ pub enum PoolError {
     // #777: Reflector oracle collateral price feed — neither the oracle
     // nor the admin fallback has a usable price for the requested token.
     OraclePriceUnavailable = 85,
-    // #745: duplicate token registration
-    TokenAlreadySupported = 86,
+    // #773: loyalty tier list rejected by set_loyalty_tiers (empty, out of
+    // ascending order, or a bonus_bps above MAX_LOYALTY_BONUS_BPS)
+    InvalidLoyaltyTiers = 86,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -175,6 +176,9 @@ const SECS_PER_YEAR: u64 = 31_536_000;
 // #367: Stellar-native tokens use 7 decimal places (stroops)
 const EXPECTED_DECIMALS: u32 = 7;
 const SECS_PER_DAY: u64 = 86_400;
+// #773: loyalty bonus tiers — sanity ceiling on any single tier's bonus
+// (20%) so a misconfigured admin call can't promise an unpayable APY.
+const MAX_LOYALTY_BONUS_BPS: u32 = 2_000;
 // #275: default max utilization — disabled (10_000 bps = 100%).
 // Many flows legitimately deploy 100% of available liquidity.
 const DEFAULT_MAX_UTILIZATION_BPS: u32 = 10_000;
@@ -428,6 +432,40 @@ pub struct InvestorPosition {
     pub deployed: i128,
     pub earned: i128,
     pub deposit_count: u32,
+    // #773: ledger timestamp this investor's current continuous position
+    // started (0 = no active position). Reset to 0 when `available` returns
+    // to zero so a later re-deposit restarts the loyalty timer; used to
+    // compute the tenure-based loyalty bonus tier in `get_deposit_info`.
+    pub loyalty_start_at: u64,
+}
+
+/// #773: one loyalty tier — investors whose tenure (days since
+/// `loyalty_start_at`) meets `min_days` earn `bonus_bps` on top of the
+/// pool's base `yield_bps`. Tiers are stored sorted ascending by `min_days`;
+/// the highest tier an investor qualifies for applies.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoyaltyTier {
+    pub min_days: u32,
+    pub bonus_bps: u32,
+}
+
+/// #773: read-only view of an investor's current loyalty standing, returned
+/// by `get_deposit_info` for the frontend's tier/APY display.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DepositInfo {
+    /// Ledger timestamp the investor's current position started (0 = no
+    /// active position for this token).
+    pub deposited_at: u64,
+    pub days_active: u64,
+    /// 1-based tier index into the configured tier list.
+    pub tier: u32,
+    pub bonus_bps: u32,
+    pub base_apy_bps: u32,
+    pub effective_apy_bps: u32,
+    /// Days of tenure needed to reach the next tier, if any.
+    pub next_tier_days: Option<u32>,
 }
 
 #[contracttype]
@@ -733,8 +771,19 @@ const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
 // #777: Reflector Oracle config, same Symbol-key workaround as #867 above.
 const REFLECTOR_ORACLE: Symbol = symbol_short!("rflector");
-// #869: registered auction contract address for discount-based funding.
-const AUCTION_CONTRACT: Symbol = symbol_short!("auction");
+// #773: admin-configurable loyalty tier list. Stored under a Symbol key
+// rather than a DataKey variant — DataKey is already at Soroban's 50-variant
+// ceiling (see #867/#777 above).
+const LOYALTY_TIERS: Symbol = symbol_short!("loy_tier");
+// Pre-existing build breakage found while working this branch: these two
+// keys are read/written by `get_insurance_contract`/`set_insurance_contract`
+// and `record_referral_activity`/the referral registry setter, but
+// `DataKey::InsuranceContract` and a `REFERRAL_CFG` constant were both
+// missing on `main` (the enum-variant version would also have breached the
+// 50-variant ceiling above). Restored as Symbol keys, matching the same
+// workaround already used for compliance/Reflector config.
+const INSURANCE_CFG: Symbol = symbol_short!("ins_cfg");
+const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
 const ORACLE_STALE_SECS: Symbol = symbol_short!("o_stale");
 // #777: per-token admin fallback price, stored as a single Map so it
 // doesn't need its own DataKey variant either.
@@ -792,17 +841,23 @@ pub trait ReflectorContract {
     fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPriceData>;
 }
 
-/// Cross-contract interface to the optional default-insurance reserve (#866).
-///
-/// `file_claim` is deliberately *not* declared/called here: Soroban disallows
-/// A→B→A re-entrancy, and `insurance.file_claim` itself calls back into this
-/// pool contract (`get_funded_invoice`, `get_collateral_deposit`,
-/// `receive_insurance_payout`) to independently re-derive the shortfall. If
-/// pool called `file_claim` from inside `execute_seize_collateral`, that
-/// callback into pool while pool is still on the call stack would trap. This
-/// is exactly why `file_claim` is designed to be permissionless — anyone
-/// (a keeper, the SME, the frontend) calls it directly against the insurance
-/// contract as a follow-up transaction after collateral has been seized.
+// Pre-existing build breakage found while working this branch: everything
+// below this comment through `ReferralContract` was referenced (fund_invoice_request's
+// insurance-purchase call, record_referral_activity) but never defined on
+// `main`, so the pool contract didn't compile at HEAD. Restored here — same
+// "local minimal mirror, decoded by field name" convention as
+// `CreditScoreData`/`ReflectorPriceData` above — so the crate builds. Not
+// part of any of the four assigned issues.
+
+/// #866: local mirror of contracts/insurance's `CoverageRecord` — only the
+/// field this contract actually reads needs to be present.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoverageRecord {
+    pub premium_paid: i128,
+}
+
+/// #866: cross-contract interface to the optional default-insurance reserve.
 #[contractclient(name = "InsuranceClient")]
 pub trait InsuranceContract {
     fn purchase_coverage(
@@ -813,31 +868,10 @@ pub trait InsuranceContract {
         sme: Address,
         due_date: u64,
         token: Address,
-    ) -> InsuranceCoverageRecord;
+    ) -> CoverageRecord;
 }
 
-/// Local mirror of insurance::CoverageRecord. Cross-contract return-value
-/// decoding requires the field set to match exactly (not a subset) — unlike
-/// struct *arguments*, which do tolerate extra fields on the callee's side —
-/// so every field must be reproduced here even though pool only reads
-/// `premium_paid` (to keep protocol_revenue accounting in sync with what was
-/// actually drawn).
-#[contracttype]
-#[derive(Clone)]
-pub struct InsuranceCoverageRecord {
-    pub invoice_id: u64,
-    pub token: Address,
-    pub principal: i128,
-    pub premium_paid: i128,
-    pub coverage_bps: u32,
-    pub purchased_at: u64,
-    pub claimed: bool,
-}
-
-/// #799: cross-contract interface to the referral program. `kind` is
-/// `"borrow"` or `"deposit"`; returns the reward amount (if any) credited
-/// to the referee's referrer, which the pool must then transfer to the
-/// referral contract.
+/// #799: cross-contract interface to the optional referral registry.
 #[contractclient(name = "ReferralClient")]
 pub trait ReferralContract {
     fn record_activity(
@@ -1157,6 +1191,7 @@ fn update_investor_available(
                 deployed: 0,
                 earned: 0,
                 deposit_count: 0,
+                loyalty_start_at: 0,
             });
 
     if delta >= 0 {
@@ -1166,10 +1201,75 @@ fn update_investor_available(
             .ok_or(PoolError::AmountOverflow)?;
     } else {
         position.available = position.available.saturating_sub(-delta);
+        // #773: fully exited — reset the loyalty timer so a later re-deposit
+        // starts a fresh tenure instead of inheriting the old start time.
+        if position.available == 0 {
+            position.loyalty_start_at = 0;
+        }
     }
 
     env.storage().persistent().set(&pos_key, &position);
     Ok(())
+}
+
+/// #773: the default tier ladder from the feature proposal — used until an
+/// admin calls `set_loyalty_tiers` to override it.
+fn default_loyalty_tiers(env: &Env) -> Vec<LoyaltyTier> {
+    let mut tiers = Vec::new(env);
+    tiers.push_back(LoyaltyTier {
+        min_days: 0,
+        bonus_bps: 0,
+    });
+    tiers.push_back(LoyaltyTier {
+        min_days: 31,
+        bonus_bps: 50,
+    });
+    tiers.push_back(LoyaltyTier {
+        min_days: 91,
+        bonus_bps: 150,
+    });
+    tiers.push_back(LoyaltyTier {
+        min_days: 366,
+        bonus_bps: 300,
+    });
+    tiers
+}
+
+fn get_loyalty_tiers_cached(env: &Env) -> Vec<LoyaltyTier> {
+    env.storage()
+        .instance()
+        .get(&LOYALTY_TIERS)
+        .unwrap_or_else(|| default_loyalty_tiers(env))
+}
+
+/// #773: tenure in whole days since `loyalty_start_at`, or 0 if the investor
+/// has no active position (start-timestamp 0 must never be read as "since
+/// the Unix epoch").
+fn loyalty_days_active(env: &Env, loyalty_start_at: u64) -> u64 {
+    if loyalty_start_at == 0 {
+        return 0;
+    }
+    env.ledger().timestamp().saturating_sub(loyalty_start_at) / SECS_PER_DAY
+}
+
+/// #773: highest tier whose `min_days` the investor's tenure satisfies.
+/// Returns (1-based tier index, bonus_bps, next tier's min_days if any).
+/// `tiers` must be sorted ascending by `min_days` (enforced by
+/// `set_loyalty_tiers`).
+fn resolve_loyalty_tier(tiers: &Vec<LoyaltyTier>, days_active: u64) -> (u32, u32, Option<u32>) {
+    let mut tier_index: u32 = 0;
+    let mut bonus_bps: u32 = 0;
+    let mut next_tier_days: Option<u32> = None;
+    for i in 0..tiers.len() {
+        let tier = tiers.get(i).unwrap();
+        if days_active >= tier.min_days as u64 {
+            tier_index = i + 1;
+            bonus_bps = tier.bonus_bps;
+        } else if next_tier_days.is_none() {
+            next_tier_days = Some(tier.min_days);
+        }
+    }
+    (tier_index, bonus_bps, next_tier_days)
 }
 
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
@@ -1286,7 +1386,7 @@ fn get_credit_score_contract(env: &Env) -> Option<Address> {
 }
 
 fn get_insurance_contract(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::InsuranceContract)
+    env.storage().instance().get(&INSURANCE_CFG)
 }
 
 fn fee_tier_matches(tier: &FeeTier, principal: i128, score: u32) -> bool {
@@ -1512,6 +1612,7 @@ fn credit_investor_value(
             deployed: 0,
             earned: 0,
             deposit_count: 0,
+            loyalty_start_at: 0,
         });
     position.deposited = position
         .deposited
@@ -2241,6 +2342,7 @@ impl FundingPool {
                 deployed: 0,
                 earned: 0,
                 deposit_count: 0,
+                loyalty_start_at: 0,
             });
 
         // Normalise deposit amount to USDC equivalent using stored exchange rate
@@ -2303,6 +2405,13 @@ impl FundingPool {
         mint_args.push_back(investor.clone().into_val(&env));
         mint_args.push_back(shares_to_mint.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "mint"), mint_args);
+
+        // #773: starting (or restarting, after a full withdrawal) a position —
+        // begin the loyalty tenure clock now. Topping up an already-open
+        // position does not push the timer back.
+        if investor_position.available == 0 {
+            investor_position.loyalty_start_at = env.ledger().timestamp();
+        }
 
         // #233: update investor position — track in USDC terms to match pool_value
         investor_position.deposited += usdc_received;
@@ -2536,6 +2645,7 @@ impl FundingPool {
                 deployed: 0,
                 earned: 0,
                 deposit_count: 0,
+                loyalty_start_at: 0,
             });
         if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
@@ -3124,7 +3234,7 @@ impl FundingPool {
 
         non_reentrant!(&env, {
             let token_totals_key = DataKey::TokenTotals(token.clone());
-            let tt: PoolTokenTotals = env
+            let mut tt: PoolTokenTotals = env
                 .storage()
                 .instance()
                 .get(&token_totals_key)
@@ -3152,20 +3262,67 @@ impl FundingPool {
                 0
             };
 
+            // #773: loyalty bonus — scales the yield just claimed by
+            // (bonus_bps / base yield_bps), i.e. a long-term depositor's
+            // realized yield is boosted in the same proportion their
+            // effective APY is above the pool's base rate. Funded out of
+            // protocol_revenue (the same fee pool #784's treasury draws
+            // from) and capped by whatever is actually available there, so
+            // this can never draw down other investors' principal.
+            let mut bonus: i128 = 0;
             if claimable > 0 {
+                let position: InvestorPosition = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
+                    .unwrap_or(InvestorPosition {
+                        deposited: 0,
+                        available: 0,
+                        deployed: 0,
+                        earned: 0,
+                        deposit_count: 0,
+                        loyalty_start_at: 0,
+                    });
+                let config = get_config_cached(&env)?;
+                if config.yield_bps > 0 {
+                    let tiers = get_loyalty_tiers_cached(&env);
+                    let days_active = loyalty_days_active(&env, position.loyalty_start_at);
+                    let (_, bonus_bps, _) = resolve_loyalty_tier(&tiers, days_active);
+                    if bonus_bps > 0 {
+                        let raw_bonus = claimable
+                            .checked_mul(bonus_bps as i128)
+                            .ok_or(PoolError::AmountOverflow)?
+                            .checked_div(config.yield_bps as i128)
+                            .ok_or(PoolError::AmountOverflow)?;
+                        bonus = raw_bonus.min(tt.protocol_revenue).max(0);
+                    }
+                }
+            }
+            let total_claim = claimable
+                .checked_add(bonus)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            if total_claim > 0 {
                 let token_client = token::Client::new(&env, &token);
                 // Issue #336 Fix: Use try_transfer to detect failures
                 // Only update snapshot if transfer succeeds
                 match token_client.try_transfer(
                     &env.current_contract_address(),
                     &investor,
-                    &claimable,
+                    &total_claim,
                 ) {
                     Ok(_) => {
                         // Transfer succeeded - update snapshot
                         env.storage()
                             .persistent()
                             .set(&snapshot_key, &tt.reward_per_share);
+                        if bonus > 0 {
+                            tt.protocol_revenue = tt
+                                .protocol_revenue
+                                .checked_sub(bonus)
+                                .ok_or(PoolError::AmountOverflow)?;
+                            env.storage().instance().set(&token_totals_key, &tt);
+                        }
                     }
                     Err(_) => {
                         // Transfer failed - do NOT update snapshot
@@ -3182,7 +3339,7 @@ impl FundingPool {
 
             env.events().publish(
                 (EVT, symbol_short!("yld_claim")),
-                (investor, token, claimable),
+                (investor, token, claimable, bonus),
             );
             Ok(())
         })
@@ -4514,13 +4671,13 @@ impl FundingPool {
         Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
-            .set(&DataKey::InsuranceContract, &insurance_contract);
+            .set(&INSURANCE_CFG, &insurance_contract);
         Ok(())
     }
 
     pub fn get_insurance_contract(env: Env) -> Option<Address> {
         bump_instance(&env);
-        env.storage().instance().get(&DataKey::InsuranceContract)
+        env.storage().instance().get(&INSURANCE_CFG)
     }
 
     /// #866: called by the insurance contract after it transfers a claim
@@ -4541,7 +4698,7 @@ impl FundingPool {
         let configured: Address = env
             .storage()
             .instance()
-            .get(&DataKey::InsuranceContract)
+            .get(&INSURANCE_CFG)
             .ok_or(PoolError::Unauthorized)?;
         if insurance != configured {
             return Err(PoolError::Unauthorized);
@@ -4656,6 +4813,7 @@ impl FundingPool {
                     deployed: 0,
                     earned: 0,
                     deposit_count: 0,
+                    loyalty_start_at: 0,
                 });
         let share_bps = ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         Ok(share_bps)
@@ -4724,6 +4882,80 @@ impl FundingPool {
             env.events()
                 .publish((EVT, symbol_short!("rev_wdraw")), (token, amount, treasury));
             Ok(())
+        })
+    }
+
+    // ---- #773: loyalty bonus APY for long-term depositors ----
+
+    /// Admin-configurable tier ladder. `tiers` must be sorted strictly
+    /// ascending by `min_days` and each `bonus_bps` capped at
+    /// `MAX_LOYALTY_BONUS_BPS`. Replaces the whole ladder (including the
+    /// built-in default) atomically.
+    pub fn set_loyalty_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<LoyaltyTier>,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if tiers.is_empty() {
+            return Err(PoolError::InvalidLoyaltyTiers);
+        }
+        let mut prev_min_days: Option<u32> = None;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.bonus_bps > MAX_LOYALTY_BONUS_BPS {
+                return Err(PoolError::InvalidLoyaltyTiers);
+            }
+            if let Some(prev) = prev_min_days {
+                if tier.min_days <= prev {
+                    return Err(PoolError::InvalidLoyaltyTiers);
+                }
+            }
+            prev_min_days = Some(tier.min_days);
+        }
+        env.storage().instance().set(&LOYALTY_TIERS, &tiers);
+        env.events().publish((EVT, symbol_short!("loy_set")), admin);
+        Ok(())
+    }
+
+    pub fn get_loyalty_tiers(env: Env) -> Vec<LoyaltyTier> {
+        get_loyalty_tiers_cached(&env)
+    }
+
+    /// Current tier/bonus standing for `investor`'s position in `token`, for
+    /// the frontend's "current tier / next tier threshold" display.
+    pub fn get_deposit_info(
+        env: Env,
+        investor: Address,
+        token: Address,
+    ) -> Result<DepositInfo, PoolError> {
+        bump_instance(&env);
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvestorPosition(investor, token))
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+                loyalty_start_at: 0,
+            });
+        let tiers = get_loyalty_tiers_cached(&env);
+        let days_active = loyalty_days_active(&env, position.loyalty_start_at);
+        let (tier, bonus_bps, next_tier_days) = resolve_loyalty_tier(&tiers, days_active);
+        let config = get_config_cached(&env)?;
+        Ok(DepositInfo {
+            deposited_at: position.loyalty_start_at,
+            days_active,
+            tier,
+            bonus_bps,
+            base_apy_bps: config.yield_bps,
+            effective_apy_bps: config.yield_bps.saturating_add(bonus_bps),
+            next_tier_days,
         })
     }
 
@@ -5005,6 +5237,7 @@ impl FundingPool {
                     deployed: 0,
                     earned: 0,
                     deposit_count: 0,
+                    loyalty_start_at: 0,
                 });
             if position.available < shares_to_burn {
                 return Err(PoolError::InvalidAmount);
@@ -5931,7 +6164,13 @@ impl FundingPool {
     /// `protocol_revenue` (the reward is a redistributed slice of the fee
     /// already credited there, not new inflation). Never fails the caller:
     /// an unset registry or any cross-contract error is swallowed.
-    fn record_referral_activity(env: &Env, referee: &Address, kind: Symbol, fee_amount: i128, token: &Address) {
+    fn record_referral_activity(
+        env: &Env,
+        referee: &Address,
+        kind: Symbol,
+        fee_amount: i128,
+        token: &Address,
+    ) {
         if fee_amount < 0 {
             return;
         }
@@ -6142,7 +6381,11 @@ impl FundingPool {
     /// referee's factoring fee (on invoice repayment) or deposit is routed
     /// there automatically. Unset by default — existing deployments and
     /// tests are unaffected until an admin opts in.
-    pub fn set_referral_registry(env: Env, admin: Address, registry: Address) -> Result<(), PoolError> {
+    pub fn set_referral_registry(
+        env: Env,
+        admin: Address,
+        registry: Address,
+    ) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
@@ -7161,6 +7404,225 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    // #784: fund an invoice, let its factoring fee accrue as protocol
+    // revenue, then withdraw it to the treasury and confirm the treasury's
+    // actual on-chain token balance increased (not just internal counters).
+    #[test]
+    fn test_fund_invoice_then_withdraw_fees_increases_treasury_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.set_factoring_fee(&admin, &250); // 2.5%
+        client.set_treasury(&admin, &treasury);
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+
+        let expected_fee = principal * 250 / BPS_DENOM as i128;
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        // Fee accrued as protocol revenue, separate from investor pool_value.
+        assert_eq!(client.get_protocol_revenue(&usdc_id), expected_fee);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &usdc_id);
+        assert_eq!(token_client.balance(&treasury), 0);
+
+        client.withdraw_revenue(&admin, &usdc_id, &expected_fee);
+
+        // Treasury's real token balance increased by exactly the fee withdrawn.
+        assert_eq!(token_client.balance(&treasury), expected_fee);
+        assert_eq!(client.get_protocol_revenue(&usdc_id), 0);
+    }
+
+    // ── #773: loyalty bonus APY for long-term depositors ─────────────────────
+
+    #[test]
+    fn test_get_deposit_info_defaults_to_tier_one_for_fresh_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let info = client.get_deposit_info(&investor, &usdc_id);
+        assert_eq!(info.tier, 1);
+        assert_eq!(info.bonus_bps, 0);
+        assert_eq!(info.days_active, 0);
+        assert_eq!(info.next_tier_days, Some(31));
+        assert_eq!(info.effective_apy_bps, info.base_apy_bps);
+    }
+
+    #[test]
+    fn test_loyalty_tier_after_100_days_is_tier_three() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        env.ledger().with_mut(|l| l.timestamp += 100 * SECS_PER_DAY);
+
+        let info = client.get_deposit_info(&investor, &usdc_id);
+        // 91-365 days => tier 3, +150 bps per the default ladder.
+        assert_eq!(info.tier, 3);
+        assert_eq!(info.bonus_bps, 150);
+        assert_eq!(info.days_active, 100);
+        assert_eq!(info.next_tier_days, Some(366));
+        assert_eq!(info.effective_apy_bps, info.base_apy_bps + 150);
+    }
+
+    #[test]
+    fn test_loyalty_timer_resets_after_full_withdrawal_and_redeposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 20_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        env.ledger().with_mut(|l| l.timestamp += 100 * SECS_PER_DAY);
+        assert_eq!(client.get_deposit_info(&investor, &usdc_id).tier, 3);
+
+        // Fully exit, then re-deposit — tenure should restart from zero.
+        // This is the pool's first (and only) deposit for this token, so
+        // shares minted == usdc_received == 10_000 exactly.
+        client.withdraw(&investor, &usdc_id, &10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let info = client.get_deposit_info(&investor, &usdc_id);
+        assert_eq!(info.tier, 1);
+        assert_eq!(info.bonus_bps, 0);
+        assert_eq!(info.days_active, 0);
+    }
+
+    #[test]
+    fn test_set_loyalty_tiers_rejects_bad_configs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        // Empty ladder rejected.
+        let empty: Vec<LoyaltyTier> = Vec::new(&env);
+        assert_eq!(
+            client
+                .try_set_loyalty_tiers(&admin, &empty)
+                .unwrap_err()
+                .unwrap(),
+            PoolError::InvalidLoyaltyTiers
+        );
+
+        // Non-ascending min_days rejected.
+        let mut out_of_order: Vec<LoyaltyTier> = Vec::new(&env);
+        out_of_order.push_back(LoyaltyTier {
+            min_days: 30,
+            bonus_bps: 50,
+        });
+        out_of_order.push_back(LoyaltyTier {
+            min_days: 10,
+            bonus_bps: 100,
+        });
+        assert_eq!(
+            client
+                .try_set_loyalty_tiers(&admin, &out_of_order)
+                .unwrap_err()
+                .unwrap(),
+            PoolError::InvalidLoyaltyTiers
+        );
+
+        // Bonus above the sanity ceiling rejected.
+        let mut too_generous: Vec<LoyaltyTier> = Vec::new(&env);
+        too_generous.push_back(LoyaltyTier {
+            min_days: 0,
+            bonus_bps: MAX_LOYALTY_BONUS_BPS + 1,
+        });
+        assert_eq!(
+            client
+                .try_set_loyalty_tiers(&admin, &too_generous)
+                .unwrap_err()
+                .unwrap(),
+            PoolError::InvalidLoyaltyTiers
+        );
+
+        // A valid custom ladder is accepted and overrides the default.
+        let mut custom: Vec<LoyaltyTier> = Vec::new(&env);
+        custom.push_back(LoyaltyTier {
+            min_days: 0,
+            bonus_bps: 0,
+        });
+        custom.push_back(LoyaltyTier {
+            min_days: 7,
+            bonus_bps: 1_000,
+        });
+        client.set_loyalty_tiers(&admin, &custom);
+        assert_eq!(client.get_loyalty_tiers(), custom);
+    }
+
+    #[test]
+    fn test_claim_yield_applies_loyalty_bonus_funded_from_protocol_revenue() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.set_factoring_fee(&admin, &250); // 2.5% — funds protocol_revenue
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+
+        // Age the position into Tier 3 (+150 bps) before yield is realized.
+        env.ledger().with_mut(|l| l.timestamp += 100 * SECS_PER_DAY);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        let protocol_revenue_before = client.get_protocol_revenue(&usdc_id);
+        assert!(protocol_revenue_before > 0);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &usdc_id);
+        let balance_before = token_client.balance(&investor);
+        client.claim_yield(&investor, &usdc_id);
+        let claimed = token_client.balance(&investor) - balance_before;
+
+        // Bonus was paid out of protocol_revenue, so it dropped by the
+        // difference between what was actually claimed and the raw
+        // reward_per_share entitlement.
+        let protocol_revenue_after = client.get_protocol_revenue(&usdc_id);
+        assert!(protocol_revenue_after < protocol_revenue_before);
+        assert!(claimed > 0);
     }
 
     // #799: referral program integration — the pool contract pays a

@@ -1,5 +1,5 @@
 import type { InvoiceMetadata } from '@/lib/types';
-import { formatUSDC, formatDate, daysUntil } from '@/lib/stellar';
+import { formatAmount, formatUSDC, formatDate, daysUntil } from '@/lib/stellar';
 import Link from 'next/link';
 import { Skeleton } from '@/components/Skeleton';
 
@@ -82,7 +82,9 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
         </span>
       </div>
 
-      <div className="text-2xl font-bold mb-4 text-[var(--text-primary)]">{formatUSDC(metadata.amount)}</div>
+      <div className="text-2xl font-bold mb-4 text-[var(--text-primary)]">
+        {formatAmount(metadata.amount, metadata.decimals)}
+      </div>
 
       <div className="flex items-center justify-between text-sm text-[var(--muted)]">
         <div>
@@ -118,7 +120,7 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
           <div className="flex items-center justify-between text-xs mt-1.5">
             <span className="text-[var(--muted)]">{formatUSDC(fundedAmount!)} committed</span>
             <span className="text-[var(--muted)]">
-              {formatUSDC(metadata.amount - fundedAmount!)} remaining
+              {formatAmount(metadata.amount - fundedAmount!, metadata.decimals)} remaining
             </span>
           </div>
         </div>

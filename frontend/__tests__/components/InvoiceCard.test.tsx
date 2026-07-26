@@ -115,6 +115,15 @@ describe('InvoiceCard', () => {
     expect(screen.getByText(/25\.0%/)).toBeInTheDocument();
   });
 
+  it('formats the amount using metadata.decimals, not a hardcoded 7 (#778)', () => {
+    // 1_000_000 raw units at 6 decimals is 1.00 — dividing by 10^7 instead
+    // would wrongly show $0.10.
+    const meta = makeMeta({ amount: 1_000_000n, decimals: 6 });
+    render(<InvoiceCard id={1} metadata={meta} />);
+    expect(screen.getByText('$1.00')).toBeInTheDocument();
+    expect(screen.queryByText('$0.10')).not.toBeInTheDocument();
+  });
+
   it('renders InvoiceCardSkeleton with pulse animation', () => {
     const { container } = render(<InvoiceCardSkeleton />);
     const root = container.firstChild as HTMLElement;
