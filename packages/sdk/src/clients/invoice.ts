@@ -1,5 +1,5 @@
 import { Contract, TransactionBuilder, BASE_FEE, rpc as StellarRpc } from '@stellar/stellar-sdk';
-import { BaseClient, nativeToScVal, scValToNative, Address } from './base';
+import { BaseClient, nativeToScVal, scValToNative, Address, xdr } from './base';
 import type { ClientConfig, Invoice, InvoiceMetadata, TransactionProgress } from '../types';
 import type { Signer } from '../types';
 
@@ -37,6 +37,21 @@ export class InvoiceClient extends BaseClient {
       throw new Error(`Simulation failed: ${sim.error}`);
     }
     return scValToNative(sim.result!.retval) as Invoice;
+  }
+
+  /**
+   * #987 — batch-read helper matching the on-chain get_multiple_invoices, so
+   * consumers don't have to assemble the Vec<u64> call manually or fall back
+   * to one RPC per id. Order of the returned array matches `ids`.
+   */
+  async getMultipleInvoices(ids: Array<bigint | number>): Promise<Invoice[]> {
+    const sim = await this.simulate('get_multiple_invoices', [
+      xdr.ScVal.scvVec(ids.map((id) => nativeToScVal(id, { type: 'u64' }))),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    return scValToNative(sim.result!.retval) as Invoice[];
   }
 
   async getMetadata(id: bigint | number): Promise<InvoiceMetadata> {

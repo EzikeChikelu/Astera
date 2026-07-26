@@ -78,6 +78,23 @@ function rateModelConfigFromScVal(raw: Record<string, unknown>): RateModelConfig
   };
 }
 
+function mapFundedInvoice(raw: unknown): FundedInvoice | null {
+  if (!raw) return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    invoiceId: BigInt(String(r.invoice_id)),
+    sme: r.sme as string,
+    token: r.token as string,
+    principal: BigInt(String(r.principal)),
+    committed: BigInt(String(r.committed ?? 0)),
+    fundedAt: Number(r.funded_at),
+    factoringFee: BigInt(String(r.factoring_fee ?? 0)),
+    dueDate: Number(r.due_date),
+    repaidAmount: BigInt(String(r.repaid_amount ?? 0)),
+    coFundingRoundId: r.co_funding_round_id != null ? BigInt(String(r.co_funding_round_id)) : undefined,
+  };
+}
+
 export class PoolClient extends BaseClient {
   constructor(config: ClientConfig) {
     super(config);
@@ -577,21 +594,24 @@ export class PoolClient extends BaseClient {
     if (StellarRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
     }
-    const raw = scValToNative(sim.result!.retval);
-    if (!raw) return null;
-    const r = raw as Record<string, unknown>;
-    return {
-      invoiceId: BigInt(String(r.invoice_id)),
-      sme: r.sme as string,
-      token: r.token as string,
-      principal: BigInt(String(r.principal)),
-      committed: BigInt(String(r.committed ?? 0)),
-      fundedAt: Number(r.funded_at),
-      factoringFee: BigInt(String(r.factoring_fee ?? 0)),
-      dueDate: Number(r.due_date),
-      repaidAmount: BigInt(String(r.repaid_amount ?? 0)),
-      coFundingRoundId: r.co_funding_round_id != null ? BigInt(String(r.co_funding_round_id)) : undefined,
-    };
+    return mapFundedInvoice(scValToNative(sim.result!.retval));
+  }
+
+  /**
+   * #987 — batch-read helper matching the on-chain get_funded_invoices_batch,
+   * so consumers don't have to assemble the Vec<u64> call manually or fall
+   * back to one RPC per id. Order of the returned array matches `invoiceIds`
+   * (null entries mean that id has no funded-invoice record).
+   */
+  async getFundedInvoicesBatch(invoiceIds: Array<bigint | number>): Promise<Array<FundedInvoice | null>> {
+    const sim = await this.simulate('get_funded_invoices_batch', [
+      xdr.ScVal.scvVec(invoiceIds.map((id) => nativeToScVal(id, { type: 'u64' }))),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const raw = scValToNative(sim.result!.retval) as unknown[];
+    return raw.map((entry) => mapFundedInvoice(entry));
   }
 
   async getPoolTokenTotals(token: string): Promise<PoolTokenTotals> {
