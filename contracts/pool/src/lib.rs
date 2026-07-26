@@ -720,6 +720,8 @@ const EVT: Symbol = symbol_short!("pool");
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
 // #777: Reflector Oracle config, same Symbol-key workaround as #867 above.
 const REFLECTOR_ORACLE: Symbol = symbol_short!("rflector");
+// #869: registered auction contract address for discount-based funding.
+const AUCTION_CONTRACT: Symbol = symbol_short!("auction");
 const ORACLE_STALE_SECS: Symbol = symbol_short!("o_stale");
 // #777: per-token admin fallback price, stored as a single Map so it
 // doesn't need its own DataKey variant either.
@@ -1565,6 +1567,9 @@ fn fund_invoice_request(
             None => config.yield_bps,
         }
     };
+    // #869: resolve factoring fee at funding time; auction contract may
+    // override this with a discount via fund_invoice_with_discount.
+    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone(), &request.token)?;
     let funded_key = DataKey::FundedInvoice(request.invoice_id);
     let is_partial = env.storage().persistent().has(&funded_key);
     if is_partial {
@@ -3186,6 +3191,105 @@ impl FundingPool {
             token,
         };
         fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+        Self::non_reentrant_end(&env);
+        Ok(())
+    }
+
+    /// #869: fund an invoice with an auction-determined discount applied on top
+    /// of the pool's baseline rate. Auth-gated to the registered auction contract only.
+    pub fn fund_invoice_with_discount(
+        env: Env,
+        invoice_id: u64,
+        principal: i128,
+        sme: Address,
+        due_date: u64,
+        token: Address,
+        discount_bps: u32,
+    ) -> Result<(), PoolError> {
+        let auction: Address = env
+            .storage()
+            .instance()
+            .get(&AUCTION_CONTRACT)
+            .ok_or(PoolError::Unauthorized)?;
+        auction.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        Self::non_reentrant_start(&env);
+
+        let config = get_config_cached(&env)?;
+
+        // Verify the invoice contract still has this pool as its authorized pool.
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        let this_contract = env.current_contract_address();
+        match invoice_client.try_get_authorized_pool() {
+            Ok(Ok(ref auth_pool)) if auth_pool == &this_contract => {}
+            _ => return Err(PoolError::InvoicePoolMismatch),
+        }
+        let accepted_tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .ok_or(PoolError::NotInitialized)?;
+
+        // Collateral check
+        let collateral_cfg: CollateralConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::CollateralConfig)
+            .unwrap_or(CollateralConfig {
+                threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                collateral_bps: DEFAULT_COLLATERAL_BPS,
+            });
+        let req_collateral = required_collateral(principal, &collateral_cfg);
+        if req_collateral > 0 {
+            let deposit: Option<CollateralDeposit> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CollateralDeposit(invoice_id));
+            match deposit {
+                None => return Err(PoolError::CollateralNotFound),
+                Some(d) => {
+                    if d.settled {
+                        return Err(PoolError::CollateralAlreadySettled);
+                    }
+                    if d.amount < req_collateral {
+                        return Err(PoolError::InvalidAmount);
+                    }
+                }
+            }
+        }
+
+        // #867: gate on SME compliance when enabled
+        Self::require_compliance_cleared(&env, &sme)?;
+
+        // Clamp discount to not exceed the factored fee (cannot make fee negative)
+        let fee_bps = config.factoring_fee_bps;
+        let effective_discount_bps = if discount_bps > fee_bps {
+            fee_bps
+        } else {
+            discount_bps
+        };
+
+        // Temporarily override the factoring fee for this funding
+        let mut discounted_config = config.clone();
+        discounted_config.factoring_fee_bps = fee_bps.saturating_sub(effective_discount_bps);
+
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        let request = FundingRequest {
+            invoice_id,
+            principal,
+            sme,
+            due_date,
+            token,
+        };
+        fund_invoice_request(&env, &discounted_config, &accepted_tokens, &mut stats, &request)?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         Self::non_reentrant_end(&env);
@@ -5343,6 +5447,31 @@ impl FundingPool {
     /// #777: currently configured Reflector Oracle contract, if any.
     pub fn get_oracle_contract(env: Env) -> Option<Address> {
         env.storage().instance().get(&REFLECTOR_ORACLE)
+    }
+
+    /// #869: register the auction contract allowed to call
+    /// `fund_invoice_with_discount`. Admin-only; panics if already set.
+    pub fn set_auction_contract(
+        env: Env,
+        admin: Address,
+        auction: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if env.storage().instance().has(&AUCTION_CONTRACT) {
+            return Err(PoolError::AlreadyInitialized);
+        }
+        env.storage().instance().set(&AUCTION_CONTRACT, &auction);
+        env.events()
+            .publish((EVT, symbol_short!("set_auct")), (admin, auction));
+        Ok(())
+    }
+
+    /// #869: currently registered auction contract address, if any.
+    pub fn get_auction_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&AUCTION_CONTRACT)
     }
 
     /// #777: admin setter — max age (seconds) a Reflector price may have

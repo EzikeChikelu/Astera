@@ -14,6 +14,7 @@ jobs:
   contracts:
     name: Smart Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: .
@@ -34,8 +35,13 @@ jobs:
       - name: Build contracts for integration tests
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
       - run: cargo test
-      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
-      - run: cargo test -p integration-tests --test integration_tests
+        timeout-minutes: 10
+      - name: Run fuzz tests (short)
+        timeout-minutes: 10
+        run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+      - name: Run integration tests
+        timeout-minutes: 15
+        run: cargo test -p integration-tests --test integration_tests
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Check WASM size
@@ -60,6 +66,7 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -167,6 +174,7 @@ jobs:
   deploy-smoke-test:
     name: Deploy Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [contracts]
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     env:
