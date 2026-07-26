@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
+import GlossaryTerm from '@/components/GlossaryTerm';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -652,6 +653,11 @@ export default function InvoiceDetailPage() {
                 const requiredAmount =
                   (metadata.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
                 const pct = (collateralConfig.collateralBps / 100).toFixed(0);
+                const requiredLabel = (
+                  <>
+                    Required (<GlossaryTerm id="collateral-ratio">{pct}%</GlossaryTerm>)
+                  </>
+                );
 
                 if (collateralDeposit && collateralDeposit.settled) {
                   if (metadata.status === 'Defaulted') {
@@ -678,7 +684,7 @@ export default function InvoiceDetailPage() {
                   return (
                     <div className="space-y-3 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                       </div>
                       <div className="flex justify-between">
@@ -699,7 +705,7 @@ export default function InvoiceDetailPage() {
                   return (
                     <div className="space-y-3 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                       </div>
                       <p className="text-brand-muted">No collateral has been posted.</p>
@@ -710,7 +716,10 @@ export default function InvoiceDetailPage() {
                 return (
                   <div className="space-y-4">
                     <div className="flex justify-between text-sm">
-                      <span className="text-brand-muted">Required ({pct}% of invoice)</span>
+                      <span className="text-brand-muted">
+                        Required (<GlossaryTerm id="collateral-ratio">{pct}%</GlossaryTerm> of
+                        invoice)
+                      </span>
                       <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                     </div>
                     <div>
