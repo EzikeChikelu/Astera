@@ -29,9 +29,14 @@ import {
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   USDC_TOKEN_ID,
+  nativeToScVal,
+  Address,
   scValToNative,
   xdr,
 } from '@/lib/stellar';
+import { simulateContractCall } from '@/lib/simulateFee';
+import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
+import EstimatedFee from '@/components/EstimatedFee';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
 import type {
   FundedInvoice,
@@ -313,6 +318,27 @@ export default function InvoiceDetailPage() {
         fundedInvoice.repaidAmount
       : 0n;
   const fullyRepaid = remainingDue <= 0n;
+
+  const simulateRepay = useCallback(() => {
+    if (!wallet.address || !invoice) return null;
+    const amount = repayAmount ? BigInt(repayAmount) : remainingDue;
+    if (amount <= 0n) return null;
+    return simulateContractCall(
+      POOL_CONTRACT_ID,
+      'repay_invoice',
+      [
+        nativeToScVal(invoice.id, { type: 'u64' }),
+        new Address(wallet.address).toScVal(),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      wallet.address,
+    );
+  }, [wallet.address, invoice, repayAmount, remainingDue]);
+
+  const repaySimulation = useTransactionSimulation(
+    simulateRepay,
+    isOwner && metadata.status === 'Funded' && !!fundedInvoice && !fullyRepaid && !!wallet.address && !!invoice && (!!repayAmount || remainingDue > 0n),
+  );
 
   async function handleRepay() {
     if (!wallet.address || !invoice || !fundedInvoice) return;
@@ -813,9 +839,11 @@ export default function InvoiceDetailPage() {
                 disabled={actionLoading}
                 className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
               />
+              <EstimatedFee simulation={repaySimulation} />
+
               <button
                 onClick={() => void handleRepay()}
-                disabled={actionLoading || !repayAmount}
+                disabled={actionLoading || !repayAmount || repaySimulation.status === 'loading'}
                 className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
               >
                 {actionLoading

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
@@ -24,8 +24,11 @@ import {
   getCurrentRate,
 } from '@/lib/contracts';
 import { parseStellarAddress } from '@/lib/types';
-import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
+import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID, POOL_CONTRACT_ID, nativeToScVal, Address, xdr } from '@/lib/stellar';
 import type { PoolTokenTotals, RateModelConfig } from '@/lib/types';
+import { simulateContractCall } from '@/lib/simulateFee';
+import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
+import EstimatedFee from '@/components/EstimatedFee';
 import { RateCurveChart } from '@/components/analytics';
 import { useTranslations } from 'next-intl';
 
@@ -164,6 +167,30 @@ export default function InvestPage() {
     remainingTokenCapacity !== null &&
     amount !== '' &&
     toStroops(parseFloat(amount)) > remainingTokenCapacity;
+
+  const showDepositWarning =
+    mode === 'deposit' && kycRequired && !kycApproved;
+
+  const simulateDeposit = useCallback(() => {
+    if (!wallet.address || !selectedToken || !amount || parseFloat(amount) <= 0 || depositExceedsCap) return null;
+    if (mode !== 'deposit') return null;
+    const stroops = toStroops(parseFloat(amount));
+    return simulateContractCall(
+      POOL_CONTRACT_ID,
+      'deposit',
+      [
+        new Address(wallet.address).toScVal(),
+        new Address(selectedToken).toScVal(),
+        nativeToScVal(stroops, { type: 'i128' }),
+      ],
+      wallet.address,
+    );
+  }, [wallet.address, selectedToken, amount, mode, depositExceedsCap]);
+
+  const simulation = useTransactionSimulation(
+    simulateDeposit,
+    !!wallet.address && !!selectedToken && !!amount && parseFloat(amount) > 0 && mode === 'deposit' && !depositExceedsCap && !showDepositWarning,
+  );
 
   async function submitTransaction() {
     if (!wallet.address || !amount || !selectedToken) return;
@@ -443,15 +470,18 @@ export default function InvestPage() {
                     </div>
                   )}
 
+                  <EstimatedFee simulation={simulation} />
+
                   <button
                     type="submit"
                     disabled={
                       txLoading ||
                       !amount ||
                       !selectedToken ||
-                      (mode === 'deposit' && kycRequired && !kycApproved) ||
+                      showDepositWarning ||
                       depositAtCapacity ||
-                      depositExceedsCap
+                      depositExceedsCap ||
+                      simulation.status === 'loading'
                     }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
