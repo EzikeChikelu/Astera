@@ -951,7 +951,10 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
-        env.events().publish((EVT, symbol_short!("paused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("paused")),
+            (admin, env.ledger().timestamp()),
+        );
     }
 
     pub fn unpause(env: Env, admin: Address) {
@@ -966,8 +969,10 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
-        env.events()
-            .publish((EVT, symbol_short!("unpaused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("unpaused")),
+            (admin, env.ledger().timestamp()),
+        );
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -3762,11 +3767,28 @@ mod test {
 
     #[test]
     fn test_pause_and_unpause() {
+        // #779: paused/unpaused events must carry both the pausing admin and
+        // a timestamp.
+        use soroban_sdk::testutils::Events;
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
+
         client.pause(&admin);
         assert!(client.is_paused());
+        let pause_ts = env.ledger().timestamp();
+        let expected_paused: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("paused")).into_val(&env);
+        let paused_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == expected_paused)
+            .expect("paused event not emitted");
+        let (event_admin, event_ts): (Address, u64) = paused_event.2.into_val(&env);
+        assert_eq!(event_admin, admin);
+        assert_eq!(event_ts, pause_ts);
+
         client.unpause(&admin);
         assert!(!client.is_paused());
     }

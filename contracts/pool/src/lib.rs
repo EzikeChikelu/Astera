@@ -1834,12 +1834,17 @@ impl FundingPool {
     pub fn pause(env: Env, admin: Address) -> Result<(), PoolError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        // Pause policy: all user state-changing actions are blocked while paused,
-        // including deposit, withdraw, funding, and repayment. Admin emergency
-        // controls (set_yield, set_investor_kyc, unpause) remain available.
+        // #779: pause policy — new deposits, withdrawals, and funding are
+        // blocked while paused. Admin emergency controls (set_yield,
+        // set_investor_kyc, unpause) and repay_invoice() remain available:
+        // borrowers must always be able to exit their debt, even during an
+        // emergency freeze.
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
-        env.events().publish((EVT, symbol_short!("paused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("paused")),
+            (admin, env.ledger().timestamp()),
+        );
         Ok(())
     }
 
@@ -1848,8 +1853,10 @@ impl FundingPool {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
-        env.events()
-            .publish((EVT, symbol_short!("unpaused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("unpaused")),
+            (admin, env.ledger().timestamp()),
+        );
         Ok(())
     }
 
@@ -3463,7 +3470,8 @@ impl FundingPool {
     ) -> Result<(), PoolError> {
         payer.require_auth();
         bump_instance(&env);
-        Self::require_not_paused(&env);
+        // #779: repayment is explicitly exempt from the pause guard — see
+        // the policy note on `pause()`.
         Self::repay_invoice_request(&env, invoice_id, payer, amount)
     }
 
@@ -8403,8 +8411,10 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #12)")]
-    fn test_repay_invoice_when_paused_panics() {
+    fn test_repay_invoice_allowed_when_paused() {
+        // #779: repayment must stay open during an emergency pause so
+        // borrowers can always exit their debt, even while new deposits and
+        // funding are frozen.
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
@@ -8423,8 +8433,11 @@ mod test {
             &usdc_id,
         );
         client.pause(&admin);
+        assert!(client.is_paused());
         let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert!(fi.repaid_amount >= amount_due);
     }
 
     #[test]
@@ -8636,15 +8649,42 @@ mod test {
 
     #[test]
     fn test_pause_events_emitted() {
+        // #779: the paused/unpaused events must carry both the pausing admin
+        // and a timestamp, not just the admin address.
+        use soroban_sdk::testutils::Events;
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
 
         client.pause(&admin);
         assert!(client.is_paused());
+        let pause_ts = env.ledger().timestamp();
+        let expected_paused: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("paused")).into_val(&env);
+        let paused_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == expected_paused)
+            .expect("paused event not emitted");
+        let (event_admin, event_ts): (Address, u64) = paused_event.2.into_val(&env);
+        assert_eq!(event_admin, admin);
+        assert_eq!(event_ts, pause_ts);
 
         client.unpause(&admin);
         assert!(!client.is_paused());
+        let unpause_ts = env.ledger().timestamp();
+        let expected_unpaused: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("unpaused")).into_val(&env);
+        let unpaused_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == expected_unpaused)
+            .expect("unpaused event not emitted");
+        let (event_admin, event_ts): (Address, u64) = unpaused_event.2.into_val(&env);
+        assert_eq!(event_admin, admin);
+        assert_eq!(event_ts, unpause_ts);
     }
 
     // ---- Issue #138: Partial Repayment Tests ----

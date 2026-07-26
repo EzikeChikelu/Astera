@@ -221,6 +221,165 @@ fn test_complete_invoice_lifecycle() {
     assert!(investor_balance > 5_000_000_000i128); // Should have earned yield
 }
 
+/// Integration test (#769): the complete borrower journey in a single test —
+/// invoice creation, collateral posting, pool funding, the due-date window,
+/// full repayment, and the resulting credit score update — with an explicit
+/// assertion after every step rather than relying on separate unit tests to
+/// each cover one piece of the flow in isolation.
+#[test]
+fn test_full_borrower_lifecycle() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id_addr = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id_addr);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
+    credit_client.initialize(&admin, &invoice_id_addr, &pool_id);
+
+    // Any invoice over 1_000 requires 20% collateral.
+    propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 1_000i128, 2_000u32);
+
+    let principal: i128 = 5_000;
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let required_col = pool_client.required_collateral_for(&principal);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &20_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &(principal + required_col));
+
+    // Baseline score for a borrower with no payment history yet.
+    let score_before = credit_client.get_credit_score(&sme);
+
+    // Step 1: borrower creates the invoice — starts out Pending.
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &principal,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Pending
+    );
+
+    // Step 2: borrower posts the required collateral before it can be funded.
+    assert_eq!(required_col, principal * 2_000 / 10_000); // 20% of principal
+    let sme_before_collateral = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
+    pool_client.deposit_collateral(&inv_id, &sme, &usdc_id, &required_col);
+    let collateral = pool_client.get_collateral_deposit(&inv_id).unwrap();
+    assert_eq!(collateral.amount, required_col);
+    assert!(!collateral.settled);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme),
+        sme_before_collateral - required_col
+    );
+
+    // Step 3: an investor supplies pool liquidity, then the pool funds the
+    // invoice — the borrower receives the principal and pool liquidity drops
+    // by the same amount.
+    pool_client.deposit(&investor, &usdc_id, &20_000i128);
+    let pool_available_before_funding = pool_client.available_liquidity(&usdc_id);
+    let sme_before_funding = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
+
+    pool_client.fund_invoice(&admin, &inv_id, &principal, &sme, &due_date, &usdc_id);
+    invoice_client.mark_funded(&inv_id, &pool_id);
+
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme),
+        sme_before_funding + principal
+    );
+    assert_eq!(
+        pool_client.available_liquidity(&usdc_id),
+        pool_available_before_funding - principal
+    );
+    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, principal);
+
+    // Step 4: time passes but the due date hasn't arrived — still Funded.
+    env.ledger().with_mut(|l| l.timestamp = due_date - 86_400);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+
+    // Step 5: borrower repays in full before the due date. The pool absorbs
+    // the repayment (principal + accrued yield/fees) and releases the
+    // borrower's collateral.
+    let total_due = pool_client.estimate_repayment(&inv_id, &None);
+    let sme_before_repay = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
+    let pool_value_before_repay = pool_client.get_token_totals(&usdc_id).pool_value;
+
+    pool_client.repay_invoice(&inv_id, &sme, &total_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Paid
+    );
+    let totals_after_repay = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals_after_repay.total_deployed, 0);
+    assert_eq!(
+        totals_after_repay.pool_value,
+        pool_value_before_repay + total_due
+    );
+    let collateral_after = pool_client.get_collateral_deposit(&inv_id).unwrap();
+    assert!(collateral_after.settled);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme),
+        sme_before_repay - total_due + required_col
+    );
+
+    // Step 6: on-time repayment is reflected in the borrower's credit score.
+    credit_client.record_payment(
+        &pool_id,
+        &inv_id,
+        &sme,
+        &principal,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+    let score_after = credit_client.get_credit_score(&sme);
+    assert_eq!(score_after.total_invoices, 1);
+    assert_eq!(score_after.paid_on_time, 1);
+    assert!(score_after.score > score_before.score);
+}
+
 /// Integration test: Default scenario with grace period
 #[test]
 fn test_default_with_grace_period() {
