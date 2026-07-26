@@ -4,12 +4,12 @@ const STORAGE_KEY = 'astera.notificationPreferences.v1';
 
 export type NotificationEventType =
   | 'INVOICE_FUNDED'
-  | 'INVOICE_PAID'
+  | 'PAYMENT_DUE_7_DAYS'
+  | 'PAYMENT_DUE_1_DAY'
+  | 'PAYMENT_OVERDUE'
+  | 'INVOICE_COMPLETED'
   | 'INVOICE_DEFAULTED'
-  | 'DISPUTE_RAISED'
-  | 'DISPUTE_RESOLVED'
-  | 'YIELD_RATE_CHANGED'
-  | 'COLLATERAL_REQUIRED';
+  | 'COLLATERAL_SEIZED';
 
 export interface EmailNotificationPreferences {
   enabled: boolean;
@@ -42,10 +42,28 @@ export const NOTIFICATION_EVENTS: {
     description: 'An invoice you submitted has been funded.',
   },
   {
-    type: 'INVOICE_PAID',
-    label: 'Invoice repaid',
-    audience: 'Investor',
-    description: 'A repayment has been received for an invoice you funded.',
+    type: 'PAYMENT_DUE_7_DAYS',
+    label: 'Payment due in 7 days',
+    audience: 'SME',
+    description: 'An invoice payment is due in one week.',
+  },
+  {
+    type: 'PAYMENT_DUE_1_DAY',
+    label: 'Payment due tomorrow',
+    audience: 'SME',
+    description: 'An invoice payment is due in one day.',
+  },
+  {
+    type: 'PAYMENT_OVERDUE',
+    label: 'Payment overdue',
+    audience: 'Both',
+    description: 'An invoice payment is overdue.',
+  },
+  {
+    type: 'INVOICE_COMPLETED',
+    label: 'Invoice completed',
+    audience: 'Both',
+    description: 'An invoice has been fully repaid.',
   },
   {
     type: 'INVOICE_DEFAULTED',
@@ -54,28 +72,10 @@ export const NOTIFICATION_EVENTS: {
     description: 'An invoice has been marked as defaulted.',
   },
   {
-    type: 'DISPUTE_RAISED',
-    label: 'Dispute raised',
-    audience: 'Both',
-    description: 'A dispute was raised on an invoice.',
-  },
-  {
-    type: 'DISPUTE_RESOLVED',
-    label: 'Dispute resolved',
-    audience: 'Both',
-    description: 'A dispute was resolved on an invoice.',
-  },
-  {
-    type: 'YIELD_RATE_CHANGED',
-    label: 'Yield rate changed',
-    audience: 'Investor',
-    description: 'The pool yield rate was updated.',
-  },
-  {
-    type: 'COLLATERAL_REQUIRED',
-    label: 'Collateral required',
+    type: 'COLLATERAL_SEIZED',
+    label: 'Collateral seized',
     audience: 'SME',
-    description: 'Additional collateral is required for an invoice or position.',
+    description: 'Collateral was seized after an invoice default.',
   },
 ];
 

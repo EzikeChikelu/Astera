@@ -130,7 +130,7 @@ class ContractMonitor {
     let amount: bigint = 0n;
     let sourceAddress: string = '';
 
-    if (contractType === 'INVOICE') {
+    if (contractType === 'invoice') {
       if (eventType === 'created') {
         // schema: (id, owner, amount, metadata_uri, timestamp)
         const [id, owner, amt] = value;
@@ -148,7 +148,7 @@ class ContractMonitor {
           data: { invoiceId: id, txHash: event.txHash },
         });
       }
-    } else if (contractType === 'POOL') {
+    } else if (contractType === 'pool') {
       if (eventType === 'deposit' || eventType === 'withdraw') {
         // schema: (investor, amount, shares, timestamp)
         const [investor, amt] = value;
@@ -188,7 +188,12 @@ class ContractMonitor {
         priority: 'HIGH',
         message: `Large ${eventType} detected: ${humanAmount.toLocaleString()} units.`,
         timestamp: Date.now(),
-        data: { amount: humanAmount, type: eventType, source: sourceAddress, txHash: event.txHash ?? '' },
+        data: {
+          amount: humanAmount,
+          type: eventType,
+          source: sourceAddress,
+          txHash: event.txHash ?? '',
+        },
       });
     }
 

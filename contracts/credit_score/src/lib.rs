@@ -451,7 +451,7 @@ pub enum DataKey {
     AttestationDisputeReason(u64),
 }
 
-const EVT: Symbol = symbol_short!("CREDIT");
+const EVT: Symbol = symbol_short!("credit");
 
 fn require_not_paused(env: &Env) {
     if env

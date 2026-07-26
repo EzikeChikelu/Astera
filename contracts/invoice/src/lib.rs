@@ -326,7 +326,7 @@ pub enum DataKey {
     InvoiceFunding(u64),
 }
 
-const EVT: Symbol = symbol_short!("INVOICE");
+const EVT: Symbol = symbol_short!("invoice");
 
 fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     if invoice.status != InvoiceStatus::Pending {

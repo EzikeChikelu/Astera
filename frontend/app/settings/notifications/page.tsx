@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import toast from 'react-hot-toast';
 import type { AlertType } from '@/lib/alert-rules';
 import { csrfFetch } from '@/lib/csrf';
@@ -73,6 +74,7 @@ function EventPill({ audience }: { audience: 'SME' | 'Investor' | 'Both' }) {
 }
 
 export default function NotificationSettingsPage() {
+  const searchParams = useSearchParams();
   const [prefs, setPrefs] = useState<NotificationPreferences>(DEFAULT_NOTIFICATION_PREFERENCES);
   const [saving, setSaving] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
@@ -80,6 +82,17 @@ export default function NotificationSettingsPage() {
   useEffect(() => {
     setPrefs(loadNotificationPreferences());
   }, []);
+
+  useEffect(() => {
+    const email = searchParams.get('unsubscribe');
+    if (!email) return;
+    setPrefs((current) => {
+      const next = { ...current, email: { ...current.email, email, enabled: false, events: [] } };
+      saveNotificationPreferences(next);
+      return next;
+    });
+    toast.success('Email notifications have been unsubscribed in this browser.');
+  }, [searchParams]);
 
   const inAppEvents = useMemo(() => NOTIFICATION_EVENTS, []);
 
@@ -128,6 +141,7 @@ export default function NotificationSettingsPage() {
         body: JSON.stringify({ email: prefs.email, webhook: prefs.webhook }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      saveNotificationPreferences(prefs);
       toast.success('Notification delivery preferences saved.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to save preferences.';
@@ -214,7 +228,7 @@ export default function NotificationSettingsPage() {
         <div>
           <h2 className="text-lg font-bold text-white">Email notifications</h2>
           <p className="text-xs text-brand-muted mt-1">
-            This is a UI + mocked backend save for now (delivery service tracked separately).
+            Delivery is configured server-side and can be triggered by the event indexer.
           </p>
         </div>
 
