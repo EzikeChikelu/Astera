@@ -1,11 +1,15 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx, getMaxInvoiceAmount } from '@/lib/contracts';
+import { toStroops, nativeToScVal, Address, xdr, INVOICE_CONTRACT_ID } from '@/lib/stellar';
+import { simulateContractCall } from '@/lib/simulateFee';
+import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
+import EstimatedFee from '@/components/EstimatedFee';
 import { toStroops } from '@/lib/stellar';
 import { getInvoiceTemplate, upsertInvoiceTemplate } from '@/lib/invoiceTemplates';
 
@@ -143,6 +147,30 @@ export default function NewInvoicePage() {
 
   const errors = validateForm(form, maxAmount);
   const isValid = Object.keys(errors).length === 0;
+
+  const simulateCreate = useCallback(() => {
+    if (!wallet.address || !isValid) return null;
+    const dueTimestamp = Math.floor(new Date(form.dueDate).getTime() / 1000);
+    const amountStroops = toStroops(parseFloat(form.amount));
+    return simulateContractCall(
+      INVOICE_CONTRACT_ID,
+      'create_invoice_with_metadata',
+      [
+        new Address(wallet.address).toScVal(),
+        nativeToScVal(form.debtor, { type: 'string' }),
+        nativeToScVal(amountStroops, { type: 'i128' }),
+        nativeToScVal(dueTimestamp, { type: 'u64' }),
+        nativeToScVal(form.description, { type: 'string' }),
+        nativeToScVal('frontend-placeholder-hash', { type: 'string' }),
+        form.metadataUri.trim()
+          ? nativeToScVal(form.metadataUri.trim(), { type: 'string' })
+          : xdr.ScVal.scvVoid(),
+      ],
+      wallet.address,
+    );
+  }, [form, wallet.address, isValid]);
+
+  const simulation = useTransactionSimulation(simulateCreate, isValid && !!wallet.address);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) {
     const { name, value } = e.target;
@@ -342,22 +370,15 @@ export default function NewInvoicePage() {
               </div>
             )}
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={saveAsTemplate}
-                className="rounded-xl border border-brand-gold py-3.5 font-semibold text-brand-gold"
-              >
-                Save as Template
-              </button>
-              <button
-                type="submit"
-                disabled={loading}
-                className="py-3.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 text-lg"
-              >
-                {loading ? 'Minting on Stellar...' : 'Mint Invoice Token'}
-              </button>
-            </div>
+            <EstimatedFee simulation={simulation} />
+
+            <button
+              type="submit"
+              disabled={loading || simulation.status === 'loading'}
+              className="w-full py-3.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 text-lg"
+            >
+              {loading ? 'Minting on Stellar...' : 'Mint Invoice Token'}
+            </button>
 
             <p className="text-xs text-brand-muted text-center">
               Your invoice will be tokenized on Stellar Testnet. Gas fees are under $0.01.
