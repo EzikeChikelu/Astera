@@ -8,6 +8,7 @@ members = [
     "contracts/oracle_registry",
     "contracts/compliance",
     "contracts/referral",
+    "contracts/auction",
     "contracts/tests",
     "benchmarks",
 ]

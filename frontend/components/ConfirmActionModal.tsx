@@ -160,7 +160,7 @@ export default function ConfirmActionModal({
         ref={modalRef}
         onKeyDown={handleKeyDown}
         className={`
-          relative w-full max-w-md mx-4 rounded-2xl border shadow-2xl
+          relative w-full sm:max-w-md mx-4 max-h-screen sm:max-h-[90vh] overflow-y-auto rounded-2xl border shadow-2xl
           bg-brand-card border-brand-border
           ${isDestructive ? 'border-red-700/50' : ''}
           animate-in fade-in zoom-in-95 duration-200
@@ -171,7 +171,7 @@ export default function ConfirmActionModal({
         aria-describedby="confirm-modal-description"
       >
         {/* Header */}
-        <div className="flex items-start gap-4 p-6 pb-0">
+        <div className="flex items-start gap-4 p-4 sm:p-6 pb-0">
           {/* Icon */}
           <div
             className={`
@@ -246,7 +246,7 @@ export default function ConfirmActionModal({
 
         {/* Confirmation phrase input (for destructive actions) */}
         {confirmPhrase && (
-          <div className="px-6 pt-4">
+          <div className="px-4 sm:px-6 pt-4">
             <label
               htmlFor="confirm-phrase-input"
               className="block text-xs font-medium text-brand-muted mb-2"
@@ -289,10 +289,10 @@ export default function ConfirmActionModal({
           </div>
         )}
 
-        {children && <div className="px-6 pt-4">{children}</div>}
+        {children && <div className="px-4 sm:px-6 pt-4">{children}</div>}
 
         {/* Footer actions */}
-        <div className="flex items-center justify-end gap-3 p-6 pt-4">
+        <div className="flex flex-col-reverse sm:flex-row items-center justify-end gap-3 p-4 sm:p-6 pt-4">
           <button
             ref={firstFocusableRef}
             onClick={onCancel}

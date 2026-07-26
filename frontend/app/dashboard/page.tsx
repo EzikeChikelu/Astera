@@ -436,11 +436,11 @@ function DashboardContent() {
                 <div className="lg:col-span-2 space-y-6">
                   {/* Quick stats */}
                   {loading ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                       {[1, 2, 3, 4].map((n) => (
                         <div
                           key={n}
-                          className="p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse"
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse min-h-[88px] flex flex-col justify-center"
                         >
                           <Skeleton className="h-3 w-16 mb-2" />
                           <Skeleton className="h-6 w-20" />
@@ -448,7 +448,7 @@ function DashboardContent() {
                       ))}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                       {[
                         {
                           label: t('stats.totalVolume'),
@@ -461,10 +461,10 @@ function DashboardContent() {
                       ].map((s) => (
                         <div
                           key={s.label}
-                          className="p-4 bg-brand-card border border-brand-border rounded-xl"
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl min-h-[88px] flex flex-col justify-center"
                         >
                           <p className="text-xs text-brand-muted mb-1">{s.label}</p>
-                          <p className={`text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
+                          <p className={`text-lg sm:text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
                             {s.value}
                           </p>
                         </div>
@@ -674,7 +674,7 @@ function DashboardContent() {
                 </div>
 
                 {/* Right column */}
-                <div className="space-y-6">
+                <div className="space-y-6 lg:sticky lg:top-24 lg:self-start">
                   {invoices.length < 1 && (
                     <SMEOnboardingChecklist
                       walletConnected={wallet.connected}
