@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
@@ -15,6 +15,8 @@ import {
   KycInvestor,
 } from '@/lib/contracts';
 
+const PAGE_SIZE = 20;
+
 export default function AdminKycPage() {
   const { wallet } = useStore();
   const [kycRequired, setKycRequired] = useState(false);
@@ -23,6 +25,8 @@ export default function AdminKycPage() {
 
   const [pendingInvestors, setPendingInvestors] = useState<KycInvestor[]>([]);
   const [approvedInvestors, setApprovedInvestors] = useState<KycInvestor[]>([]);
+  const [pendingPage, setPendingPage] = useState(1);
+  const [approvedPage, setApprovedPage] = useState(1);
 
   // Manual fallback state
   const [lookupAddress, setLookupAddress] = useState('');
@@ -42,6 +46,8 @@ export default function AdminKycPage() {
       const { pending, approved } = await fetchKycInvestors();
       setPendingInvestors(pending);
       setApprovedInvestors(approved);
+      setPendingPage(1);
+      setApprovedPage(1);
     } catch (e) {
       console.error(e);
     } finally {
@@ -52,6 +58,26 @@ export default function AdminKycPage() {
   useEffect(() => {
     loadKycData();
   }, []);
+
+  const pendingPageCount = Math.max(1, Math.ceil(pendingInvestors.length / PAGE_SIZE));
+  const approvedPageCount = Math.max(1, Math.ceil(approvedInvestors.length / PAGE_SIZE));
+
+  const paginatedPendingInvestors = useMemo(
+    () => pendingInvestors.slice((pendingPage - 1) * PAGE_SIZE, pendingPage * PAGE_SIZE),
+    [pendingInvestors, pendingPage],
+  );
+  const paginatedApprovedInvestors = useMemo(
+    () => approvedInvestors.slice((approvedPage - 1) * PAGE_SIZE, approvedPage * PAGE_SIZE),
+    [approvedInvestors, approvedPage],
+  );
+
+  useEffect(() => {
+    if (pendingPage > pendingPageCount) setPendingPage(pendingPageCount);
+  }, [pendingPage, pendingPageCount]);
+
+  useEffect(() => {
+    if (approvedPage > approvedPageCount) setApprovedPage(approvedPageCount);
+  }, [approvedPage, approvedPageCount]);
 
   async function signAndSubmit(xdr: string) {
     const freighter = await import('@stellar/freighter-api');
@@ -90,7 +116,6 @@ export default function AdminKycPage() {
       toast.success(
         `Investor ${investor.slice(0, 8)}… has been ${approve ? 'approved' : 'revoked'}.`,
       );
-      // Refresh the lists
       await loadKycData();
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Transaction failed.');
@@ -180,38 +205,46 @@ export default function AdminKycPage() {
           </div>
         ) : (
           <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-brand-dark border-b border-brand-border text-brand-muted">
-                <tr>
-                  <th className="px-6 py-4 font-medium">Wallet Address</th>
-                  <th className="px-6 py-4 font-medium">Deposited Amount</th>
-                  <th className="px-6 py-4 font-medium">First Seen</th>
-                  <th className="px-6 py-4 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-brand-border">
-                {pendingInvestors.map((inv) => (
-                  <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
-                    <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
-                    <td className="px-6 py-4">
-                      {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
-                    </td>
-                    <td className="px-6 py-4 text-brand-muted">
-                      {new Date(inv.firstSeenAt).toLocaleDateString()}
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <button
-                        onClick={() => handleAction(inv.address, true)}
-                        disabled={txLoading}
-                        className="px-4 py-2 bg-green-500/20 text-green-400 border border-green-500/30 rounded-lg text-xs font-semibold hover:bg-green-500/30 transition-colors disabled:opacity-50"
-                      >
-                        Approve
-                      </button>
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-brand-dark border-b border-brand-border text-brand-muted">
+                  <tr>
+                    <th className="px-6 py-4 font-medium">Wallet Address</th>
+                    <th className="px-6 py-4 font-medium">Deposited Amount</th>
+                    <th className="px-6 py-4 font-medium">First Seen</th>
+                    <th className="px-6 py-4 font-medium text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-brand-border">
+                  {paginatedPendingInvestors.map((inv) => (
+                    <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
+                      <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
+                      <td className="px-6 py-4">
+                        {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
+                      </td>
+                      <td className="px-6 py-4 text-brand-muted">
+                        {new Date(inv.firstSeenAt).toLocaleDateString()}
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <button
+                          onClick={() => handleAction(inv.address, true)}
+                          disabled={txLoading}
+                          className="px-4 py-2 bg-green-500/20 text-green-400 border border-green-500/30 rounded-lg text-xs font-semibold hover:bg-green-500/30 transition-colors disabled:opacity-50"
+                        >
+                          Approve
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination
+              page={pendingPage}
+              pageCount={pendingPageCount}
+              totalItems={pendingInvestors.length}
+              onPageChange={setPendingPage}
+            />
           </div>
         )}
       </div>
@@ -227,38 +260,46 @@ export default function AdminKycPage() {
           </div>
         ) : (
           <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-brand-dark border-b border-brand-border text-brand-muted">
-                <tr>
-                  <th className="px-6 py-4 font-medium">Wallet Address</th>
-                  <th className="px-6 py-4 font-medium">Deposited Amount</th>
-                  <th className="px-6 py-4 font-medium">First Seen</th>
-                  <th className="px-6 py-4 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-brand-border">
-                {approvedInvestors.map((inv) => (
-                  <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
-                    <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
-                    <td className="px-6 py-4">
-                      {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
-                    </td>
-                    <td className="px-6 py-4 text-brand-muted">
-                      {new Date(inv.firstSeenAt).toLocaleDateString()}
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <button
-                        onClick={() => handleAction(inv.address, false)}
-                        disabled={txLoading}
-                        className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-xs font-semibold hover:bg-red-500/30 transition-colors disabled:opacity-50"
-                      >
-                        Revoke
-                      </button>
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-brand-dark border-b border-brand-border text-brand-muted">
+                  <tr>
+                    <th className="px-6 py-4 font-medium">Wallet Address</th>
+                    <th className="px-6 py-4 font-medium">Deposited Amount</th>
+                    <th className="px-6 py-4 font-medium">First Seen</th>
+                    <th className="px-6 py-4 font-medium text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-brand-border">
+                  {paginatedApprovedInvestors.map((inv) => (
+                    <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
+                      <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
+                      <td className="px-6 py-4">
+                        {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
+                      </td>
+                      <td className="px-6 py-4 text-brand-muted">
+                        {new Date(inv.firstSeenAt).toLocaleDateString()}
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <button
+                          onClick={() => handleAction(inv.address, false)}
+                          disabled={txLoading}
+                          className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-xs font-semibold hover:bg-red-500/30 transition-colors disabled:opacity-50"
+                        >
+                          Revoke
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination
+              page={approvedPage}
+              pageCount={approvedPageCount}
+              totalItems={approvedInvestors.length}
+              onPageChange={setApprovedPage}
+            />
           </div>
         )}
       </div>
@@ -346,6 +387,44 @@ export default function AdminKycPage() {
         <p>• When KYC is disabled, all investors may deposit freely.</p>
         <p>• Approvals are stored on-chain; revocation takes effect immediately.</p>
         <p>• Existing positions are not affected by KYC status changes.</p>
+      </div>
+    </div>
+  );
+}
+
+function Pagination({
+  page,
+  pageCount,
+  totalItems,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  totalItems: number;
+  onPageChange: (page: number) => void;
+}) {
+  return (
+    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-brand-border px-6 py-4 text-xs text-brand-muted">
+      <span>
+        Page {page} of {pageCount} · {totalItems} investor{totalItems !== 1 ? 's' : ''}
+      </span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page === 1}
+          className="rounded-lg border border-brand-border px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page === pageCount}
+          className="rounded-lg border border-brand-border px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Next
+        </button>
       </div>
     </div>
   );
