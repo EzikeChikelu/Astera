@@ -301,3 +301,9 @@ export interface FullCreditScore {
   isStale: boolean;
   blendedScore: number;
 }
+
+/** #799: referral program stats for a referrer, from `referral.get_stats()`. */
+export interface ReferralStats {
+  referrer: StellarAddress;
+  referralCount: number;
+}
