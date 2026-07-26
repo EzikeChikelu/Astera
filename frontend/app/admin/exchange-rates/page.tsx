@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getAcceptedTokens,
   getExchangeRate,
@@ -20,6 +21,8 @@ export default function AdminExchangeRatesPage() {
   const [txLoading, setTxLoading] = useState(false);
   const [selectedToken, setSelectedToken] = useState('');
   const [newRatePct, setNewRatePct] = useState('');
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [pendingRate, setPendingRate] = useState<{ token: string; pct: string; bps: number } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -54,8 +57,7 @@ export default function AdminExchangeRatesPage() {
     await submitTx(signedTxXdr);
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function openReviewModal() {
     if (!wallet.address || !selectedToken || !newRatePct) return;
 
     const bps = Math.round(parseFloat(newRatePct) * 100);
@@ -64,15 +66,30 @@ export default function AdminExchangeRatesPage() {
       return;
     }
 
+    setPendingRate({ token: selectedToken, pct: newRatePct, bps });
+    setShowReviewModal(true);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    openReviewModal();
+  }
+
+  async function confirmAndSubmit() {
+    if (!wallet.address || !pendingRate) return;
+
+    const { token, pct, bps } = pendingRate;
+    setShowReviewModal(false);
     setTxLoading(true);
     try {
-      const xdr = await buildSetExchangeRateTx(wallet.address, selectedToken, bps);
+      const xdr = await buildSetExchangeRateTx(wallet.address, token, bps);
       await signAndSubmit(xdr);
-      setRates((prev) => ({ ...prev, [selectedToken]: bps }));
+      setRates((prev) => ({ ...prev, [token]: bps }));
       toast.success(
-        `Exchange rate for ${stablecoinLabel(selectedToken)} set to ${newRatePct}% of USD (${bps} bps).`,
+        `Exchange rate for ${stablecoinLabel(token)} set to ${pct}% of USD (${bps} bps).`,
       );
       setNewRatePct('');
+      setPendingRate(null);
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
@@ -170,6 +187,36 @@ export default function AdminExchangeRatesPage() {
           • Rates are used for display/reporting only; pool accounting stays in native token units.
         </p>
       </div>
+
+      <ConfirmActionModal
+        title="Review exchange rate update"
+        description={`Please confirm the exchange rate update for ${stablecoinLabel(pendingRate?.token ?? selectedToken)} before it is submitted on-chain.`}
+        isOpen={showReviewModal}
+        onConfirm={() => void confirmAndSubmit()}
+        onCancel={() => {
+          setShowReviewModal(false);
+          setPendingRate(null);
+        }}
+        confirmLabel="Confirm & Submit"
+        cancelLabel="Back"
+      >
+        {pendingRate && (
+          <div className="space-y-3 rounded-xl border border-brand-border bg-brand-dark p-4 text-sm text-brand-muted">
+            <div className="flex items-center justify-between">
+              <span>Token</span>
+              <span className="font-medium text-white">{stablecoinLabel(pendingRate.token)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Rate entered</span>
+              <span className="font-medium text-white">{pendingRate.pct}% of USD</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Internal bps</span>
+              <span className="font-medium text-white">{pendingRate.bps} bps</span>
+            </div>
+          </div>
+        )}
+      </ConfirmActionModal>
     </div>
   );
 }
