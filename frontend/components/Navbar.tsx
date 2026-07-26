@@ -105,6 +105,13 @@ export default function Navbar() {
               <Link
                 key={l.href}
                 href={l.href}
+                data-onboarding-id={
+                  l.href === '/invoice/new'
+                    ? 'nav-invoice'
+                    : l.href === '/invest'
+                      ? 'nav-invest'
+                      : undefined
+                }
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   path === l.href
                     ? 'bg-brand-gold/10 text-brand-gold'
@@ -235,6 +242,13 @@ export default function Navbar() {
                 <Link
                   key={l.href}
                   href={l.href}
+                  data-onboarding-id={
+                    l.href === '/invoice/new'
+                      ? 'nav-invoice'
+                      : l.href === '/invest'
+                        ? 'nav-invest'
+                        : undefined
+                  }
                   className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
                     path === l.href
                       ? 'bg-brand-gold/10 text-brand-gold'

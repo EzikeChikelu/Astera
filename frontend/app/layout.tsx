@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
+import SWRProvider from '@/components/SWRProvider';
 import { Toaster } from 'react-hot-toast';
 import { assertEnvValid } from '@/lib/env';
 
@@ -76,13 +77,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           Skip to main content
         </a>
         <NextIntlClientProvider messages={messages}>
-          <ThemeProvider>
-            <Navbar />
-            <main id="main-content" role="main">
-              {children}
-            </main>
-            <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
-          </ThemeProvider>
+          <SWRProvider>
+            <ThemeProvider>
+              <Navbar />
+              <main id="main-content" role="main">
+                {children}
+              </main>
+              <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
+            </ThemeProvider>
+          </SWRProvider>
         </NextIntlClientProvider>
       </body>
     </html>
