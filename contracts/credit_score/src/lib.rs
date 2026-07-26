@@ -912,7 +912,7 @@ impl CreditScoreContract {
 
     pub fn record_payment(
         env: Env,
-        _caller: Address,
+        caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
@@ -960,6 +960,7 @@ impl CreditScoreContract {
         env.events().publish(
             (EVT, symbol_short!("payment")),
             (
+                caller.clone(),
                 sme,
                 invoice_id,
                 status,
@@ -1010,7 +1011,7 @@ impl CreditScoreContract {
 
     pub fn record_default(
         env: Env,
-        _caller: Address,
+        caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
@@ -1049,7 +1050,13 @@ impl CreditScoreContract {
 
         env.events().publish(
             (EVT, symbol_short!("default")),
-            (sme, invoice_id, credit_data.score, env.ledger().timestamp()),
+            (
+                caller.clone(),
+                sme,
+                invoice_id,
+                credit_data.score,
+                env.ledger().timestamp(),
+            ),
         );
     }
 

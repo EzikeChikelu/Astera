@@ -322,8 +322,8 @@ pub enum DataKey {
     // #867: optional compliance registry + opt-in gate
     ComplianceRegistry,
     RequireComplianceCheck,
-    // #775: borrower opt-out from the public invoice sharing link
-    Private(u64),
+    // Tracks cumulative funded amount across partial fundings
+    InvoiceFunding(u64),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -1810,7 +1810,7 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Funded;
         invoice.funded_at = env.ledger().timestamp();
-        invoice.pool_contract = pool;
+        invoice.pool_contract = pool.clone();
         let sme = invoice.owner.clone();
         let current_outstanding = get_sme_outstanding(&env, &sme);
         let new_outstanding = current_outstanding
@@ -1827,7 +1827,12 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
         env.events().publish(
             (EVT, symbol_short!("funded")),
-            (id, invoice.owner.clone(), env.ledger().timestamp()),
+            (
+                id,
+                pool.clone(),
+                invoice.owner.clone(),
+                env.ledger().timestamp(),
+            ),
         );
         Ok(())
     }
@@ -1878,14 +1883,55 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish(
             (EVT, symbol_short!("paid")),
-            (id, invoice.owner.clone(), env.ledger().timestamp()),
+            (
+                id,
+                pool.clone(),
+                invoice.owner.clone(),
+                env.ledger().timestamp(),
+            ),
         );
     }
 
-    /// #801: callable by the pool contract (existing flow) or by a
-    /// whitelisted keeper — e.g. an automated Turret/cron monitor that
-    /// triggers defaults once the grace period has expired. Keepers may
-    /// only call this function; they hold no other admin privileges.
+    pub fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128 {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        let is_fundable =
+            invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
+        if !is_fundable {
+            panic!("invoice is not in fundable state");
+        }
+        let funded_so_far: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvoiceFunding(id))
+            .unwrap_or(0);
+        let new_funded = funded_so_far
+            .checked_add(amount)
+            .ok_or(InvoiceError::AmountOverflow)
+            .expect("funding overflow");
+        if new_funded > invoice.amount {
+            panic_with_error!(&env, InvoiceError::AmountOverflow);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceFunding(id), &new_funded);
+        new_funded
+    }
+
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
         pool.require_auth();
         require_not_paused(&env);
@@ -2382,6 +2428,13 @@ impl InvoiceContract {
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
         load_invoice(&env, id)
+    }
+
+    pub fn get_funded_amount(env: Env, id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvoiceFunding(id))
+            .unwrap_or(0)
     }
 
     pub fn get_multiple_invoices(env: Env, ids: Vec<u64>) -> Vec<Invoice> {
@@ -3599,6 +3652,91 @@ mod test {
         let result = client.try_mark_funded(&second, &pool);
 
         assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
+    }
+
+    #[test]
+    fn test_add_funding_accumulates_across_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // First partial funding
+        client.add_funding(&id, &300i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 300i128);
+
+        // Second partial funding
+        client.add_funding(&id, &200i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
+
+        // Invoice should still be in Pending state (not fully funded yet)
+        let inv = client.get_invoice(&id);
+        assert!(inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Verified);
+    }
+
+    #[test]
+    fn test_add_funding_rejects_overfunding() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &500i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // Fund full amount (500)
+        client.add_funding(&id, &500i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
+
+        // Try to overfund — must fail
+        let result = client.try_add_funding(&id, &1i128, &pool);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_funding_updates_after_each_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // After first funding, get_funded_amount returns 300
+        client.add_funding(&id, &300i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 300i128);
+
+        // After second funding, get_funded_amount returns 500
+        client.add_funding(&id, &200i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
     }
 
     #[test]

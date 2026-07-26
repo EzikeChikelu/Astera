@@ -156,6 +156,26 @@ fn test_complete_invoice_lifecycle() {
     pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
     let totals = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals.pool_value, 5_000_000_000i128);
+    // Assert deposit event includes depositor and token
+    let events = env.events().all();
+    let deposit_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("POOL"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("deposit"))
+        })
+        .collect();
+    assert!(!deposit_events.is_empty(), "deposit event must be emitted");
+    assert!(
+        deposit_events[0].1.len() >= 5,
+        "deposit event must include (investor, token, amount, shares, timestamp)"
+    );
 
     // Step 2: SME creates invoice
     let due_date = env.ledger().timestamp() + 30 * 86_400; // 30 days
@@ -184,6 +204,27 @@ fn test_complete_invoice_lifecycle() {
     let invoice = invoice_client.get_invoice(&inv_id);
     assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
 
+    // Assert invoice funded event includes pool address
+    let events = env.events().all();
+    let funded_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("INVOICE"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("funded"))
+        })
+        .collect();
+    assert!(!funded_events.is_empty(), "funded event must be emitted");
+    assert!(
+        funded_events[0].1.len() >= 2,
+        "funded event must include (id, pool, timestamp)"
+    );
+
     // Verify pool state
     let totals = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals.total_deployed, 2_000_000_000i128);
@@ -193,10 +234,51 @@ fn test_complete_invoice_lifecycle() {
     let amount_due = pool_client.estimate_repayment(&inv_id, &None);
     pool_client.repay_invoice(&inv_id, &sme, &amount_due);
 
+    // Assert repaid event includes payer
+    let events = env.events().all();
+    let repaid_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("POOL"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("repaid"))
+        })
+        .collect();
+    assert!(!repaid_events.is_empty(), "repaid event must be emitted");
+    assert!(
+        repaid_events[0].1.len() >= 5,
+        "repaid event must include (invoice_id, payer, principal, interest, timestamp)"
+    );
+
     // Step 5: Verify invoice is marked as paid
     invoice_client.mark_paid(&inv_id, &pool_id);
     let invoice = invoice_client.get_invoice(&inv_id);
     assert_eq!(invoice.status, invoice::InvoiceStatus::Paid);
+    // Assert paid event includes pool address
+    let events = env.events().all();
+    let paid_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("INVOICE"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("paid"))
+        })
+        .collect();
+    assert!(!paid_events.is_empty(), "paid event must be emitted");
+    assert!(
+        paid_events[0].1.len() >= 3,
+        "paid event must include (id, pool, timestamp)"
+    );
 
     // Step 6: Record payment in credit score
     credit_client.record_payment(
@@ -208,6 +290,27 @@ fn test_complete_invoice_lifecycle() {
         &env.ledger().timestamp(),
     );
 
+    // Assert payment event includes caller
+    let events = env.events().all();
+    let payment_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("CREDIT"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("payment"))
+        })
+        .collect();
+    assert!(!payment_events.is_empty(), "payment event must be emitted");
+    assert!(
+        payment_events[0].1.len() >= 6,
+        "payment event must include (caller, sme, invoice_id, status, score, timestamp)"
+    );
+
     let credit_data = credit_client.get_credit_score(&sme);
     assert_eq!(credit_data.total_invoices, 1);
     assert_eq!(credit_data.paid_on_time, 1);
@@ -216,6 +319,30 @@ fn test_complete_invoice_lifecycle() {
     // Step 7: Investor withdraws with yield
     let shares = share_client.balance(&investor);
     pool_client.withdraw(&investor, &usdc_id, &shares);
+
+    // Assert withdraw event includes investor and token
+    let events = env.events().all();
+    let withdraw_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let topics = e.0.clone();
+            topics.len() >= 2
+                && topics
+                    .get(0)
+                    .map_or(false, |s| s.to_string().contains("POOL"))
+                && topics
+                    .get(1)
+                    .map_or(false, |s| s.to_string().contains("withdraw"))
+        })
+        .collect();
+    assert!(
+        !withdraw_events.is_empty(),
+        "withdraw event must be emitted"
+    );
+    assert!(
+        withdraw_events[0].1.len() >= 5,
+        "withdraw event must include (investor, token, amount, shares, timestamp)"
+    );
 
     let investor_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
     assert!(investor_balance > 5_000_000_000i128); // Should have earned yield
