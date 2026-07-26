@@ -195,6 +195,7 @@ export default function WalletConnect() {
       <button
         onClick={() => connect(0)}
         disabled={loading}
+        data-onboarding-id="wallet-connect"
         className="flex items-center gap-2 px-4 py-2 bg-brand-gold text-brand-dark font-semibold rounded-lg hover:bg-brand-amber transition-colors text-sm disabled:opacity-60 disabled:cursor-not-allowed"
         aria-busy={loading}
       >

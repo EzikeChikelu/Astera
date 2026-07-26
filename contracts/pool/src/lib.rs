@@ -7794,6 +7794,34 @@ mod test {
         assert_eq!(result, Err(Ok(PoolError::StorageCorrupted)));
     }
 
+    // #791: a borrower must not be able to post an arbitrary, non-whitelisted
+    // token as collateral (e.g. a worthless token they mint themselves) to
+    // inflate their apparent collateral ratio. `deposit_collateral` already
+    // calls `assert_accepted_token`, but that guard had no dedicated
+    // regression test — this locks the behaviour in.
+    #[test]
+    fn test_deposit_collateral_rejects_unsupported_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+
+        // Attacker deploys their own worthless token — never registered via add_token.
+        let attacker_token_admin = Address::generate(&env);
+        let worthless_token = env
+            .register_stellar_asset_contract_v2(attacker_token_admin)
+            .address();
+        mint(&env, &worthless_token, &sme, 1_000_000);
+
+        let result = client.try_deposit_collateral(&1u64, &sme, &worthless_token, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+
+        // No collateral record should have been created for the rejected deposit.
+        assert!(client.get_collateral_deposit(&1u64).is_none());
+    }
+
     #[test]
     fn test_insufficient_collateral_panics() {
         let env = Env::default();
