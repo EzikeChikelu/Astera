@@ -162,6 +162,8 @@ pub enum PoolError {
     // #777: Reflector oracle collateral price feed — neither the oracle
     // nor the admin fallback has a usable price for the requested token.
     OraclePriceUnavailable = 85,
+    // #745: duplicate token registration
+    TokenAlreadySupported = 86,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1942,7 +1944,7 @@ impl FundingPool {
 
         for i in 0..tokens.len() {
             if tokens.get(i).ok_or(PoolError::StorageCorrupted)? == token {
-                return Err(PoolError::TokenAlreadyAccepted);
+                return Err(PoolError::TokenAlreadySupported);
             }
         }
 
