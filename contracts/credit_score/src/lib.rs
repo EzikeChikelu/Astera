@@ -1060,6 +1060,8 @@ impl CreditScoreContract {
         );
     }
 
+    /// Returns the SME's credit score, or a default (`min_score`, zeroed stats) if the
+    /// SME has no on-chain history yet. Never panics for an unknown address.
     pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
         let data = Self::get_or_create_credit_data(&env, &sme);
         let config_version = load_scoring_config(&env).core.score_version;
@@ -1958,9 +1960,7 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _, testutils::Events, testutils::Ledger, Env, IntoVal,
-    };
+    use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger, Env};
 
     fn setup(env: &Env) -> (CreditScoreContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(CreditScoreContract, ());
@@ -1983,6 +1983,30 @@ mod test {
         let score_data = client.get_credit_score(&sme);
         assert_eq!(score_data.score, MIN_SCORE);
         assert_eq!(score_data.total_invoices, 0);
+    }
+
+    #[test]
+    fn test_get_credit_score_new_borrower_returns_default_without_panic() {
+        // #768: get_credit_score() must not panic for a borrower with no payment
+        // history — it should return a default CreditScoreResponse instead.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        let new_borrower = Address::generate(&env);
+
+        let resp = client.get_credit_score(&new_borrower);
+
+        assert_eq!(resp.sme, new_borrower);
+        assert_eq!(resp.score, MIN_SCORE);
+        assert_eq!(resp.blended_score, MIN_SCORE);
+        assert_eq!(resp.total_invoices, 0);
+        assert_eq!(resp.paid_on_time, 0);
+        assert_eq!(resp.paid_late, 0);
+        assert_eq!(resp.defaulted, 0);
+        assert_eq!(resp.total_volume, 0);
+        assert_eq!(resp.average_payment_days, 0);
+        assert!(!resp.is_stale);
     }
 
     #[test]
@@ -2504,28 +2528,22 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-        let mut seed: u64 = 0x0F0F_0F0F_A5A5_A5A5;
-        let lcg = |s: &mut u64| -> u64 {
-            *s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *s
-        };
-
-        for trial in 0..20u64 {
+        for (trial, n) in [1u64, 25, MAX_PAYMENT_HISTORY as u64 + 1]
+            .into_iter()
+            .enumerate()
+        {
             let (client, _admin, _invoice, pool) = setup(&env);
             let sme = Address::generate(&env);
-            let n = (lcg(&mut seed) % 150 + 1) as u64;
             let due_date = 200_000u64;
             let mut expected_ids: std::vec::Vec<u64> = std::vec::Vec::new();
 
             for i in 0..n {
-                let invoice_id = trial * 20 + i + 1;
+                let invoice_id = trial as u64 * 1_000 + i + 1;
                 if expected_ids.len() == MAX_PAYMENT_HISTORY as usize {
                     expected_ids.remove(0);
                 }
                 expected_ids.push(invoice_id);
-                let is_default = lcg(&mut seed) % 3 == 0;
+                let is_default = i % 3 == 0;
                 if is_default {
                     client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
                 } else {

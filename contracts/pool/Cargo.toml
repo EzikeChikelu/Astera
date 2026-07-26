@@ -13,6 +13,7 @@ soroban-sdk = { workspace = true }
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
 compliance = { path = "../compliance" }
+referral = { path = "../referral" }
 
 [[test]]
 name = "fuzz_tests"

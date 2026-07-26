@@ -1,6 +1,7 @@
 import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
 import { formatUSDC } from '@/lib/stellar';
 import { Skeleton } from '@/components/Skeleton';
+import GlossaryTerm from '@/components/GlossaryTerm';
 
 interface Props {
   config: PoolConfig;
@@ -52,7 +53,9 @@ export default function PoolStats({ config, tokenTotals, tokenLabel }: Props) {
       </div>
 
       <div className="flex items-center justify-between p-3 mt-3 bg-[var(--bg)] rounded-xl border border-[var(--border)]">
-        <span className="text-sm text-[var(--muted)]">Factoring Fee</span>
+        <span className="text-sm text-[var(--muted)]">
+          <GlossaryTerm id="factoring-fee" />
+        </span>
         <span className="text-[var(--text-primary)] font-bold text-lg">{factoringFee}%</span>
       </div>
     </div>
@@ -63,7 +66,9 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
   return (
     <div className="p-3 bg-[var(--bg)] rounded-xl border border-[var(--border)]">
       <p className="text-xs text-[var(--muted)] mb-1">{label}</p>
-      <p className={`font-semibold text-sm ${highlight ? 'text-brand-gold' : 'text-[var(--text-primary)]'}`}>
+      <p
+        className={`font-semibold text-sm ${highlight ? 'text-brand-gold' : 'text-[var(--text-primary)]'}`}
+      >
         {value}
       </p>
     </div>

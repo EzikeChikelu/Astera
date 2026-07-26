@@ -11,6 +11,7 @@ import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
 import SMEOnboardingChecklist from '@/components/SMEOnboardingChecklist';
 import TestnetFaucet from '@/components/TestnetFaucet';
+import InviteFriends from '@/components/InviteFriends';
 import PipelineBoard from '@/components/dashboard/PipelineBoard';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import {
@@ -415,6 +416,7 @@ function DashboardContent() {
             {wallet.address && (
               <div className="lg:col-span-3">
                 <TestnetFaucet address={wallet.address} />
+                <InviteFriends address={wallet.address} />
               </div>
             )}
             {/* Left column */}
