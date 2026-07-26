@@ -7,19 +7,23 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx, getMaxInvoiceAmount } from '@/lib/contracts';
 import { toStroops } from '@/lib/stellar';
+import GlossaryTerm from '@/components/GlossaryTerm';
 
 const MIN_AMOUNT = 10;
 const DEFAULT_MAX_AMOUNT = 1_000_000;
 const MAX_DUE_DAYS = 365;
 const MAX_DESCRIPTION_LEN = 256;
 
-function validateForm(form: {
-  debtor: string;
-  amount: string;
-  dueDate: string;
-  description: string;
-  metadataUri: string;
-}, maxAmount: number) {
+function validateForm(
+  form: {
+    debtor: string;
+    amount: string;
+    dueDate: string;
+    description: string;
+    metadataUri: string;
+  },
+  maxAmount: number,
+) {
   const errors: Record<string, string> = {};
 
   // Debtor
@@ -160,9 +164,13 @@ export default function NewInvoicePage() {
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-1">Tokenize Invoice</h1>
           <p className="text-brand-muted">
-            Mint your unpaid invoice as a Soroban RWA token to access instant liquidity.
+            Mint your unpaid invoice as a <GlossaryTerm id="soroban" /> RWA token to access instant
+            liquidity.
           </p>
-          <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline mt-2 inline-block">
+          <Link
+            href="/invoice/import"
+            className="text-sm text-brand-gold hover:underline mt-2 inline-block"
+          >
             Import multiple invoices via CSV
           </Link>
         </div>
@@ -247,7 +255,9 @@ export default function NewInvoicePage() {
                   onChange={handleChange}
                   onBlur={handleBlur}
                   className={`w-full bg-brand-dark border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold resize-none ${
-                    touched.description && errors.description ? 'border-red-500' : 'border-brand-border'
+                    touched.description && errors.description
+                      ? 'border-red-500'
+                      : 'border-brand-border'
                   }`}
                 />
                 <ErrorMsg message={touched.description ? errors.description : undefined} />

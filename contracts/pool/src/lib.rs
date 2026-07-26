@@ -713,6 +713,9 @@ const EVT: Symbol = symbol_short!("POOL");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
+// #799: referral registry address — also stored under a Symbol key rather
+// than a DataKey variant, for the same reason as COMPLIANCE_CFG above.
+const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -731,6 +734,22 @@ pub trait InvoiceContract {
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
     fn is_cleared(env: Env, address: Address) -> bool;
+}
+
+/// #799: cross-contract interface to the referral program. `kind` is
+/// `"borrow"` or `"deposit"`; returns the reward amount (if any) credited
+/// to the referee's referrer, which the pool must then transfer to the
+/// referral contract.
+#[contractclient(name = "ReferralClient")]
+pub trait ReferralContract {
+    fn record_activity(
+        env: Env,
+        caller: Address,
+        referee: Address,
+        kind: Symbol,
+        fee_amount: i128,
+        token: Address,
+    ) -> i128;
 }
 
 // Cache for config to reduce storage reads
@@ -1021,6 +1040,38 @@ fn u128_to_i128(value: u128) -> PoolResult<i128> {
     Ok(value as i128)
 }
 
+fn update_investor_available(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    delta: i128,
+) -> PoolResult<()> {
+    let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+    let mut position: InvestorPosition =
+        env.storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+
+    if delta >= 0 {
+        position.available = position
+            .available
+            .checked_add(delta)
+            .ok_or(PoolError::AmountOverflow)?;
+    } else {
+        position.available = position.available.saturating_sub(-delta);
+    }
+
+    env.storage().persistent().set(&pos_key, &position);
+    Ok(())
+}
+
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
     let numerator = (principal as u128)
         .checked_mul(factoring_fee_bps as u128)
@@ -1132,6 +1183,10 @@ fn denormalize_from_stroops(amount: i128, token_decimals: u32) -> i128 {
 /// Returns 0 if the principal is below the threshold (no collateral required).
 fn get_credit_score_contract(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::CreditScoreContract)
+}
+
+fn get_insurance_contract(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::InsuranceContract)
 }
 
 fn fee_tier_matches(tier: &FeeTier, principal: i128, score: u32) -> bool {
@@ -1592,6 +1647,39 @@ fn fund_invoice_request(
             &request.sme,
             &request.principal,
         );
+    }
+
+    // #866: optionally purchase default-insurance coverage for this invoice.
+    // Non-fatal — a temporary insurance-contract outage must never block
+    // funding, mirroring the credit_score integration above. The pool itself
+    // is the payer (auto-authorized since it's the direct caller): the
+    // insurance contract pulls the premium directly out of the pool's real
+    // token balance via its own `transfer` call. That's real value leaving
+    // the pool regardless of internal bookkeeping, so pool_value (investor
+    // NAV) must be written down by the same amount or later withdrawals
+    // would overdraw the pool's actual balance — exactly the class of bug
+    // fixed in execute_seize_collateral above. protocol_revenue is drawn
+    // down first (best-effort, floored at zero) since that's the intended
+    // funding source; any remainder still comes out of pool_value.
+    if let Some(insurance_contract) = get_insurance_contract(env) {
+        let insurance_client = InsuranceClient::new(env, &insurance_contract);
+        if let Ok(Ok(coverage)) = insurance_client.try_purchase_coverage(
+            &env.current_contract_address(),
+            &request.invoice_id,
+            &request.principal,
+            &request.sme,
+            &request.due_date,
+            &request.token,
+        ) {
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
+            tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
+            env.storage().instance().set(&token_totals_key, &tt);
+        }
     }
 
     Ok(())
@@ -2086,10 +2174,10 @@ impl FundingPool {
 
         // #233: update investor position — track in USDC terms to match pool_value
         investor_position.deposited += usdc_received;
-        // #217: `available` tracks shares not yet withdrawn or reserved by a
-        // queued withdrawal request, in share-token units (matches what
-        // request_withdrawal compares it against).
-        investor_position.available += shares_to_mint;
+        investor_position.available = investor_position
+            .available
+            .checked_add(shares_to_mint)
+            .ok_or(PoolError::AmountOverflow)?;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -2112,6 +2200,11 @@ impl FundingPool {
         // has arrived — don't wait solely for the next repayment (mirrors the same
         // best-effort, non-blocking pattern used in repay_invoice_request).
         record_inflow_event(&env, &token, usdc_received);
+        // #799: activates the referral on this investor's first deposit.
+        // The pool has no separate yield fee to share yet, so fee_amount is
+        // 0 here — record_referral_activity is a no-op reward-wise but
+        // still records the qualifying activity / referral count.
+        Self::record_referral_activity(&env, &investor, symbol_short!("deposit"), 0, &token);
         let post_deposit_liquidity = available_liquidity(&tt).unwrap_or(0);
         if let Err(e) = Self::process_withdrawal_queue(&env, token, post_deposit_liquidity) {
             let _ = e;
@@ -2227,17 +2320,7 @@ impl FundingPool {
         burn_args.push_back(investor.clone().into_val(&env));
         burn_args.push_back(shares.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
-
-        // #217: keep `available` in sync with actual burned shares.
-        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        if let Some(mut position) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, InvestorPosition>(&investor_pos_key)
-        {
-            position.available = position.available.saturating_sub(shares);
-            env.storage().persistent().set(&investor_pos_key, &position);
-        }
+        update_investor_available(&env, &investor, &token, -shares)?;
 
         // Update USDC-denominated pool value SECOND - effects
         tt.pool_value -= usdc_amount;
@@ -2304,7 +2387,7 @@ impl FundingPool {
         }
 
         let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let mut position: InvestorPosition = env
+        let position: InvestorPosition = env
             .storage()
             .persistent()
             .get(&investor_pos_key)
@@ -2318,10 +2401,6 @@ impl FundingPool {
         if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
-        // #217: reserve these shares immediately so they can't be double-spent
-        // by another request_withdrawal/withdraw call before this one settles.
-        position.available -= shares;
-        env.storage().persistent().set(&investor_pos_key, &position);
 
         Self::non_reentrant_start(&env);
 
@@ -2387,6 +2466,7 @@ impl FundingPool {
             }
 
             // Insufficient liquidity - queue the request
+            update_investor_available(&env, &investor, &token, -shares)?;
             request_id = Self::generate_request_id(&env, &token);
             let request = WithdrawalRequest {
                 investor: investor.clone(),
@@ -2436,11 +2516,11 @@ impl FundingPool {
 
             let mut new_queue = Vec::new(&env);
             let mut request_id = 0u64;
-            let mut cancelled_shares = 0i128;
+            let mut request_shares = 0i128;
             for req in queue.iter() {
                 if req.investor == investor {
                     request_id = req.request_id;
-                    cancelled_shares = req.shares;
+                    request_shares = req.shares;
                 } else {
                     new_queue.push_back(req);
                 }
@@ -2452,17 +2532,7 @@ impl FundingPool {
 
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().remove(&request_key);
-
-            // #217: release the shares this request had reserved.
-            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-            if let Some(mut position) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, InvestorPosition>(&investor_pos_key)
-            {
-                position.available += cancelled_shares;
-                env.storage().persistent().set(&investor_pos_key, &position);
-            }
+            update_investor_available(&env, &investor, &token, request_shares)?;
 
             env.events().publish(
                 (EVT, symbol_short!("wd_cncl")),
@@ -2623,6 +2693,7 @@ impl FundingPool {
         share_token: Address,
     ) -> Result<(), PoolError> {
         Self::burn_withdrawal_shares(env, &share_token, investor.clone(), shares);
+        update_investor_available(env, &investor, &token, -shares)?;
 
         tt.pool_value -= amount;
         let token_totals_key = DataKey::TokenTotals(token.clone());
@@ -3358,6 +3429,16 @@ impl FundingPool {
                 env.logs().add("Failed to process withdrawal queue", &[]);
             }
 
+            // #799: pay the referrer (if any) their cut of the
+            // factoring fee just realized above.
+            Self::record_referral_activity(
+                env,
+                &record.sme,
+                symbol_short!("borrow"),
+                record.factoring_fee,
+                &token,
+            );
+
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
                 (invoice_id, principal, total_interest_i128, now),
@@ -3628,9 +3709,16 @@ impl FundingPool {
                 .get(&token_totals_key)
                 .unwrap_or_default();
 
-            // The seized collateral reduces the effective loss: add it to pool_value and
-            // reduce total_deployed by the original principal (the invoice is now a loss).
-            tt.pool_value += col.amount;
+            // The defaulted invoice's principal is a receivable that pool_value already
+            // counts as an asset (via total_deployed) — it must be written off here, offset
+            // by whatever collateral was actually recovered, or pool_value silently overstates
+            // investor claims by the unrecovered shortfall. total_deployed drops by the full
+            // principal regardless, since the invoice is no longer outstanding either way.
+            tt.pool_value = tt
+                .pool_value
+                .checked_sub(record.principal)
+                .and_then(|v| v.checked_add(col.amount))
+                .ok_or(PoolError::AmountOverflow)?;
             tt.total_deployed -= record.principal;
             env.storage().instance().set(&token_totals_key, &tt);
 
@@ -3652,6 +3740,17 @@ impl FundingPool {
                 (EVT, Symbol::new(env, "col_seiz_default")),
                 (invoice_id, col.depositor, col.amount, admin.clone(), now),
             );
+
+            // #866: the default-insurance reserve's file_claim is deliberately
+            // *not* called from here — insurance.file_claim calls back into
+            // this pool contract (get_funded_invoice / get_collateral_deposit
+            // / receive_insurance_payout) to independently re-derive the
+            // shortfall, and Soroban disallows that A→B→A re-entrancy while
+            // pool is still on the call stack executing this very function.
+            // Instead file_claim is permissionless: anyone (a keeper, the SME,
+            // the frontend) files it directly against the insurance contract
+            // as a follow-up call once collateral has been seized.
+
             Ok(())
         })
     }
@@ -4138,6 +4237,70 @@ impl FundingPool {
     pub fn get_credit_score_contract(env: Env) -> Option<Address> {
         bump_instance(&env);
         env.storage().instance().get(&DataKey::CreditScoreContract)
+    }
+
+    /// #866: wire up the optional default-insurance reserve. Absence (`None`)
+    /// disables the integration entirely — mirrors `CreditScoreContract`.
+    pub fn set_insurance_contract(
+        env: Env,
+        admin: Address,
+        insurance_contract: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceContract, &insurance_contract);
+        Ok(())
+    }
+
+    pub fn get_insurance_contract(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::InsuranceContract)
+    }
+
+    /// #866: called by the insurance contract after it transfers a claim
+    /// payout to the pool, so that payout is credited into this token's
+    /// `pool_value` — the same accounting bucket collateral seizure already
+    /// credits — making investors whole from the reserve. Only the configured
+    /// insurance contract may call this (`insurance.require_auth()` succeeds
+    /// automatically only when insurance itself is the direct caller).
+    pub fn receive_insurance_payout(
+        env: Env,
+        insurance: Address,
+        token: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        insurance.require_auth();
+        bump_instance(&env);
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceContract)
+            .ok_or(PoolError::Unauthorized)?;
+        if insurance != configured {
+            return Err(PoolError::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        tt.pool_value = tt
+            .pool_value
+            .checked_add(amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        env.storage().instance().set(&token_totals_key, &tt);
+        env.events()
+            .publish((EVT, symbol_short!("ins_pay")), (invoice_id, token, amount));
+        Ok(())
     }
 
     pub fn set_compound_interest(
@@ -5348,6 +5511,49 @@ impl FundingPool {
         }
     }
 
+    /// #799: best-effort referral hook. If a referral registry is
+    /// configured, records `kind` ("borrow" or "deposit") activity for
+    /// `referee` and — if a reward was credited — moves that amount of
+    /// `token` from the pool's own balance to the referral contract so
+    /// `claim_rewards()` can pay it out, debiting the same amount from
+    /// `protocol_revenue` (the reward is a redistributed slice of the fee
+    /// already credited there, not new inflation). Never fails the caller:
+    /// an unset registry or any cross-contract error is swallowed.
+    fn record_referral_activity(env: &Env, referee: &Address, kind: Symbol, fee_amount: i128, token: &Address) {
+        if fee_amount < 0 {
+            return;
+        }
+        let registry: Option<Address> = env.storage().instance().get(&REFERRAL_CFG);
+        let Some(registry) = registry else {
+            return;
+        };
+        let client = ReferralClient::new(env, &registry);
+        let reward = match client.try_record_activity(
+            &env.current_contract_address(),
+            referee,
+            &kind,
+            &fee_amount,
+            token,
+        ) {
+            Ok(Ok(amount)) if amount > 0 => amount,
+            _ => return,
+        };
+
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        tt.protocol_revenue = tt.protocol_revenue.saturating_sub(reward);
+        env.storage().instance().set(&token_totals_key, &tt);
+
+        let token_client = token::Client::new(env, token);
+        token_client.transfer(&env.current_contract_address(), &registry, &reward);
+        env.events()
+            .publish((EVT, symbol_short!("ref_pay")), (referee.clone(), reward));
+    }
+
     fn require_not_paused(env: &Env) {
         require_not_paused(env);
     }
@@ -5516,6 +5722,27 @@ impl FundingPool {
             .get::<Symbol, ComplianceGateConfig>(&COMPLIANCE_CFG)
             .map(|g| g.required)
             .unwrap_or(false)
+    }
+
+    // ---- #799: Referral program integration ----
+
+    /// Set the referral contract address. When set, a referrer's cut of a
+    /// referee's factoring fee (on invoice repayment) or deposit is routed
+    /// there automatically. Unset by default — existing deployments and
+    /// tests are unaffected until an admin opts in.
+    pub fn set_referral_registry(env: Env, admin: Address, registry: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&REFERRAL_CFG, &registry);
+        env.events()
+            .publish((EVT, symbol_short!("ref_set")), (admin, registry));
+        Ok(())
+    }
+
+    pub fn get_referral_registry(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&REFERRAL_CFG)
     }
 
     // ---- #109: Investor KYC / whitelist methods ----
@@ -6477,6 +6704,91 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    // #799: referral program integration — the pool contract pays a
+    // referrer their configured cut of a referee's factoring fee.
+    #[test]
+    fn test_referral_reward_paid_on_invoice_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let referrer = Address::generate(&env);
+
+        let referral_id = env.register(referral::ReferralContract, ());
+        let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
+        referral_client.initialize(&admin, &client.address);
+        referral_client.register(&sme, &referrer);
+        client.set_referral_registry(&admin, &referral_id);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        // 2.5% factoring fee; default referral borrow reward is 5% of that fee.
+        client.set_factoring_fee(&admin, &250);
+        client.deposit(&investor, &usdc_id, &principal);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+
+        let expected_fee = principal * 250 / BPS_DENOM as i128;
+        let expected_reward = expected_fee * 500 / BPS_DENOM as i128;
+
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        // Referrer's reward is credited and actually funded on the referral contract.
+        assert_eq!(
+            referral_client.get_pending_reward(&referrer, &usdc_id),
+            expected_reward
+        );
+        assert_eq!(referral_client.get_stats(&referrer).referral_count, 1);
+        let usdc_client = soroban_sdk::token::Client::new(&env, &usdc_id);
+        assert_eq!(usdc_client.balance(&referral_id), expected_reward);
+
+        // The reward is carved out of protocol_revenue, not paid on top of it.
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.total_fee_revenue, expected_fee);
+        assert_eq!(tt.protocol_revenue, expected_fee - expected_reward);
+
+        // Referrer can claim it.
+        let claimed = referral_client.claim_rewards(&referrer, &usdc_id);
+        assert_eq!(claimed, expected_reward);
+        assert_eq!(usdc_client.balance(&referrer), expected_reward);
+    }
+
+    #[test]
+    fn test_referral_activates_on_first_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let referrer = Address::generate(&env);
+
+        let referral_id = env.register(referral::ReferralContract, ());
+        let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
+        referral_client.initialize(&admin, &client.address);
+        referral_client.register(&investor, &referrer);
+        client.set_referral_registry(&admin, &referral_id);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &1_000i128);
+
+        // No pool-level yield fee exists yet, so the deposit earns no
+        // reward — but the referral is still activated/counted.
+        assert_eq!(referral_client.get_stats(&referrer).referral_count, 1);
+        assert_eq!(referral_client.get_pending_reward(&referrer, &usdc_id), 0);
     }
 
     #[test]
@@ -7482,6 +7794,34 @@ mod test {
         assert_eq!(result, Err(Ok(PoolError::StorageCorrupted)));
     }
 
+    // #791: a borrower must not be able to post an arbitrary, non-whitelisted
+    // token as collateral (e.g. a worthless token they mint themselves) to
+    // inflate their apparent collateral ratio. `deposit_collateral` already
+    // calls `assert_accepted_token`, but that guard had no dedicated
+    // regression test — this locks the behaviour in.
+    #[test]
+    fn test_deposit_collateral_rejects_unsupported_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+
+        // Attacker deploys their own worthless token — never registered via add_token.
+        let attacker_token_admin = Address::generate(&env);
+        let worthless_token = env
+            .register_stellar_asset_contract_v2(attacker_token_admin)
+            .address();
+        mint(&env, &worthless_token, &sme, 1_000_000);
+
+        let result = client.try_deposit_collateral(&1u64, &sme, &worthless_token, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+
+        // No collateral record should have been created for the rejected deposit.
+        assert!(client.get_collateral_deposit(&1u64).is_none());
+    }
+
     #[test]
     fn test_insufficient_collateral_panics() {
         let env = Env::default();
@@ -8007,6 +8347,7 @@ mod test {
             &usdc_id,
         );
         let attacker = Address::generate(&env);
+        // Non-admin is rejected by require_admin before the proposal-flow gate.
         let result = client.try_seize_collateral(&attacker, &1u64);
         assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
@@ -9248,22 +9589,9 @@ mod test {
         mint(&env, &usdc_id, &sme, 20_000);
         client.deposit(&alice, &usdc_id, &10_000);
         client.deposit(&bob, &usdc_id, &10_000);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-        client.fund_invoice(
-            &admin,
-            &2u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
+        client.fund_invoice(&admin, &2u64, &10_000, &sme, &due_date, &usdc_id);
 
         client.request_withdrawal(&alice, &usdc_id, &10_000);
         client.request_withdrawal(&bob, &usdc_id, &10_000);
@@ -9577,9 +9905,14 @@ mod test {
 
         propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
 
-        // 1. Check pool value increased, total deployed decreased by principal
+        // 1. Check pool value is written down by the unrecovered shortfall
+        // (principal minus recovered collateral), and total deployed
+        // decreased by the full principal.
         let tt_after = client.get_token_totals(&usdc_id);
-        assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
+        assert_eq!(
+            tt_after.pool_value,
+            tt_before.pool_value - principal + required
+        );
         assert_eq!(
             tt_after.total_deployed,
             tt_before.total_deployed - principal

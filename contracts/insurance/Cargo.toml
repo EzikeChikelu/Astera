@@ -1,5 +1,5 @@
 [package]
-name = "pool"
+name = "insurance"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,13 +12,11 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
-compliance = { path = "../compliance" }
-referral = { path = "../referral" }
 
 [[test]]
-name = "fuzz_tests"
-path = "tests/fuzz_tests.rs"
+name = "premium_pricing_tests"
+path = "tests/premium_pricing_tests.rs"
 
 [[test]]
-name = "compliance_gate_tests"
-path = "tests/compliance_gate_tests.rs"
+name = "reserve_tests"
+path = "tests/reserve_tests.rs"
