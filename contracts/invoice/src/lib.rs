@@ -165,6 +165,8 @@ pub enum InvoiceError {
     ComplianceRegistryNotConfigured = 40,
     // #766: per-address daily invoice creation rate limit exceeded
     RateLimitExceeded = 41,
+    // #747: invoice ID collision detected (counter TTL expired and reset)
+    IDCollision = 42,
 }
 
 #[contracttype]
@@ -1391,6 +1393,13 @@ impl InvoiceContract {
             .get(&DataKey::InvoiceCount)
             .unwrap_or(0);
         let id = count + 1;
+
+        // #747: Refresh TTL on the invoice counter to prevent expiry and ID collisions
+        env.storage().instance().extend_ttl(
+            &DataKey::InvoiceCount,
+            INSTANCE_BUMP_AMOUNT,
+            INSTANCE_BUMP_AMOUNT,
+        );
         let pool_addr: Address = env
             .storage()
             .instance()
@@ -1431,6 +1440,11 @@ impl InvoiceContract {
             grace_period_override: None,
             verification_deadline: verification_deadline_ts,
         };
+
+        // #747: Collision guard—ensure this ID does not already exist
+        if env.storage().persistent().has(&DataKey::Invoice(id)) {
+            panic_with_error!(&env, InvoiceError::IDCollision);
+        }
 
         env.storage()
             .persistent()
