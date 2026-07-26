@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -17,6 +18,11 @@ import {
   getCollateralConfig,
   getCollateralDeposit,
   buildDepositCollateralTx,
+  isInvoicePrivate,
+  buildSetInvoicePrivateTx,
+  getFullCreditScore,
+  getCoFundingRound,
+  buildCommitToInvoiceTx,
   submitTx,
 } from '@/lib/contracts';
 import {
@@ -26,13 +32,20 @@ import {
   truncateAddress,
   rpcGetEvents,
   rpcGetLatestLedger,
+  toStroops,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   USDC_TOKEN_ID,
+  nativeToScVal,
+  Address,
   scValToNative,
   xdr,
 } from '@/lib/stellar';
+import { simulateContractCall } from '@/lib/simulateFee';
+import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
+import EstimatedFee from '@/components/EstimatedFee';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
+import { parseStellarAddress } from '@/lib/types';
 import type {
   FundedInvoice,
   Invoice,
@@ -40,6 +53,8 @@ import type {
   PoolConfig,
   CollateralConfig,
   CollateralDeposit,
+  CoFundingRound,
+  FullCreditScore,
 } from '@/lib/types';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
@@ -84,7 +99,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
     const action = scValToNative(t1) as string;
     const value = event.value ? scValToNative(event.value) : null;
 
-    if (contract === INVOICE_CONTRACT_ID && namespace === 'INVOICE') {
+    if (contract === INVOICE_CONTRACT_ID && namespace === 'invoice') {
       if (action === 'created') {
         const [id, owner, amount] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
@@ -126,7 +141,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
       }
     }
 
-    if (contract === POOL_CONTRACT_ID && namespace === 'POOL') {
+    if (contract === POOL_CONTRACT_ID && namespace === 'pool') {
       if (action === 'funded') {
         const [id] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
@@ -176,6 +191,13 @@ export default function InvoiceDetailPage() {
   const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
+  const [creditScore, setCreditScore] = useState<FullCreditScore | null>(null);
+  const [coFundingRound, setCoFundingRound] = useState<CoFundingRound | null>(null);
+  const [commitAmount, setCommitAmount] = useState<string>('');
+  const [commitLoading, setCommitLoading] = useState(false);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -226,13 +248,23 @@ export default function InvoiceDetailPage() {
       setInvoice(inv);
       setMetadata(meta);
 
-      const [poolResult, fundedResult, collateralConfigResult, collateralDepositResult] =
-        await Promise.allSettled([
-          getPoolConfig(),
-          getFundedInvoice(numId),
-          getCollateralConfig(),
-          getCollateralDeposit(numId),
-        ]);
+      const [
+        poolResult,
+        fundedResult,
+        collateralConfigResult,
+        collateralDepositResult,
+        privateResult,
+        creditScoreResult,
+        coFundingResult,
+      ] = await Promise.allSettled([
+        getPoolConfig(),
+        getFundedInvoice(numId),
+        getCollateralConfig(),
+        getCollateralDeposit(numId),
+        isInvoicePrivate(numId),
+        getFullCreditScore(inv.owner),
+        getCoFundingRound(numId),
+      ]);
 
       setPoolConfig(poolResult.status === 'fulfilled' ? poolResult.value : null);
       setFundedInvoice(fundedResult.status === 'fulfilled' ? fundedResult.value : null);
@@ -242,6 +274,9 @@ export default function InvoiceDetailPage() {
       const deposit =
         collateralDepositResult.status === 'fulfilled' ? collateralDepositResult.value : null;
       setCollateralDeposit(deposit);
+      setIsPrivate(privateResult.status === 'fulfilled' ? privateResult.value : false);
+      setCreditScore(creditScoreResult.status === 'fulfilled' ? creditScoreResult.value : null);
+      setCoFundingRound(coFundingResult.status === 'fulfilled' ? coFundingResult.value : null);
 
       void loadHistory(numId);
     } catch (e) {
@@ -313,6 +348,27 @@ export default function InvoiceDetailPage() {
         fundedInvoice.repaidAmount
       : 0n;
   const fullyRepaid = remainingDue <= 0n;
+
+  const simulateRepay = useCallback(() => {
+    if (!wallet.address || !invoice) return null;
+    const amount = repayAmount ? BigInt(repayAmount) : remainingDue;
+    if (amount <= 0n) return null;
+    return simulateContractCall(
+      POOL_CONTRACT_ID,
+      'repay_invoice',
+      [
+        nativeToScVal(invoice.id, { type: 'u64' }),
+        new Address(wallet.address).toScVal(),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      wallet.address,
+    );
+  }, [wallet.address, invoice, repayAmount, remainingDue]);
+
+  const repaySimulation = useTransactionSimulation(
+    simulateRepay,
+    isOwner && metadata.status === 'Funded' && !!fundedInvoice && !fullyRepaid && !!wallet.address && !!invoice && (!!repayAmount || remainingDue > 0n),
+  );
 
   async function handleRepay() {
     if (!wallet.address || !invoice || !fundedInvoice) return;
@@ -434,8 +490,99 @@ export default function InvoiceDetailPage() {
     }
   }
 
-  function exportInvoicePDF() {
-    window.print();
+  async function exportInvoicePDF() {
+    if (!invoice || !metadata) return;
+
+    setPdfLoading(true);
+    try {
+      await downloadInvoicePDF(invoice, metadata);
+    } catch (e) {
+      toast.error('Failed to generate PDF.');
+      console.error(e);
+    } finally {
+      setPdfLoading(false);
+    }
+  }
+
+  async function handleShare() {
+    if (!invoice) return;
+    const url = `${window.location.origin}/invoice/${invoice.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success('Invoice link copied to clipboard!');
+    } catch (e) {
+      toast.error('Failed to copy link.');
+      console.error(e);
+    }
+  }
+
+  async function handleTogglePrivate() {
+    if (!wallet.address || !invoice) return;
+
+    const next = !isPrivate;
+    setPrivacyLoading(true);
+    try {
+      const xdr = await buildSetInvoicePrivateTx({
+        owner: wallet.address,
+        invoiceId: invoice.id,
+        private: next,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      setIsPrivate(next);
+      toast.success(next ? 'Invoice is now private.' : 'Invoice is now public.');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to update sharing setting.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setPrivacyLoading(false);
+    }
+  }
+
+  async function handleCommitToInvoice() {
+    if (!wallet.address || !invoice) return;
+
+    const amountNum = Number(commitAmount);
+    if (!commitAmount || !Number.isFinite(amountNum) || amountNum <= 0) {
+      toast.error('Enter a valid amount to fund.');
+      return;
+    }
+
+    setCommitLoading(true);
+    try {
+      const investor = parseStellarAddress(wallet.address);
+      const xdr = await buildCommitToInvoiceTx({
+        investor,
+        invoiceId: invoice.id,
+        amount: toStroops(amountNum),
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success(`Committed to invoice #${invoice.id}.`);
+      setCommitAmount('');
+      await loadInvoice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to fund invoice.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setCommitLoading(false);
+    }
   }
 
   if (loading) {
@@ -462,6 +609,19 @@ export default function InvoiceDetailPage() {
     );
   }
 
+  // #775: the borrower opted this invoice out of the public sharing link —
+  // hide it from everyone except the owner, same as a genuinely missing invoice.
+  if (isPrivate && !isOwner) {
+    return (
+      <div className="min-h-screen pt-24 px-4 sm:px-6 flex flex-col items-center justify-center text-center">
+        <p className="text-red-400 mb-4">Invoice not found.</p>
+        <Link href="/dashboard" className="text-brand-gold hover:underline text-sm">
+          Back to Dashboard
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-2xl mx-auto">
@@ -472,11 +632,27 @@ export default function InvoiceDetailPage() {
           ← Back to Dashboard
         </Link>
         <button
-          onClick={exportInvoicePDF}
+          onClick={() => void exportInvoicePDF()}
+          disabled={pdfLoading}
+          className="print:hidden text-sm text-brand-muted hover:text-white ml-4 disabled:opacity-60"
+        >
+          {pdfLoading ? 'Generating PDF...' : 'Export PDF'}
+        </button>
+        <button
+          onClick={() => void handleShare()}
           className="print:hidden text-sm text-brand-muted hover:text-white ml-4"
         >
-          Export PDF
+          Share
         </button>
+        {isOwner && (
+          <button
+            onClick={() => void handleTogglePrivate()}
+            disabled={privacyLoading}
+            className="print:hidden text-sm text-brand-muted hover:text-white ml-4 disabled:opacity-60"
+          >
+            {privacyLoading ? 'Updating...' : isPrivate ? 'Make Public' : 'Make Private'}
+          </button>
+        )}
 
         <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
           {metadata.image ? (
@@ -518,7 +694,14 @@ export default function InvoiceDetailPage() {
             </div>
             <div className="col-span-2">
               <p className="text-brand-muted mb-1">Owner</p>
-              <p className="font-mono text-xs text-white break-all">{invoice.owner}</p>
+              {/* #775: only the owner sees their own full address; every other
+                  viewer (the public sharing case) only sees it abbreviated. */}
+              <p className="font-mono text-xs text-white break-all">
+                {isOwner ? invoice.owner : truncateAddress(invoice.owner)}
+              </p>
+            </div>
+            <div className="col-span-2">
+              <BorrowerCreditBadge borrower={invoice.owner} />
             </div>
             {metadata.description && (
               <div className="col-span-2">
@@ -528,6 +711,35 @@ export default function InvoiceDetailPage() {
             )}
           </div>
         </div>
+
+        {creditScore && (
+          <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold mb-1">Borrower Credit Score</h2>
+                <p className="text-xs text-brand-muted">
+                  {creditScore.totalInvoices > 0
+                    ? `${creditScore.paidOnTime}/${creditScore.totalInvoices} invoices paid on time`
+                    : 'No repayment history yet'}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-3xl font-bold gradient-text">{creditScore.blendedScore}</div>
+                <span className="text-xs text-brand-muted">
+                  {creditScore.totalInvoices === 0
+                    ? 'No history'
+                    : creditScore.blendedScore >= 750
+                      ? 'Excellent'
+                      : creditScore.blendedScore >= 650
+                        ? 'Good'
+                        : creditScore.blendedScore >= 550
+                          ? 'Fair'
+                          : 'Building'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
           <div className="flex items-center justify-between gap-4 mb-6">
@@ -652,6 +864,11 @@ export default function InvoiceDetailPage() {
                 const requiredAmount =
                   (metadata.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
                 const pct = (collateralConfig.collateralBps / 100).toFixed(0);
+                const requiredLabel = (
+                  <>
+                    Required (<GlossaryTerm id="collateral-ratio">{pct}%</GlossaryTerm>)
+                  </>
+                );
 
                 if (collateralDeposit && collateralDeposit.settled) {
                   if (metadata.status === 'Defaulted') {
@@ -678,7 +895,7 @@ export default function InvoiceDetailPage() {
                   return (
                     <div className="space-y-3 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                       </div>
                       <div className="flex justify-between">
@@ -699,7 +916,7 @@ export default function InvoiceDetailPage() {
                   return (
                     <div className="space-y-3 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-brand-muted">Required ({pct}%)</span>
+                        <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                       </div>
                       <p className="text-brand-muted">No collateral has been posted.</p>
@@ -710,7 +927,10 @@ export default function InvoiceDetailPage() {
                 return (
                   <div className="space-y-4">
                     <div className="flex justify-between text-sm">
-                      <span className="text-brand-muted">Required ({pct}% of invoice)</span>
+                      <span className="text-brand-muted">
+                        Required (<GlossaryTerm id="collateral-ratio">{pct}%</GlossaryTerm> of
+                        invoice)
+                      </span>
                       <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                     </div>
                     <div>
@@ -742,6 +962,85 @@ export default function InvoiceDetailPage() {
               })()}
             </div>
           )}
+
+        {coFundingRound && coFundingRound.status === 'Open' && (
+          <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6 space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold mb-1">Fund This Invoice</h2>
+              <p className="text-xs text-brand-muted">
+                Join other lenders co-funding this invoice. Committed capital earns a
+                proportional share of this invoice&apos;s principal and interest.
+              </p>
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-brand-muted mb-1">
+                <span>
+                  {formatUSDC(coFundingRound.committedPrincipal)} /{' '}
+                  {formatUSDC(coFundingRound.targetPrincipal)}
+                </span>
+                <span>
+                  {coFundingRound.targetPrincipal > 0n
+                    ? (
+                        Number(
+                          (coFundingRound.committedPrincipal * 10_000n) /
+                            coFundingRound.targetPrincipal,
+                        ) / 100
+                      ).toFixed(1)
+                    : '0'}
+                  %
+                </span>
+              </div>
+              <div className="h-2 bg-brand-border rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-brand-gold transition-all"
+                  style={{
+                    width: `${
+                      coFundingRound.targetPrincipal > 0n
+                        ? Math.min(
+                            100,
+                            Number(
+                              (coFundingRound.committedPrincipal * 10_000n) /
+                                coFundingRound.targetPrincipal,
+                            ) / 100,
+                          )
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            {!wallet.connected ? (
+              <div className="space-y-2">
+                <p className="text-sm text-brand-muted">
+                  Connect your wallet to fund this invoice.
+                </p>
+                <WalletConnect />
+              </div>
+            ) : (
+              <div className="flex gap-3">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Amount (USDC)"
+                  value={commitAmount}
+                  onChange={(e) => setCommitAmount(e.target.value)}
+                  disabled={commitLoading}
+                  className="flex-1 bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-sm disabled:opacity-50"
+                />
+                <button
+                  onClick={() => void handleCommitToInvoice()}
+                  disabled={commitLoading || !commitAmount}
+                  className="px-5 py-2.5 bg-brand-gold text-brand-dark rounded-xl text-sm font-semibold hover:bg-brand-amber transition-colors disabled:opacity-50"
+                >
+                  {commitLoading ? 'Funding...' : 'Fund This Invoice'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {historyLoading ? (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
@@ -813,9 +1112,11 @@ export default function InvoiceDetailPage() {
                 disabled={actionLoading}
                 className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
               />
+              <EstimatedFee simulation={repaySimulation} />
+
               <button
                 onClick={() => void handleRepay()}
-                disabled={actionLoading || !repayAmount}
+                disabled={actionLoading || !repayAmount || repaySimulation.status === 'loading'}
                 className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60"
               >
                 {actionLoading

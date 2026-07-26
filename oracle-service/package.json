@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
-    "astera-sdk": "file:../sdk",
+    "astera-sdk": "file:../packages/sdk",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {

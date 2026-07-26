@@ -1,7 +1,7 @@
 import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { Keypair } from '@stellar/stellar-sdk';
-import { AsteraClient } from '../../sdk/src/client';
+import { AsteraClient } from 'astera-sdk';
 import { Listener } from './listener';
 import { Verifier } from './verifier';
 import { ConsensusTracker } from './consensus';
