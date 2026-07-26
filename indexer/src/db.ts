@@ -2,8 +2,8 @@
  * SQLite database for storing indexed Soroban events.
  */
 
-import Database from 'better-sqlite3';
-import { IndexedEvent } from './parser';
+import Database from "better-sqlite3";
+import { IndexedEvent } from "./parser";
 
 const MIGRATIONS = [
   // v1: Initial schema
@@ -40,27 +40,120 @@ function runMigrationsFrom(db: Database.Database, fromVersion: number): void {
   for (let i = fromVersion; i < toVersion; i++) {
     const migration = MIGRATIONS[i];
     db.exec(migration());
-    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(i + 1);
+    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(i + 1);
   }
 }
 
 export function initDb(dbPath: string): Database.Database {
-  const db = new Database(dbPath);
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY_MS = 1000;
 
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
+  let lastError: Error | null = null;
 
-  db.exec('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)');
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const db = new Database(dbPath);
 
-  const versionRow = db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number | null } | undefined;
-  const currentVersion = versionRow?.v ?? 0;
+      db.pragma("journal_mode = WAL");
+      db.pragma("synchronous = NORMAL");
 
-  runMigrationsFrom(db, currentVersion);
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+      );
 
-  return db;
+      const versionRow = db
+        .prepare("SELECT MAX(version) as v FROM schema_version")
+        .get() as { v: number | null } | undefined;
+      const currentVersion = versionRow?.v ?? 0;
+
+      runMigrationsFrom(db, currentVersion);
+
+      console.log(
+        `[db] Database initialized successfully (attempt ${attempt}/${MAX_RETRIES})`,
+      );
+      return db;
+    } catch (error: any) {
+      lastError = error;
+      console.error(
+        `[db] Failed to initialize database (attempt ${attempt}/${MAX_RETRIES}):`,
+        error.message,
+      );
+
+      if (attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAY_MS * attempt;
+        console.log(`[db] Retrying in ${delay}ms...`);
+        const sleepUntil = Date.now() + delay;
+        while (Date.now() < sleepUntil) {
+          // Busy wait for synchronous sleep
+        }
+      }
+    }
+  }
+
+  throw new Error(
+    `[db] Failed to initialize database after ${MAX_RETRIES} attempts: ${lastError?.message}`,
+  );
 }
 
-export function storeEvents(db: Database.Database, events: IndexedEvent[]): void {
+export function withDbReconnect<T>(
+  db: Database.Database,
+  operation: (db: Database.Database) => T,
+  dbPath: string,
+): T {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 500;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return operation(db);
+    } catch (error: any) {
+      const isDbError =
+        error.message?.includes("database") ||
+        error.message?.includes("SQLITE") ||
+        error.code === "SQLITE_BUSY" ||
+        error.code === "SQLITE_LOCKED";
+
+      if (isDbError && attempt < MAX_RETRIES) {
+        console.error(
+          `[db] Database operation failed (attempt ${attempt}/${MAX_RETRIES}):`,
+          error.message,
+        );
+        console.log(`[db] Attempting to reconnect...`);
+
+        try {
+          db.close();
+        } catch (closeError) {
+          console.error("[db] Error closing database:", closeError);
+        }
+
+        const delay = RETRY_DELAY_MS * attempt;
+        const sleepUntil = Date.now() + delay;
+        while (Date.now() < sleepUntil) {
+          // Busy wait
+        }
+
+        try {
+          db = initDb(dbPath);
+          console.log("[db] Reconnected successfully");
+        } catch (reconnectError: any) {
+          console.error("[db] Reconnection failed:", reconnectError.message);
+          if (attempt === MAX_RETRIES) {
+            throw reconnectError;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("[db] Operation failed after all retry attempts");
+}
+
+export function storeEvents(
+  db: Database.Database,
+  events: IndexedEvent[],
+): void {
   if (events.length === 0) return;
 
   const stmt = db.prepare(`
@@ -70,11 +163,14 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
       (@id, @contractId, @contractType, @eventType, @topic, @value, @actorAddress, @ledgerSequence, @ledgerCloseAt, @txHash, @createdAt)  `);
 
   const insertMany = db.transaction((events: IndexedEvent[]) => {
+    let inserted = 0;
+    let skipped = 0;
+
     for (const event of events) {
-      stmt.run({
+      const result = stmt.run({
         id: event.id,
         contractId: event.contractId,
-        contractType: event.contractType || 'unknown',
+        contractType: event.contractType || "unknown",
         eventType: event.eventType,
         topic: JSON.stringify(event.topic),
         value: JSON.stringify(event.value),
@@ -84,6 +180,16 @@ export function storeEvents(db: Database.Database, events: IndexedEvent[]): void
         txHash: event.txHash,
         createdAt: event.createdAt,
       });
+
+      if (result.changes > 0) {
+        inserted++;
+      } else {
+        skipped++;
+      }
+    }
+
+    if (skipped > 0) {
+      console.log(`[db] Deduplicated ${skipped} events (${inserted} new)`);
     }
   });
 
@@ -99,34 +205,41 @@ export function getEvents(
     actorAddress?: string;
     limit?: number;
     offset?: number;
-  } = {}
+  } = {},
 ): IndexedEvent[] {
-  const { contractId, contractType, eventType, actorAddress, limit = 50, offset = 0 } = options;
+  const {
+    contractId,
+    contractType,
+    eventType,
+    actorAddress,
+    limit = 50,
+    offset = 0,
+  } = options;
 
-  let query = 'SELECT * FROM events WHERE 1=1';
+  let query = "SELECT * FROM events WHERE 1=1";
   const params: any[] = [];
 
   if (contractId) {
-    query += ' AND contract_id = ?';
+    query += " AND contract_id = ?";
     params.push(contractId);
   }
 
   if (contractType) {
-    query += ' AND contract_type = ?';
+    query += " AND contract_type = ?";
     params.push(contractType);
   }
 
   if (eventType) {
-    query += ' AND event_type = ?';
+    query += " AND event_type = ?";
     params.push(eventType);
   }
 
   if (actorAddress) {
-    query += ' AND actor_address = ?';
+    query += " AND actor_address = ?";
     params.push(actorAddress);
   }
 
-  query += ' ORDER BY ledger_sequence DESC LIMIT ? OFFSET ?';
+  query += " ORDER BY ledger_sequence DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
   const rows = db.prepare(query).all(...params) as any[];
@@ -134,7 +247,8 @@ export function getEvents(
   return rows.map((row) => ({
     id: row.id,
     contractId: row.contract_id,
-    contractType: (row.contract_type || 'unknown') as IndexedEvent['contractType'],
+    contractType: (row.contract_type ||
+      "unknown") as IndexedEvent["contractType"],
     eventType: row.event_type,
     topic: JSON.parse(row.topic),
     value: row.value ? JSON.parse(row.value) : null,
@@ -147,9 +261,11 @@ export function getEvents(
 }
 
 export function getLatestLedger(db: Database.Database): string | null {
-  const row = db.prepare('SELECT ledger_sequence FROM events ORDER BY ledger_sequence DESC LIMIT 1').get() as
-    | { ledger_sequence: number }
-    | undefined;
+  const row = db
+    .prepare(
+      "SELECT ledger_sequence FROM events ORDER BY ledger_sequence DESC LIMIT 1",
+    )
+    .get() as { ledger_sequence: number } | undefined;
 
   return row ? row.ledger_sequence.toString() : null;
 }
