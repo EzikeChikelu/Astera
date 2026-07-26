@@ -77,8 +77,11 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
     if (topics.length < 2) continue;
 
     const contract = event.contractId ?? '';
-    const namespace = scValToNative(topics[0]) as string;
-    const action = scValToNative(topics[1]) as string;
+    const t0 = topics[0];
+    const t1 = topics[1];
+    if (!t0 || !t1) continue;
+    const namespace = scValToNative(t0) as string;
+    const action = scValToNative(t1) as string;
     const value = event.value ? scValToNative(event.value) : null;
 
     if (contract === INVOICE_CONTRACT_ID && namespace === 'INVOICE') {
@@ -498,7 +501,7 @@ export default function InvoiceDetailPage() {
 
           <div className="text-4xl font-bold gradient-text mb-6">{formatUSDC(metadata.amount)}</div>
 
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div>
               <p className="text-brand-muted mb-1">Due Date</p>
               <p className="font-medium">{formatDate(metadata.dueDate)}</p>

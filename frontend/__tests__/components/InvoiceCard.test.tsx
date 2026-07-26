@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
-import type { InvoiceMetadata } from '@/lib/types';
+import type { InvoiceMetadata, InvoiceStatus } from '@/lib/types';
 
 // next/link is fine in jsdom, but mock to a plain anchor to keep the test
 // independent of Next's client-side router.
@@ -40,6 +40,19 @@ function makeMeta(overrides: Partial<InvoiceMetadata> = {}): InvoiceMetadata {
   };
 }
 
+function statusLabelFor(status: string): string {
+  const labels: Record<string, string> = {
+    Pending: 'Pending',
+    Funded: 'Funded',
+    Paid: 'Paid',
+    Defaulted: 'Defaulted',
+    Expired: 'Expired',
+    Disputed: 'Disputed',
+    Cancelled: 'Cancelled',
+  };
+  return labels[status] ?? status;
+}
+
 describe('InvoiceCard', () => {
   it('renders invoice name, debtor, symbol, and ID', () => {
     render(<InvoiceCard id={7} metadata={makeMeta()} />);
@@ -57,6 +70,25 @@ describe('InvoiceCard', () => {
 
     rerender(<InvoiceCard id={1} metadata={makeMeta({ status: 'Defaulted' })} />);
     expect(screen.getByText('Defaulted')).toBeInTheDocument();
+  });
+
+  it('uses theme-aware Tailwind status classes for each invoice status', () => {
+    const expectedClasses: Record<string, string[]> = {
+      Pending: ['text-slate-700', 'dark:text-slate-400'],
+      Funded: ['text-blue-700', 'dark:text-blue-400'],
+      Paid: ['text-green-700', 'dark:text-green-400'],
+      Defaulted: ['text-red-700', 'dark:text-red-400'],
+      Expired: ['text-orange-700', 'dark:text-orange-400'],
+      Disputed: ['text-yellow-700', 'dark:text-yellow-400'],
+      Cancelled: ['text-slate-500', 'line-through'],
+    };
+
+    const { rerender } = render(<InvoiceCard id={1} metadata={makeMeta({ status: 'Pending' })} />);
+
+    for (const [status, classes] of Object.entries(expectedClasses)) {
+      rerender(<InvoiceCard id={1} metadata={makeMeta({ status: status as InvoiceStatus })} />);
+      expect(screen.getByText(statusLabelFor(status))).toHaveClass(...classes);
+    }
   });
 
   it('shows a days-left countdown for future due dates', () => {

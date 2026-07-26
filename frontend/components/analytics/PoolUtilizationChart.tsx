@@ -33,7 +33,7 @@ export function PoolUtilizationChart({ data, isLoading }: PoolUtilizationChartPr
         <span className="w-2 h-6 bg-brand-gold rounded-full" />
         Pool Utilization
       </h3>
-      <div className="h-72">
+      <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />

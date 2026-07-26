@@ -10,21 +10,38 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 
-export const NETWORK = Networks.TESTNET;
+// #659: pick the network passphrase from NEXT_PUBLIC_NETWORK so mainnet builds
+// sign with Networks.PUBLIC instead of falling through to testnet.
+const networkEnv = process.env.NEXT_PUBLIC_NETWORK ?? 'testnet';
+export const NETWORK =
+  networkEnv === 'mainnet'
+    ? Networks.PUBLIC
+    : networkEnv === 'standalone'
+      ? Networks.STANDALONE
+      : Networks.TESTNET;
 export const RPC_ENDPOINTS = [
-  process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_1,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_2,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_1,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_2,
   'https://soroban-testnet.stellar.org',
   'https://rpc-testnet.stellar.org',
 ].filter(Boolean) as string[];
-export const RPC_URL = RPC_ENDPOINTS[0];
+export const RPC_URL = RPC_ENDPOINTS[0]!;
 export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 // Set these after deploying your contracts
 export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?? '';
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
+export const CREDIT_SCORE_CONTRACT_ID = process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID ?? '';
 export const GOVERNANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID ?? '';
+// #861: N-of-M staked oracle consensus network — optional, unset until deployed.
+export const ORACLE_REGISTRY_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_ORACLE_REGISTRY_CONTRACT_ID ?? '';
+
+// #867: on-chain compliance / sanctions screening registry
+export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID ?? '';
+
+export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
 // #111: additional stablecoin support
@@ -67,7 +84,7 @@ let activeRpcReads = 0;
 let rpcReadTimer: ReturnType<typeof setTimeout> | null = null;
 
 function pruneReadStartTimes(now: number): void {
-  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0] >= RPC_READ_LIMIT.windowMs) {
+  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0]! >= RPC_READ_LIMIT.windowMs) {
     rpcReadStartTimes.shift();
   }
 }
@@ -83,7 +100,7 @@ function scheduleReadQueue(): void {
     return;
   }
 
-  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]));
+  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]!));
   rpcReadTimer = setTimeout(() => {
     rpcReadTimer = null;
     processReadQueue();
@@ -149,7 +166,7 @@ class RpcConnectionPool {
   private initPool(): void {
     const now = Date.now();
     for (let i = 0; i < RPC_POOL_CONFIG.poolSize; i++) {
-      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] || RPC_URL;
+      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] ?? RPC_URL ?? '';
       this.connections.push({
         server: new StellarRpc.Server(url),
         createdAt: now,
@@ -175,7 +192,7 @@ class RpcConnectionPool {
   private async performHealthChecks(): Promise<void> {
     const now = Date.now();
     for (let i = 0; i < this.connections.length; i++) {
-      const conn = this.connections[i];
+      const conn = this.connections[i]!;
 
       // Recycle connections that are too old
       if (now - conn.createdAt > RPC_POOL_CONFIG.maxConnectionAge) {
@@ -198,9 +215,9 @@ class RpcConnectionPool {
   private recycleConnection(index: number): void {
     const now = Date.now();
     // Try the next endpoint in the fallback list
-    const currentUrl = this.connections[index]?.url || RPC_URL;
+    const currentUrl = this.connections[index]?.url ?? RPC_URL ?? '';
     const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
-    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] || RPC_URL;
+    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] ?? RPC_URL ?? '';
 
     this.connections[index] = {
       server: new StellarRpc.Server(nextUrl),
@@ -222,7 +239,7 @@ class RpcConnectionPool {
       .filter((c) => c.healthy)
       .sort((a, b) => a.inFlightRequests - b.inFlightRequests);
 
-    const conn = sorted[0] ?? this.connections[0];
+    const conn = sorted[0] ?? this.connections[0]!;
     conn.lastUsed = Date.now();
     return conn;
   }
@@ -350,9 +367,9 @@ export function truncateAddress(addr: string): string {
 // ---- Stellar Explorer Deep Links (#228) ----
 
 export type ExplorerEntity = 'account' | 'transaction' | 'contract' | 'ledger';
-export type StellarNetwork = 'testnet' | 'mainnet';
+export type StellarNetwork = 'testnet' | 'mainnet' | 'standalone';
 
-const EXPLORER_BASES: Record<StellarNetwork, string> = {
+const EXPLORER_BASES: Record<Exclude<StellarNetwork, 'standalone'>, string> = {
   testnet: 'https://stellar.expert/explorer/testnet',
   mainnet: 'https://stellar.expert/explorer/public',
 };
@@ -369,7 +386,8 @@ export function explorerUrl(
   id: string,
   network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
     'testnet',
-): string {
+): string | null {
+  if (network === 'standalone') return null;
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
   return `${base}/${type}/${encodeURIComponent(id)}`;
 }

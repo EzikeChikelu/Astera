@@ -14,9 +14,10 @@ Every paid invoice builds an on-chain credit history.
 
 ```
 contracts/
-  invoice/   — RWA invoice token contract (Soroban/Rust)
-  pool/      — Liquidity pool + yield distribution (Soroban/Rust)
-frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
+  invoice/         — RWA invoice token contract (Soroban/Rust)
+  pool/            — Liquidity pool + yield distribution (Soroban/Rust)
+  oracle_registry/ — N-of-M staked oracle consensus network (Soroban/Rust)
+frontend/          — Next.js 14 app (Freighter wallet, Stellar SDK)
 ```
 
 ## Contracts
@@ -37,6 +38,22 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 - `commit_to_invoice` — Investors commit **available balance in that invoice’s token** until the principal target is met
 - `repay_invoice` — SME repays principal + simple interest (8% APY default) **in the same token the invoice was funded with**
 - `withdraw` — Investor withdraws available (undeployed) balance **in the chosen token**
+
+### Oracle Registry Contract
+
+N-of-M staked oracle consensus network for invoice verification (opt-in — the invoice
+contract's original 1-of-2 primary/secondary oracle flow keeps working unmodified
+unless an admin sets `require_consensus_verification`).
+
+- `register_oracle` / `deregister_oracle` — stake-backed oracle registration, with a
+  configurable cooldown before stake is returned
+- `open_verification_round` — anyone can open a `VerificationRound` for an invoice
+  awaiting verification
+- `submit_vote` — stake-weighted vote; once approving or rejecting weight crosses the
+  quorum threshold, the registry calls back into the invoice contract's `consensus_verify`
+- `expire_round` / `admin_resolve_round` — a round that never reaches quorum expires
+  rather than blocking the invoice forever, and an admin fallback resolves it
+- `slash_oracle` — admin/governance penalty for a proven-bad verdict
 
 ---
 
@@ -252,7 +269,20 @@ To apply, in GitHub: **Settings → Branches → Branch protection rules → Add
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
 
-## 💰 Bounty Contribution
+---
+
+## 🤝 Contributing
+
+We welcome contributions from developers of all experience levels! Whether you're fixing bugs, improving documentation, adding features, or participating in the Wave Program, your work helps advance tokenized RWA solutions on Stellar.
+
+**Getting started:**
+- Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
+- Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
+- See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+
+For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
 
 - **Task:** Add SME onboarding verification — prevent duplicate SME accounts
 - **Reward:** $10

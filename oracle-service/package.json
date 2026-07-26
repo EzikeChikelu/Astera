@@ -10,12 +10,12 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
-    "dotenv": "^16.4.5",
-    "astera-sdk": "file:../sdk"
+    "astera-sdk": "file:../sdk",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
   }
 }

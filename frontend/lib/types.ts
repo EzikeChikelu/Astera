@@ -52,7 +52,7 @@ export interface InvestorPosition {
 
 export interface PoolConfig {
   invoiceContract: string;
-  admin: string;
+  admin: StellarAddress;
   yieldBps: number;
   factoringFeeBps: number;
   compoundInterest: boolean;
@@ -62,6 +62,9 @@ export interface PoolConfig {
   yieldTimelockSecs: number;
   // #233: max single-investor concentration
   maxSingleInvestorBps: number;
+  maxWithdrawalQueueAgeDays: number;
+  // #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited)
+  maxWithdrawalQueueDepth: number;
 }
 
 export interface PoolTokenTotals {
@@ -69,6 +72,53 @@ export interface PoolTokenTotals {
   totalDeployed: bigint;
   totalPaidOut: bigint;
   totalFeeRevenue: bigint;
+}
+
+export interface WaitEstimate {
+  queuePosition: number;
+  capitalAhead: bigint;
+  nearestInvoiceDueDate: number;
+  /** #865: predicted seconds until this request likely clears. An estimate, not a guarantee. */
+  estimatedWaitSecs: number;
+}
+
+/** #865: a single pending entry returned by `get_withdrawal_queue`. */
+export interface WithdrawalRequest {
+  investor: string;
+  token: string;
+  shares: bigint;
+  requestedAt: number;
+  requestId: number;
+}
+
+/** #865: one projected point returned by `get_liquidity_forecast`. */
+export interface LiquidityForecastPoint {
+  /** Days from now (1-indexed). */
+  day: number;
+  projectedAvailable: bigint;
+}
+
+// ── #863: utilization-driven kinked interest-rate model ─────────────────────
+
+/** Curve parameters for one token, as returned by `get_rate_model_config`. */
+export interface RateModelConfig {
+  /** Rate (bps) at 0% utilization. */
+  baseRateBps: number;
+  /** The "kink" point in bps (e.g. 8000 = 80%). */
+  optimalUtilizationBps: number;
+  /** Rate increase (bps) spread across the 0..optimal span. */
+  slope1Bps: number;
+  /** Rate increase (bps) spread across the optimal..100% span (steeper). */
+  slope2Bps: number;
+  /** Hard ceiling on the computed rate. */
+  maxRateBps: number;
+}
+
+/** One sample from the on-chain rate-history ring buffer. */
+export interface RateSnapshot {
+  timestamp: number;
+  utilizationBps: number;
+  rateBps: number;
 }
 
 export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';
@@ -108,6 +158,25 @@ export interface FundedInvoice {
   dueDate: number;
   /** Total amount repaid so far (supports partial repayments) */
   repaidAmount: bigint;
+  /** #860: set when this invoice was funded through a co-funding round. */
+  coFundingRoundId?: number;
+}
+
+// #860: multi-investor co-funding rounds
+export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
+
+export interface CoFundingRound {
+  invoiceId: number;
+  token: string;
+  sme: string;
+  dueDate: number;
+  targetPrincipal: bigint;
+  committedPrincipal: bigint;
+  fundingDeadline: number;
+  status: CoFundingStatus;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+  participants: string[];
 }
 
 export type WalletState = {
@@ -115,6 +184,31 @@ export type WalletState = {
   connected: boolean;
   network: string;
 };
+
+export type StellarAddress = string & { readonly _brand: 'StellarAddress' };
+
+export const STELLAR_ADDRESS_REGEX = /^[GC][A-Z2-7]{55}$/;
+
+export function parseStellarAddress(value: string): StellarAddress {
+  if (!STELLAR_ADDRESS_REGEX.test(value)) {
+    throw new Error(`Invalid Stellar address: ${value}`);
+  }
+  return value as StellarAddress;
+}
+
+export function isStellarAddress(value: string): value is StellarAddress {
+  return STELLAR_ADDRESS_REGEX.test(value);
+}
+
+export interface GovernanceConfig {
+  admin: StellarAddress;
+  shareToken: string;
+  votingPeriodSecs: number;
+  quorumBps: number;
+  passBps: number;
+  executionDelaySecs: number;
+  minShareBalance: bigint;
+}
 
 export interface CollateralConfig {
   threshold: bigint;
@@ -127,4 +221,83 @@ export interface CollateralDeposit {
   token: string;
   amount: bigint;
   settled: boolean;
+}
+
+// #861: N-of-M staked oracle consensus network
+export type RoundStatus = 'Open' | 'ConsensusApproved' | 'ConsensusRejected' | 'Expired';
+
+export interface OracleInfo {
+  address: StellarAddress;
+  stakeAmount: bigint;
+  stakeToken: string;
+  isActive: boolean;
+  totalVerifications: number;
+  totalSlashes: number;
+  registeredAt: number;
+  deregisterRequestedAt: number | null;
+}
+
+export interface VerificationRound {
+  invoiceId: number;
+  requiredVotes: number;
+  totalRegisteredOracles: number;
+  weightFor: bigint;
+  weightAgainst: bigint;
+  totalStakeSnapshot: bigint;
+  quorumBps: number;
+  status: RoundStatus;
+  openedAt: number;
+  deadline: number;
+  oracleHash: string;
+}
+
+export interface OracleRegistryConfig {
+  minStake: bigint;
+  stakeToken: string;
+  requiredVotes: number;
+  quorumBps: number;
+  roundDurationSecs: number;
+  deregisterCooldownSecs: number;
+  treasury: string | null;
+}
+
+// #868: credit_score v2 — external attestations + dispute mechanism
+export type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
+export type AttestationStatus = 'Active' | 'Disputed' | 'Revoked' | 'Expired';
+
+export interface AttestorInfo {
+  address: StellarAddress;
+  attestorType: AttestorType;
+  isActive: boolean;
+  weightBps: number;
+  registeredAt: number;
+}
+
+export interface Attestation {
+  id: number;
+  sme: StellarAddress;
+  attestor: StellarAddress;
+  attestationType: AttestorType;
+  scoreContribution: number;
+  evidenceHash: string;
+  submittedAt: number;
+  expiresAt: number;
+  status: AttestationStatus;
+}
+
+/** Full `get_credit_score` response, including the #868 internal/external blend. */
+export interface FullCreditScore {
+  sme: StellarAddress;
+  score: number;
+  totalInvoices: number;
+  paidOnTime: number;
+  paidLate: number;
+  defaulted: number;
+  totalVolume: bigint;
+  averagePaymentDays: number;
+  lastUpdated: number;
+  scoreVersion: number;
+  configVersion: number;
+  isStale: boolean;
+  blendedScore: number;
 }

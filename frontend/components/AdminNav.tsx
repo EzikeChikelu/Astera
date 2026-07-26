@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState } from 'react';
 
 const adminLinks = [
   {
@@ -40,48 +41,112 @@ const adminLinks = [
     icon: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4l5 2.18V11c0 3.61-2.44 6.99-5 8.13C9.44 17.99 7 14.61 7 11V7.18L12 5z',
   },
   {
+    href: '/admin/compliance',
+    label: 'Compliance',
+    icon: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 6h2v2h-2V7zm0 4h2v6h-2v-6z',
+  },
+  {
     href: '/admin/exchange-rates',
     label: 'Exchange Rates',
     icon: 'M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z',
+  },
+  {
+    href: '/admin/aging',
+    label: 'Aging Report',
+    icon: 'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h10v2H7v-2zm0 4h6v2H7v-2zm0-8h10v2H7V6z',
+  },
+  {
+    href: '/admin/oracles',
+    label: 'Oracle Network',
+    icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 2c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zM6 8c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm12 0c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm-6 4c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm-6 4c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm12 0c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2z',
+  },
+  {
+    href: '/admin/attestors',
+    label: 'Credit Attestors',
+    icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
   },
 ];
 
 export default function AdminNav() {
   const path = usePathname();
+  const [open, setOpen] = useState(false);
 
   return (
-    <nav className="w-64 bg-brand-card border-r border-brand-border h-[calc(100vh-64px)] fixed left-0 top-16 hidden lg:flex flex-col p-4 gap-2">
-      <div className="mb-6 px-4">
-        <h2 className="text-xs font-bold uppercase tracking-widest text-brand-muted">
-          Admin Panel
-        </h2>
-      </div>
+    <>
+      {/* Hamburger — mobile only (< 768px) */}
+      <button
+        className="md:hidden fixed top-[72px] left-4 z-50 p-2 rounded-lg bg-brand-card border border-brand-border text-brand-muted hover:text-white"
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Toggle admin menu"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d={open ? 'M6 18L18 6M6 6l12 12' : 'M4 6h16M4 12h16M4 18h16'}
+          />
+        </svg>
+      </button>
 
-      {adminLinks.map((link) => {
-        const isActive =
-          path === link.href || (link.href === '/admin/dashboard' && path === '/admin');
+      {/* Mobile backdrop */}
+      {open && (
+        <div
+          className="md:hidden fixed inset-0 z-30 bg-black/50"
+          style={{ top: 64 }}
+          onClick={() => setOpen(false)}
+        />
+      )}
 
-        return (
-          <Link
-            key={link.href}
-            href={link.href}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
-              isActive
-                ? 'bg-brand-gold/10 text-brand-gold shadow-inner'
-                : 'text-brand-muted hover:text-white hover:bg-brand-dark/50'
-            }`}
-          >
-            <svg
-              className={`w-5 h-5 ${isActive ? 'text-brand-gold' : 'text-brand-muted'}`}
-              fill="currentColor"
-              viewBox="0 0 24 24"
+      {/*
+       * Sidebar:
+       *  < 768px  — hidden by default, shown as full-width (w-64) when hamburger is open
+       *  768–1024px — always visible, icon-only (w-16)
+       *  ≥ 1024px  — always visible, full labels (w-64)
+       */}
+      <nav
+        className={`fixed left-0 top-16 z-40 h-[calc(100vh-64px)] bg-brand-card border-r border-brand-border overflow-y-auto flex-col gap-2
+          md:flex md:w-16 md:p-2 md:items-center
+          lg:w-64 lg:p-4 lg:items-stretch
+          ${open ? 'flex w-64 p-4' : 'hidden'}`}
+      >
+        <div className="hidden lg:block mb-6 px-4">
+          <h2 className="text-xs font-bold uppercase tracking-widest text-brand-muted">
+            Admin Panel
+          </h2>
+        </div>
+
+        {adminLinks.map((link) => {
+          const isActive =
+            path === link.href || (link.href === '/admin/dashboard' && path === '/admin');
+
+          return (
+            <Link
+              key={link.href}
+              href={link.href}
+              title={link.label}
+              onClick={() => setOpen(false)}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200
+                md:justify-center md:px-2
+                lg:justify-start lg:px-4
+                ${
+                  isActive
+                    ? 'bg-brand-gold/10 text-brand-gold shadow-inner'
+                    : 'text-brand-muted hover:text-white hover:bg-brand-dark/50'
+                }`}
             >
-              <path d={link.icon} />
-            </svg>
-            {link.label}
-          </Link>
-        );
-      })}
-    </nav>
+              <svg
+                className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-brand-gold' : 'text-brand-muted'}`}
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d={link.icon} />
+              </svg>
+              <span className="md:hidden lg:block">{link.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+    </>
   );
 }

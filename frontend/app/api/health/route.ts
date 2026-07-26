@@ -11,6 +11,12 @@ interface HealthCheck {
 interface HealthResponse {
   status: 'ok' | 'degraded' | 'down';
   checks: Record<string, HealthCheck>;
+  contracts: {
+    invoice: string;
+    pool: string;
+    creditScore: string;
+    governance: string;
+  };
   timestamp: string;
 }
 
@@ -33,7 +39,11 @@ async function checkRpc(): Promise<HealthCheck> {
       return { name: 'stellar_rpc', status: 'down', detail: `HTTP ${res.status}` };
     }
     if (elapsed > RPC_TIMEOUT_MS) {
-      return { name: 'stellar_rpc', status: 'degraded', detail: `Response time ${elapsed}ms > ${RPC_TIMEOUT_MS}ms` };
+      return {
+        name: 'stellar_rpc',
+        status: 'degraded',
+        detail: `Response time ${elapsed}ms > ${RPC_TIMEOUT_MS}ms`,
+      };
     }
     return { name: 'stellar_rpc', status: 'ok', detail: `${elapsed}ms` };
   } catch (err: unknown) {
@@ -70,6 +80,10 @@ async function fireWebhook(payload: HealthResponse): Promise<void> {
   }
 }
 
+function contractId(value: string | undefined): string {
+  return value && value.trim() ? value.trim() : 'not_configured';
+}
+
 export async function GET() {
   const rpc = await checkRpc();
 
@@ -80,6 +94,12 @@ export async function GET() {
   const response: HealthResponse = {
     status: overallStatus(checks),
     checks,
+    contracts: {
+      invoice: contractId(process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID),
+      pool: contractId(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID),
+      creditScore: contractId(process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID),
+      governance: contractId(process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID),
+    },
     timestamp: new Date().toISOString(),
   };
 

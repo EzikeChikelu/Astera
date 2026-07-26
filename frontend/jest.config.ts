@@ -13,6 +13,9 @@ const config: Config = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
+    '^next-intl$': '<rootDir>/__mocks__/next-intl.js',
+    '^next-intl/server$': '<rootDir>/__mocks__/next-intl-server.js',
+    '^next/navigation$': '<rootDir>/__mocks__/next-navigation.js',
   },
   testPathIgnorePatterns: ['<rootDir>/node_modules/', '<rootDir>/.next/', '<rootDir>/e2e/'],
 };

@@ -56,7 +56,38 @@
     "loadMore": "Charger plus de factures",
     "loadingMore": "Chargement...",
     "showing": "Affichage de {count} {count, plural, one {facture} other {factures}}",
-    "allLoaded": "Toutes les factures chargées · {count} au total"
+    "allLoaded": "Toutes les factures chargées · {count} au total",
+    "notifications": {
+      "loadError": "Impossible de charger les factures. Vérifiez que les contrats sont déployés."
+    }
+  },
+  "Notifications": {
+    "wallet": {
+      "connect": "Connecter le portefeuille",
+      "detecting": "Détection de Freighter...",
+      "requestingAccess": "Approuver dans Freighter...",
+      "fetchingAddress": "Récupération de l'adresse...",
+      "freighterMissing": "Freighter n'est pas détecté. Installez l'extension du navigateur puis rechargez la page.",
+      "addressUnavailable": "Impossible de récupérer l'adresse du portefeuille. Veuillez réessayer.",
+      "connected": "Portefeuille connecté avec succès.",
+      "connectFailed": "Impossible de connecter le portefeuille après plusieurs tentatives. Veuillez réessayer.",
+      "disconnect": "Déconnecter",
+      "retry": "Réessayer",
+      "retryAttempt": "Tentative {retryCount}/{maxRetries}...",
+      "disconnectedTitle": "Portefeuille déconnecté",
+      "disconnectedDescription": "Votre portefeuille Freighter n'est plus connecté à ce site. Reconnectez-vous pour continuer."
+    },
+    "toast": {
+      "dismiss": "Fermer la notification"
+    },
+    "panel": {
+      "button": "Notifications",
+      "buttonUnread": "Notifications ({count} non lues)",
+      "dialog": "Panneau des notifications",
+      "title": "Notifications",
+      "clearAll": "Tout effacer",
+      "empty": "Aucune notification."
+    }
   },
   "Invest": {
     "title": "Investir",
