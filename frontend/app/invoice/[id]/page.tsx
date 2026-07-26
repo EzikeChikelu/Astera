@@ -7,8 +7,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
-import WalletConnect from '@/components/WalletConnect';
-import { downloadInvoicePDF } from '@/components/InvoicePDF';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -100,7 +99,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
     const action = scValToNative(t1) as string;
     const value = event.value ? scValToNative(event.value) : null;
 
-    if (contract === INVOICE_CONTRACT_ID && namespace === 'INVOICE') {
+    if (contract === INVOICE_CONTRACT_ID && namespace === 'invoice') {
       if (action === 'created') {
         const [id, owner, amount] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
@@ -142,7 +141,7 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
       }
     }
 
-    if (contract === POOL_CONTRACT_ID && namespace === 'POOL') {
+    if (contract === POOL_CONTRACT_ID && namespace === 'pool') {
       if (action === 'funded') {
         const [id] = Array.isArray(value) ? value : [value];
         if (Number(id) !== invoiceId) continue;
@@ -700,6 +699,9 @@ export default function InvoiceDetailPage() {
               <p className="font-mono text-xs text-white break-all">
                 {isOwner ? invoice.owner : truncateAddress(invoice.owner)}
               </p>
+            </div>
+            <div className="col-span-2">
+              <BorrowerCreditBadge borrower={invoice.owner} />
             </div>
             {metadata.description && (
               <div className="col-span-2">

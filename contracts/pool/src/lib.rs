@@ -712,7 +712,7 @@ pub enum DataKey {
     RateRecord(Address, u32),
 }
 
-const EVT: Symbol = symbol_short!("POOL");
+const EVT: Symbol = symbol_short!("pool");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
@@ -737,6 +737,8 @@ pub trait CreditScoreContract {
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
+    fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128;
+    fn get_funded_amount(env: Env, id: u64) -> i128;
 }
 
 /// #867: cross-contract interface to the compliance registry.
@@ -1502,13 +1504,6 @@ fn fund_invoice_request(
     if request.principal <= 0 {
         return Err(PoolError::InvalidAmount);
     }
-    if env
-        .storage()
-        .persistent()
-        .has(&DataKey::FundedInvoice(request.invoice_id))
-    {
-        return Err(PoolError::StorageCorrupted);
-    }
 
     // Fail fast on liquidity before scanning token allowlist.
     // This keeps unsuccessful requests cheap when the pool cannot fund them.
@@ -1544,54 +1539,88 @@ fn fund_invoice_request(
         return Err(PoolError::InvoiceExpired);
     }
 
-    let factoring_fee = resolve_factoring_fee(
-        env,
-        config,
-        request.principal,
-        request.sme.clone(),
-        &request.token,
-    )?;
+    // Load existing FundedInvoice if this is a partial funding, or create new
+    let is_first_funding = !env
+        .storage()
+        .persistent()
+        .has(&DataKey::FundedInvoice(request.invoice_id));
+
     let prev_deployed = tt.total_deployed;
     tt.total_deployed = tt
         .total_deployed
         .checked_add(request.principal)
         .ok_or(PoolError::AmountOverflow)?;
-    // #863: lock in the rate live at funding time. With a configured rate
-    // model this prices the invoice off post-deployment utilization (the
-    // liquidity this funding consumes is reflected in its own rate);
-    // otherwise it falls back to the static `config.yield_bps`.
-    let locked_yield_bps = {
-        let model: Option<RateModelConfig> = env
-            .storage()
-            .instance()
-            .get(&DataKey::RateModel(request.token.clone()));
-        match model {
-            Some(m) => compute_current_rate(utilization_bps(&tt), &m),
-            None => config.yield_bps,
-        }
-    };
-    let funded = FundedInvoice {
-        invoice_id: request.invoice_id,
-        sme: request.sme.clone(),
-        token: request.token.clone(),
-        principal: request.principal,
-        funded_at: now,
-        factoring_fee,
-        due_date: request.due_date,
-        repaid_amount: 0i128,
-        co_funding_round_id: None,
-        locked_yield_bps,
-    };
 
-    // Persist invoice record and update totals/stats.
-    env.storage()
-        .persistent()
-        .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
+    if is_first_funding {
+        let factoring_fee = resolve_factoring_fee(
+            env,
+            config,
+            request.principal,
+            request.sme.clone(),
+            &request.token,
+        )?;
+        let locked_yield_bps = {
+            let model: Option<RateModelConfig> = env
+                .storage()
+                .instance()
+                .get(&DataKey::RateModel(request.token.clone()));
+            match model {
+                Some(m) => compute_current_rate(utilization_bps(&tt), &m),
+                None => config.yield_bps,
+            }
+        };
+        let funded = FundedInvoice {
+            invoice_id: request.invoice_id,
+            sme: request.sme.clone(),
+            token: request.token.clone(),
+            principal: request.principal,
+            funded_at: now,
+            factoring_fee,
+            due_date: request.due_date,
+            repaid_amount: 0i128,
+            co_funding_round_id: None,
+            locked_yield_bps,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
+        record_funded_invoice_id(env, &request.token, request.invoice_id);
+
+        stats.total_funded_invoices = stats
+            .total_funded_invoices
+            .checked_add(1)
+            .ok_or(PoolError::AmountOverflow)?;
+        stats.active_funded_invoices = stats
+            .active_funded_invoices
+            .checked_add(1)
+            .ok_or(PoolError::AmountOverflow)?;
+    } else {
+        // Accumulate principal on existing FundedInvoice record
+        let mut funded: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(request.invoice_id))
+            .ok_or(PoolError::StorageCorrupted)?;
+        funded.principal = funded
+            .principal
+            .checked_add(request.principal)
+            .ok_or(PoolError::AmountOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
+    }
     set_funded_invoice_ttl(env, request.invoice_id, false);
-    // #865: index this invoice_id so liquidity forecasting can enumerate open invoices.
-    record_funded_invoice_id(env, &request.token, request.invoice_id);
 
     env.storage().instance().set(&token_totals_key, &tt);
+
+    // Update invoice contract's funded_amount via cross-contract call
+    let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
+    let _ = invoice_client.try_add_funding(
+        &request.invoice_id,
+        &request.principal,
+        &env.current_contract_address(),
+    );
 
     // #275: check utilization after deployment
     if tt.pool_value > 0 {
@@ -1626,14 +1655,6 @@ fn fund_invoice_request(
         }
     }
 
-    stats.total_funded_invoices = stats
-        .total_funded_invoices
-        .checked_add(1)
-        .ok_or(PoolError::AmountOverflow)?;
-    stats.active_funded_invoices = stats
-        .active_funded_invoices
-        .checked_add(1)
-        .ok_or(PoolError::AmountOverflow)?;
     env.storage().instance().set(&DataKey::StorageStats, stats);
 
     // Transfer principal to SME LAST - interaction
@@ -2235,7 +2256,8 @@ impl FundingPool {
         // still records the qualifying activity / referral count.
         Self::record_referral_activity(&env, &investor, symbol_short!("deposit"), 0, &token);
         let post_deposit_liquidity = available_liquidity(&tt).unwrap_or(0);
-        if let Err(e) = Self::process_withdrawal_queue(&env, token, post_deposit_liquidity) {
+        if let Err(e) = Self::process_withdrawal_queue(&env, token.clone(), post_deposit_liquidity)
+        {
             let _ = e;
             env.logs().add("Failed to process withdrawal queue", &[]);
         }
@@ -2244,7 +2266,13 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
-            (investor, received, shares_to_mint, env.ledger().timestamp()),
+            (
+                investor,
+                token,
+                received,
+                shares_to_mint,
+                env.ledger().timestamp(),
+            ),
         );
         Ok(())
     }
@@ -2375,7 +2403,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("withdraw")),
-            (investor, amount, shares, now),
+            (investor, token, amount, shares, now),
         );
         Ok(())
     }
@@ -3105,13 +3133,6 @@ impl FundingPool {
             _ => return Err(PoolError::InvoicePoolMismatch),
         }
 
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::FundedInvoice(invoice_id))
-        {
-            return Err(PoolError::StorageCorrupted);
-        }
         let accepted_tokens: Vec<Address> = env
             .storage()
             .instance()
@@ -3278,13 +3299,20 @@ impl FundingPool {
         if record.repaid_amount >= total_due {
             return Err(PoolError::AlreadyFullyRepaid);
         }
+        // A final repayment may be larger than the outstanding balance. Cap
+        // it so only the amount actually owed is transferred from the payer.
+        let remaining_amount = total_due
+            .checked_sub(record.repaid_amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        let actual_payment = if amount > remaining_amount {
+            remaining_amount
+        } else {
+            amount
+        };
         let new_repaid_amount = record
             .repaid_amount
-            .checked_add(amount)
+            .checked_add(actual_payment)
             .ok_or(PoolError::AmountOverflow)?;
-        if new_repaid_amount > total_due {
-            return Err(PoolError::Overpayment);
-        }
 
         Self::non_reentrant_start(env);
         let guarded_result = (|| -> Result<(bool, Address, i128, i128, i128), PoolError> {
@@ -3331,7 +3359,7 @@ impl FundingPool {
                     if bps == 0 {
                         continue;
                     }
-                    let holder_amount = amount
+                    let holder_amount = actual_payment
                         .checked_mul(bps as i128)
                         .ok_or(PoolError::AmountOverflow)?
                         .checked_div(BPS_DENOM as i128)
@@ -3348,7 +3376,7 @@ impl FundingPool {
                 // consistent with this contract's existing
                 // rounds-in-favor-of-protocol convention (e.g.
                 // calculate_factoring_fee's ceiling division).
-                let dust = amount
+                let dust = actual_payment
                     .checked_sub(distributed)
                     .ok_or(PoolError::AmountOverflow)?;
                 if dust > 0 {
@@ -3363,7 +3391,7 @@ impl FundingPool {
                 }
                 tt.total_paid_out = tt
                     .total_paid_out
-                    .checked_add(amount)
+                    .checked_add(actual_payment)
                     .ok_or(PoolError::AmountOverflow)?;
                 if fully_repaid {
                     stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
@@ -3421,7 +3449,7 @@ impl FundingPool {
 
             // Transfer LAST - interaction
             let token_client = token::Client::new(env, &record.token);
-            token_client.transfer(&payer, &env.current_contract_address(), &amount);
+            token_client.transfer(&payer, &env.current_contract_address(), &actual_payment);
 
             // Handle collateral release after main transfer
             if fully_repaid {
@@ -3470,12 +3498,18 @@ impl FundingPool {
 
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
-                (invoice_id, principal, total_interest_i128, now),
+                (
+                    invoice_id,
+                    payer.clone(),
+                    record.principal,
+                    total_interest_i128,
+                    now,
+                ),
             );
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, amount, repaid_amount, now),
+                (invoice_id, actual_payment, repaid_amount, now),
             );
         }
         Ok(())
@@ -6633,6 +6667,25 @@ mod test {
                         .set(&DataKey::FundedInvoice(id), &false);
                 }
             }
+            pub fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128 {
+                pool.require_auth();
+                let funded_so_far: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::FundedInvoice(id))
+                    .unwrap_or(0);
+                let new_funded = funded_so_far.checked_add(amount).expect("overflow");
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FundedInvoice(id), &new_funded);
+                new_funded
+            }
+            pub fn get_funded_amount(env: Env, id: u64) -> i128 {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::FundedInvoice(id))
+                    .unwrap_or(0)
+            }
         }
     }
     pub use dummy_invoice_contract::{DummyInvoice, DummyInvoiceClient};
@@ -7423,7 +7476,7 @@ mod test {
     }
 
     #[test]
-    fn test_fund_invoice_duplicate_panics() {
+    fn test_fund_invoice_partial_funding_accumulates() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
@@ -7432,24 +7485,87 @@ mod test {
 
         mint(&env, &usdc_id, &investor, 2_000);
         client.deposit(&investor, &usdc_id, &2_000);
+
+        // First funding of 300
         client.fund_invoice(
             &admin,
             &1u64,
-            &500i128,
+            &300i128,
             &sme,
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        // Second fund on same invoice_id must return StorageCorrupted
+        // Second funding of 200 — must accumulate to 500 total
         let result = client.try_fund_invoice(
             &admin,
             &1u64,
-            &500i128,
+            &200i128,
             &sme,
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        assert_eq!(result, Err(Ok(PoolError::StorageCorrupted)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_two_partial_fundings_accumulate_total() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        client.deposit(&investor, &usdc_id, &5_000);
+
+        // First partial funding
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &300i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        // Second partial funding on same invoice — accumulates to 500
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &200i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        // Verify total deployed reflects cumulative principal
+        let stats = client.get_storage_stats();
+        assert!(stats.total_funded_invoices >= 1);
+    }
+
+    #[test]
+    fn test_full_single_funding_matches_invoice_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        client.deposit(&investor, &usdc_id, &5_000);
+
+        // Full single funding of 1_000
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        let stats = client.get_storage_stats();
+        assert!(stats.total_funded_invoices >= 1);
     }
 
     #[test]
@@ -9028,7 +9144,7 @@ mod test {
     }
 
     #[test]
-    fn test_overpayment_rejected() {
+    fn test_overpayment_is_capped_at_outstanding_balance() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, usdc_id, _share_token) = setup(&env);
@@ -9051,9 +9167,10 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp += 5_000);
         let total_due = client.estimate_repayment(&1u64, &None);
 
-        // Attempt to pay more than due
-        let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
-        assert_eq!(result, Err(Ok(PoolError::Overpayment)));
+        // The final payment is capped; the excess remains in the borrower's wallet.
+        client.repay_invoice(&1u64, &sme, &(total_due + 1));
+        let funded = client.get_funded_invoice(&1u64).unwrap();
+        assert_eq!(funded.repaid_amount, total_due);
     }
 
     #[test]

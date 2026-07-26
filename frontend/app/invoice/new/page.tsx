@@ -11,7 +11,7 @@ import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
 import { toStroops } from '@/lib/stellar';
-import GlossaryTerm from '@/components/GlossaryTerm';
+import { getInvoiceTemplate, upsertInvoiceTemplate } from '@/lib/invoiceTemplates';
 
 const MIN_AMOUNT = 10;
 const DEFAULT_MAX_AMOUNT = 1_000_000;
@@ -90,6 +90,7 @@ function validateForm(
 export default function NewInvoicePage() {
   const { wallet } = useStore();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [form, setForm] = useState({
     debtor: '',
@@ -107,6 +108,42 @@ export default function NewInvoicePage() {
       .then((amount) => setMaxAmount(amount))
       .catch(() => setMaxAmount(DEFAULT_MAX_AMOUNT));
   }, []);
+
+  useEffect(() => {
+    const id = searchParams.get('template');
+    if (!id) return;
+    const template = getInvoiceTemplate(id);
+    if (!template) return;
+    const dueDate = new Date(Date.now() + template.dueDays * 86_400_000)
+      .toISOString()
+      .split('T')[0]!;
+    setForm((current) => ({
+      ...current,
+      amount: String(template.amount),
+      dueDate,
+      description: template.description,
+    }));
+    upsertInvoiceTemplate({ ...template, lastUsedAt: new Date().toISOString() });
+  }, [searchParams]);
+
+  function saveAsTemplate() {
+    const name = window.prompt('Template name');
+    if (!name?.trim()) return;
+    const dueDays = form.dueDate
+      ? Math.max(1, Math.ceil((new Date(form.dueDate).getTime() - Date.now()) / 86_400_000))
+      : 30;
+    upsertInvoiceTemplate({
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      amount: Number(form.amount) || 0,
+      token: 'USDC',
+      dueDays,
+      description: form.description,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+    });
+    toast.success('Template saved.');
+  }
 
   const errors = validateForm(form, maxAmount);
   const isValid = Object.keys(errors).length === 0;
@@ -195,12 +232,14 @@ export default function NewInvoicePage() {
             Mint your unpaid invoice as a <GlossaryTerm id="soroban" /> RWA token to access instant
             liquidity.
           </p>
-          <Link
-            href="/invoice/import"
-            className="text-sm text-brand-gold hover:underline mt-2 inline-block"
-          >
-            Import multiple invoices via CSV
-          </Link>
+          <div className="mt-2 flex gap-4">
+            <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline">
+              Import multiple invoices via CSV
+            </Link>
+            <Link href="/templates" className="text-sm text-brand-gold hover:underline">
+              Template library
+            </Link>
+          </div>
         </div>
 
         {!wallet.connected ? (
