@@ -165,6 +165,8 @@ pub enum PoolError {
     // #773: loyalty tier list rejected by set_loyalty_tiers (empty, out of
     // ascending order, or a bonus_bps above MAX_LOYALTY_BONUS_BPS)
     InvalidLoyaltyTiers = 86,
+    // #992: deposit's optional min_rate guard rejected the current rate
+    RateBelowMinimum = 87,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -2278,6 +2280,7 @@ impl FundingPool {
         investor: Address,
         token: Address,
         amount: i128,
+        min_rate: Option<u32>,
     ) -> Result<(), PoolError> {
         investor.require_auth();
         bump_instance(&env);
@@ -2297,6 +2300,18 @@ impl FundingPool {
         let config = get_config_cached(&env)?;
         if config.min_deposit_amount > 0 && amount < config.min_deposit_amount {
             return Err(PoolError::DepositBelowMinimum);
+        }
+
+        // #992: optional slippage guard. `get_current_rate` can shift between
+        // the caller simulating this call and actually submitting it (other
+        // deposits/withdrawals move utilization in between) — a caller that
+        // passes `min_rate` gets a revert instead of silently locking in a
+        // worse rate than they simulated for.
+        if let Some(min_rate) = min_rate {
+            let current_rate = current_rate_for_token(&env, &config, &token);
+            if current_rate < min_rate {
+                return Err(PoolError::RateBelowMinimum);
+            }
         }
 
         // #109 / #337: enforce KYC check when required — tri-state status

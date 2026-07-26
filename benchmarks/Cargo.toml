@@ -8,3 +8,12 @@ path = "src/lib.rs"
 
 [dependencies]
 
+[dev-dependencies]
+criterion = { workspace = true }
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+invoice = { path = "../contracts/invoice" }
+pool = { path = "../contracts/pool" }
+
+[[bench]]
+name = "contract_benchmarks"
+harness = false

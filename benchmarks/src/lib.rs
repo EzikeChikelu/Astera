@@ -1,7 +1,6 @@
-// Placeholder crate to satisfy the workspace member list.
-//
-// The upstream repository may include benchmark code here, but it's not
-// required for contract tests in this task.
+//! Criterion benchmarks for contract-call resource usage. See
+//! `benches/contract_benchmarks.rs` for the actual benchmark functions,
+//! and `.github/workflows/ci.yml` for how these run in CI.
 
 #![allow(dead_code)]
 
