@@ -5091,6 +5091,19 @@ impl FundingPool {
             .unwrap_or_default()
     }
 
+    /// #776: live on-chain balance of `token` held by this pool contract,
+    /// read directly from the token contract. Distinct from
+    /// `get_token_totals().pool_value`/`total_deployed`, which track
+    /// normalized *deposited/deployed capital* through the protocol's own
+    /// accounting — tokens sent to the pool address outside of `deposit()`
+    /// (donations, dust, accidental direct transfers) affect the balance
+    /// returned here immediately even though they never touch that internal
+    /// counter.
+    pub fn get_pool_balance(env: Env, token: Address) -> i128 {
+        let token_client = token::Client::new(&env, &token);
+        token_client.balance(&env.current_contract_address())
+    }
+
     /// #275: returns utilization for a token in basis points (0-10_000).
     pub fn get_utilization(env: Env, token: Address) -> u32 {
         let tt = Self::get_token_totals(env, token);
@@ -6614,6 +6627,28 @@ mod test {
         let unknown_token = Address::generate(&env);
         let result = client.try_deposit(&investor, &unknown_token, &1_000i128);
         assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+    }
+
+    #[test]
+    fn test_get_pool_balance_reflects_direct_token_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+
+        // Sanity: nothing deposited yet.
+        assert_eq!(client.get_pool_balance(&usdc_id), 0);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 0);
+
+        // Tokens sent directly to the pool contract address, bypassing
+        // deposit() entirely (e.g. a donation or accidental transfer).
+        mint(&env, &usdc_id, &client.address, 5_000i128);
+
+        // get_pool_balance() must reflect the live token balance immediately,
+        // even though the internal `pool_value` counter (deposited/deployed
+        // capital accounting) never saw this transfer since deposit() was
+        // never called.
+        assert_eq!(client.get_pool_balance(&usdc_id), 5_000i128);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 0);
     }
 
     #[test]
