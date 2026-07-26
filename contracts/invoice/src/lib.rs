@@ -1,10 +1,14 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(test)]
+extern crate std;
+
 // === AUTHORIZED CALLERS ===
 // - Admin: initialize(), admin-only setters
 // - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
 // - Oracle: mark_verified(), mark_disputed()
+// - Keeper (#801): mark_defaulted() only — no other admin/pool privileges
 // - Anyone: cleanup_expired_storage(), read-only view functions (e.g., get_invoice)
 
 use soroban_sdk::{
@@ -159,6 +163,8 @@ pub enum InvoiceError {
     ComplianceNotCleared = 38,
     ComplianceCheckFailed = 39,
     ComplianceRegistryNotConfigured = 40,
+    // #766: per-address daily invoice creation rate limit exceeded
+    RateLimitExceeded = 41,
 }
 
 #[contracttype]
@@ -290,6 +296,7 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
+    Dispute(u64),
     ContractVersion,
     MigrationVersion,
     RequireRegisteredDebtor,
@@ -315,6 +322,8 @@ pub enum DataKey {
     // #867: optional compliance registry + opt-in gate
     ComplianceRegistry,
     RequireComplianceCheck,
+    // Tracks cumulative funded amount across partial fundings
+    InvoiceFunding(u64),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -341,6 +350,7 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
 
     invoice.status = InvoiceStatus::Expired;
     remove_invoice_from_owner(env, &invoice.owner, invoice.id);
+    decrease_debtor_exposure(env, &invoice.debtor, invoice.amount);
     env.storage()
         .persistent()
         .set(&DataKey::Invoice(invoice.id), &invoice);
@@ -530,6 +540,19 @@ fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
     set_sme_outstanding(env, sme, current.saturating_sub(amount));
 }
 
+fn decrease_debtor_exposure(env: &Env, debtor: &String, amount: i128) {
+    let maybe_record: Option<DebtorRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::DebtorRecord(debtor.clone()));
+    if let Some(mut record) = maybe_record {
+        record.current_exposure = record.current_exposure.saturating_sub(amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor.clone()), &record);
+    }
+}
+
 /// Add an invoice ID to the owner's invoice index (#651).
 fn add_invoice_to_owner(env: &Env, owner: &Address, invoice_id: u64) {
     let key = DataKey::SmeInvoices(owner.clone());
@@ -628,6 +651,17 @@ fn resolve_invoice_grace_period_days(env: &Env, invoice: &Invoice) -> u32 {
         .get(&DataKey::GracePeriodDays)
         .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
     invoice.grace_period_override.unwrap_or(global_grace)
+}
+
+/// #801: whether `address` is a whitelisted keeper allowed to call
+/// `mark_defaulted()` on behalf of an automated monitor.
+fn is_keeper(env: &Env, address: &Address) -> bool {
+    let keepers: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::KeeperIds)
+        .unwrap_or_else(|| Vec::new(env));
+    keepers.contains(address)
 }
 
 fn validate_due_date(env: &Env, due_date: u64) {
@@ -916,7 +950,10 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
-        env.events().publish((EVT, symbol_short!("paused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("paused")),
+            (admin, env.ledger().timestamp()),
+        );
     }
 
     pub fn unpause(env: Env, admin: Address) {
@@ -931,8 +968,10 @@ impl InvoiceContract {
         }
         env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
-        env.events()
-            .publish((EVT, symbol_short!("unpaused")), admin);
+        env.events().publish(
+            (EVT, symbol_short!("unpaused")),
+            (admin, env.ledger().timestamp()),
+        );
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -1107,6 +1146,75 @@ impl InvoiceContract {
             .unwrap_or(false)
     }
 
+    /// #801: whitelist `keeper` as an address permitted to call
+    /// `mark_defaulted()`. Admin-only; a keeper cannot call any other
+    /// admin- or pool-gated function.
+    pub fn add_keeper(env: Env, admin: Address, keeper: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let mut keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !keepers.contains(&keeper) {
+            keepers.push_back(keeper.clone());
+            env.storage().instance().set(&DataKey::KeeperIds, &keepers);
+        }
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "keeper_added")), (admin, keeper));
+    }
+
+    /// #801: revoke a previously whitelisted keeper. Admin-only.
+    pub fn remove_keeper(env: Env, admin: Address, keeper: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut remaining: Vec<Address> = Vec::new(&env);
+        for i in 0..keepers.len() {
+            let k = keepers.get(i).unwrap();
+            if k != keeper {
+                remaining.push_back(k);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperIds, &remaining);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "keeper_removed")), (admin, keeper));
+    }
+
+    /// #801: list all whitelisted keeper addresses.
+    pub fn list_keepers(env: Env) -> Vec<Address> {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn get_metadata_image_uri(env: Env) -> String {
         env.storage()
             .persistent()
@@ -1186,7 +1294,7 @@ impl InvoiceContract {
             }
         }
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
         let max_invoice_amount: i128 = env
             .storage()
@@ -1195,6 +1303,11 @@ impl InvoiceContract {
             .expect("max invoice amount not set");
         if amount > max_invoice_amount {
             panic!("invoice amount exceeds maximum");
+        }
+        // #798: due_date must lie in the future regardless of the
+        // admin-configurable min-due-date window (which may be set to 0).
+        if due_date <= env.ledger().timestamp() {
+            panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
         validate_min_due_date_window(&env, due_date);
         validate_due_date(&env, due_date);
@@ -1256,8 +1369,11 @@ impl InvoiceContract {
             }
         }
 
+        // #766: per-address rate limit on invoice creation — see #577 above
+        // for why this is a sliding window rather than a fixed UTC-day
+        // counter (prevents straddling the day boundary to submit 2x quota).
         if fresh.len() >= daily_limit {
-            panic!("daily invoice limit exceeded");
+            soroban_sdk::panic_with_error!(&env, InvoiceError::RateLimitExceeded);
         }
 
         bump_instance(&env);
@@ -1603,6 +1719,7 @@ impl InvoiceContract {
                 invoice.status = InvoiceStatus::Cancelled;
                 let sme = invoice.owner.clone();
                 decrease_sme_outstanding(&env, &sme, invoice.amount);
+                decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
                 let mut stats: StorageStats = env
                     .storage()
                     .instance()
@@ -1693,7 +1810,7 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Funded;
         invoice.funded_at = env.ledger().timestamp();
-        invoice.pool_contract = pool;
+        invoice.pool_contract = pool.clone();
         let sme = invoice.owner.clone();
         let current_outstanding = get_sme_outstanding(&env, &sme);
         let new_outstanding = current_outstanding
@@ -1710,7 +1827,12 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
         env.events().publish(
             (EVT, symbol_short!("funded")),
-            (id, invoice.owner.clone(), env.ledger().timestamp()),
+            (
+                id,
+                pool.clone(),
+                invoice.owner.clone(),
+                env.ledger().timestamp(),
+            ),
         );
         Ok(())
     }
@@ -1747,20 +1869,7 @@ impl InvoiceContract {
         invoice.paid_at = env.ledger().timestamp();
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        // Release this invoice's amount from the debtor registry's exposure
-        // tracking, if the debtor field refers to a registered debtor (#241).
-        // Without this, a debtor's exposure capacity would never be freed up
-        // by paid invoices, permanently shrinking how much new business can
-        // be written against them.
-        let debtor_key = DataKey::DebtorRecord(invoice.debtor.clone());
-        if let Some(mut record) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, DebtorRecord>(&debtor_key)
-        {
-            record.current_exposure = record.current_exposure.saturating_sub(invoice.amount);
-            env.storage().persistent().set(&debtor_key, &record);
-        }
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1774,8 +1883,53 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish(
             (EVT, symbol_short!("paid")),
-            (id, invoice.owner.clone(), env.ledger().timestamp()),
+            (
+                id,
+                pool.clone(),
+                invoice.owner.clone(),
+                env.ledger().timestamp(),
+            ),
         );
+    }
+
+    pub fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128 {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        let is_fundable =
+            invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
+        if !is_fundable {
+            panic!("invoice is not in fundable state");
+        }
+        let funded_so_far: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvoiceFunding(id))
+            .unwrap_or(0);
+        let new_funded = funded_so_far
+            .checked_add(amount)
+            .ok_or(InvoiceError::AmountOverflow)
+            .expect("funding overflow");
+        if new_funded > invoice.amount {
+            panic_with_error!(&env, InvoiceError::AmountOverflow);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceFunding(id), &new_funded);
+        new_funded
     }
 
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
@@ -1787,8 +1941,8 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::Pool)
             .expect("not initialized");
-        if pool != authorized_pool {
-            panic!("unauthorized pool");
+        if pool != authorized_pool && !is_keeper(&env, &pool) {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let mut invoice: Invoice = env
             .storage()
@@ -1810,6 +1964,7 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Defaulted;
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1951,6 +2106,41 @@ impl InvoiceContract {
         env.storage().persistent().get(&DataKey::Dispute(id))
     }
 
+    /// #775: let the borrower opt an invoice out of the public sharing link.
+    /// Private invoices should be hidden (404) from any viewer other than
+    /// the owner on the public `/invoice/{id}` page.
+    pub fn set_invoice_private(env: Env, id: u64, owner: Address, private: bool) {
+        owner.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
+        if invoice.owner != owner {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Private(id), &private);
+
+        env.events()
+            .publish((EVT, symbol_short!("private")), (id, private));
+    }
+
+    /// Whether the invoice has been opted out of public sharing (#775).
+    /// Defaults to `false` (public) for every invoice that hasn't called
+    /// `set_invoice_private`.
+    pub fn is_invoice_private(env: Env, id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Private(id))
+            .unwrap_or(false)
+    }
+
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
         require_not_paused(&env);
@@ -1994,6 +2184,7 @@ impl InvoiceContract {
         remove_invoice_from_owner(&env, &invoice.owner, id);
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -2056,6 +2247,7 @@ impl InvoiceContract {
         // State transition: move to Cancelled
         invoice.status = InvoiceStatus::Cancelled;
         remove_invoice_from_owner(&env, &invoice.owner, id);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
 
         // Note: We do NOT call decrease_sme_outstanding here because the invoice
         // was never funded. SME outstanding is only incremented in mark_funded(),
@@ -2238,6 +2430,13 @@ impl InvoiceContract {
         load_invoice(&env, id)
     }
 
+    pub fn get_funded_amount(env: Env, id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvoiceFunding(id))
+            .unwrap_or(0)
+    }
+
     pub fn get_multiple_invoices(env: Env, ids: Vec<u64>) -> Vec<Invoice> {
         bump_instance(&env);
         let mut invoices: Vec<Invoice> = Vec::new(&env);
@@ -2317,6 +2516,7 @@ impl InvoiceContract {
         let mut expired_inv = inv;
         expired_inv.status = InvoiceStatus::Expired;
         remove_invoice_from_owner(&env, &expired_inv.owner, id);
+        decrease_debtor_exposure(&env, &expired_inv.debtor, expired_inv.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &expired_inv);
@@ -2866,9 +3066,6 @@ impl InvoiceContract {
 }
 
 #[cfg(test)]
-extern crate std;
-
-#[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::{
@@ -3017,6 +3214,26 @@ mod test {
         client.cancel_invoice(&id, &sme);
         let removed = client.cleanup_expired_storage(&admin, &soroban_sdk::vec![&env, id]);
         assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn test_invoice_private_defaults_to_false_and_is_owner_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+
+        assert!(!client.is_invoice_private(&id));
+
+        client.set_invoice_private(&id, &sme, &true);
+        assert!(client.is_invoice_private(&id));
+
+        client.set_invoice_private(&id, &sme, &false);
+        assert!(!client.is_invoice_private(&id));
+
+        let attacker = Address::generate(&env);
+        let result = client.try_set_invoice_private(&id, &attacker, &true);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3255,13 +3472,13 @@ mod test {
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
     }
 
+    // #798: create_invoice() input validation — amount and due_date
     #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_create_invoice_zero_amount_panics() {
+    fn test_create_invoice_zero_amount_returns_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "X"),
             &0i128,
@@ -3270,16 +3487,43 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidAmount.into()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #23)")]
-    fn test_create_invoice_past_due_date_panics() {
+    fn test_create_invoice_negative_amount_returns_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &-1i128,
+            &(env.ledger().timestamp() + 1),
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidAmount.into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_past_due_date_returns_invalid_due_date() {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "X"),
             &100i128,
@@ -3287,6 +3531,12 @@ mod test {
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidDueDate.into()
+            ))
         );
     }
 
@@ -3405,6 +3655,91 @@ mod test {
     }
 
     #[test]
+    fn test_add_funding_accumulates_across_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // First partial funding
+        client.add_funding(&id, &300i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 300i128);
+
+        // Second partial funding
+        client.add_funding(&id, &200i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
+
+        // Invoice should still be in Pending state (not fully funded yet)
+        let inv = client.get_invoice(&id);
+        assert!(inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Verified);
+    }
+
+    #[test]
+    fn test_add_funding_rejects_overfunding() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &500i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // Fund full amount (500)
+        client.add_funding(&id, &500i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
+
+        // Try to overfund — must fail
+        let result = client.try_add_funding(&id, &1i128, &pool);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_funding_updates_after_each_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+
+        // After first funding, get_funded_amount returns 300
+        client.add_funding(&id, &300i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 300i128);
+
+        // After second funding, get_funded_amount returns 500
+        client.add_funding(&id, &200i128, &pool);
+        assert_eq!(client.get_funded_amount(&id), 500i128);
+    }
+
+    #[test]
     fn test_daily_invoice_limit_enforced() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3466,7 +3801,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "daily invoice limit exceeded")]
     fn test_midnight_boundary_exploit_blocked() {
         // #577: an SME that exhausts the quota just before UTC midnight must not
         // be able to submit more invoices immediately after midnight crosses.
@@ -3497,7 +3831,7 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp = 86_460);
 
         // The 11th invoice must be rejected even though the calendar day changed.
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "D"),
             &100i128,
@@ -3506,17 +3840,25 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::RateLimitExceeded.into()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "daily invoice limit exceeded")]
-    fn test_daily_invoice_limit_exceeded_panics() {
+    fn test_daily_invoice_limit_exceeded_returns_error() {
+        // #766: the invoice past the configured daily limit within the
+        // sliding window must be rejected with a typed
+        // InvoiceError::RateLimitExceeded, not a bare panic.
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
         let due = env.ledger().timestamp() + 86_400;
-        for _ in 0..11 {
+        for _ in 0..10 {
             client.create_invoice(
                 &sme,
                 &String::from_str(&env, "D"),
@@ -3527,6 +3869,22 @@ mod test {
                 &String::from_str(&env, "https://example.com/meta"),
             );
         }
+
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &100i128,
+            &due,
+            &String::from_str(&env, "i"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::RateLimitExceeded.into()
+            ))
+        );
     }
 
     #[test]
@@ -3572,11 +3930,28 @@ mod test {
 
     #[test]
     fn test_pause_and_unpause() {
+        // #779: paused/unpaused events must carry both the pausing admin and
+        // a timestamp.
+        use soroban_sdk::testutils::Events;
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
+
         client.pause(&admin);
         assert!(client.is_paused());
+        let pause_ts = env.ledger().timestamp();
+        let expected_paused: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("paused")).into_val(&env);
+        let paused_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == expected_paused)
+            .expect("paused event not emitted");
+        let (event_admin, event_ts): (Address, u64) = paused_event.2.into_val(&env);
+        assert_eq!(event_admin, admin);
+        assert_eq!(event_ts, pause_ts);
+
         client.unpause(&admin);
         assert!(!client.is_paused());
     }
@@ -3869,6 +4244,80 @@ mod test {
             .with_mut(|l| l.timestamp = due + (15 * SECS_PER_DAY));
         client.mark_defaulted(&id, &pool);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+    }
+
+    // #801: keeper role
+    #[test]
+    fn test_keeper_can_mark_defaulted_after_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let keeper = Address::generate(&env);
+        client.add_keeper(&admin, &keeper);
+        assert_eq!(client.list_keepers(), soroban_sdk::vec![&env, keeper.clone()]);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        client.mark_defaulted(&id, &keeper);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+    }
+
+    #[test]
+    fn test_non_keeper_cannot_mark_defaulted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _owner) = setup_funded_invoice(&env);
+        let stranger = Address::generate(&env);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        let result = client.try_mark_defaulted(&id, &stranger);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
+    }
+
+    #[test]
+    fn test_removed_keeper_cannot_mark_defaulted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let keeper = Address::generate(&env);
+        client.add_keeper(&admin, &keeper);
+        client.remove_keeper(&admin, &keeper);
+        assert_eq!(client.list_keepers().len(), 0);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        let result = client.try_mark_defaulted(&id, &keeper);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
+    }
+
+    #[test]
+    fn test_add_keeper_non_admin_returns_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let attacker = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let result = client.try_add_keeper(&attacker, &keeper);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
     }
 
     #[test]
@@ -4891,7 +5340,7 @@ mod test {
         client.register_debtor(&admin, &debtor_id, &debtor_name, &max_exposure);
 
         // Create first invoice for 2000
-        let id1 = client.create_invoice_with_metadata(
+        let _id1 = client.create_invoice_with_metadata(
             &sme,
             &debtor_id,
             &2_000i128,
@@ -4906,7 +5355,7 @@ mod test {
         assert_eq!(debtor1.current_exposure, 2_000);
 
         // Create second invoice for 2500
-        let id2 = client.create_invoice_with_metadata(
+        let _id2 = client.create_invoice_with_metadata(
             &sme,
             &debtor_id,
             &2_500i128,

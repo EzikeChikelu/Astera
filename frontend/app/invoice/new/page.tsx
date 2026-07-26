@@ -201,7 +201,8 @@ export default function NewInvoicePage() {
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-1">Tokenize Invoice</h1>
           <p className="text-brand-muted">
-            Mint your unpaid invoice as a Soroban RWA token to access instant liquidity.
+            Mint your unpaid invoice as a <GlossaryTerm id="soroban" /> RWA token to access instant
+            liquidity.
           </p>
           <div className="mt-2 flex gap-4">
             <Link href="/invoice/import" className="text-sm text-brand-gold hover:underline">

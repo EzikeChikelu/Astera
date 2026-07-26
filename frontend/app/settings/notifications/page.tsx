@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import type { AlertType } from '@/lib/alert-rules';
+import { csrfFetch } from '@/lib/csrf';
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   loadNotificationPreferences,
@@ -121,7 +122,7 @@ export default function NotificationSettingsPage() {
 
     setSaving(true);
     try {
-      const res = await fetch('/api/notifications/preferences', {
+      const res = await csrfFetch('/api/notifications/preferences', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: prefs.email, webhook: prefs.webhook }),
@@ -144,7 +145,7 @@ export default function NotificationSettingsPage() {
 
     setTestingWebhook(true);
     try {
-      const res = await fetch('/api/notifications/webhook/test', {
+      const res = await csrfFetch('/api/notifications/webhook/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: prefs.webhook.url }),
