@@ -9,6 +9,10 @@ import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
 import WalletConnect from '@/components/WalletConnect';
 import { downloadInvoicePDF } from '@/components/InvoicePDF';
+// Pre-existing build breakage found while working this branch: this page
+// uses <GlossaryTerm> below but never imported it, so `tsc`/the Next.js
+// build failed at HEAD. Not part of any of the four assigned issues.
+import GlossaryTerm from '@/components/GlossaryTerm';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -27,6 +31,7 @@ import {
   submitTx,
 } from '@/lib/contracts';
 import {
+  formatAmount,
   formatUSDC,
   formatDate,
   daysUntil,
@@ -650,7 +655,9 @@ export default function InvoiceDetailPage() {
             </span>
           </div>
 
-          <div className="text-4xl font-bold gradient-text mb-6">{formatUSDC(metadata.amount)}</div>
+          <div className="text-4xl font-bold gradient-text mb-6">
+            {formatAmount(metadata.amount, metadata.decimals)}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div>

@@ -328,23 +328,41 @@ export function rpcGetEvents(request: RpcEventsRequest): Promise<RpcEventsRespon
 
 // ---- Utility Functions ----
 
+// #778: Stellar-native assets (XLM) and the pool's configured stablecoins
+// use 7 decimal places (stroops). `formatUSDC`/`toStroops`/`fromStroops`
+// hardcode this and stay correct for those — but any amount whose token may
+// have a different on-chain decimal count (e.g. a 6-decimal stablecoin or an
+// 18-decimal wrapped asset) must go through `formatAmount`/`fromRaw` with
+// that token's actual `decimals` instead.
+const DEFAULT_STELLAR_DECIMALS = 7;
+
 /** Convert USDC amount (human) to stroops (7 decimals) */
 export function toStroops(amount: number): bigint {
   return BigInt(Math.round(amount * 10_000_000));
 }
 
-/** Convert stroops to human USDC */
-export function fromStroops(stroops: bigint): number {
-  return Number(stroops) / 10_000_000;
+/** Convert a raw on-chain integer amount to its human value given `decimals`. */
+export function fromRaw(raw: bigint, decimals: number): number {
+  return Number(raw) / Math.pow(10, decimals);
 }
 
-/** Format a stroops bigint as a USD string */
-export function formatUSDC(stroops: bigint): string {
+/** Convert stroops to human USDC (7 decimals — XLM/pool-stablecoin specific). */
+export function fromStroops(stroops: bigint): number {
+  return fromRaw(stroops, DEFAULT_STELLAR_DECIMALS);
+}
+
+/** Format a raw on-chain integer amount as a USD string using `decimals`. */
+export function formatAmount(raw: bigint, decimals: number): string {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
-  }).format(fromStroops(stroops));
+  }).format(fromRaw(raw, decimals));
+}
+
+/** Format a stroops bigint as a USD string (7 decimals — XLM/pool-stablecoin specific). */
+export function formatUSDC(stroops: bigint): string {
+  return formatAmount(stroops, DEFAULT_STELLAR_DECIMALS);
 }
 
 /** Format a unix timestamp as a readable date */
