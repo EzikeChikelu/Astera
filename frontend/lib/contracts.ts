@@ -8,6 +8,7 @@ import {
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
   COMPLIANCE_CONTRACT_ID,
+  REFERRAL_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -45,6 +46,7 @@ import type {
   FullCreditScore,
   RateModelConfig,
   RateSnapshot,
+  ReferralStats,
 } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
@@ -85,6 +87,9 @@ if (ORACLE_REGISTRY_CONTRACT_ID) {
 }
 if (COMPLIANCE_CONTRACT_ID) {
   validateContractId(COMPLIANCE_CONTRACT_ID, 'compliance');
+}
+if (REFERRAL_CONTRACT_ID) {
+  validateContractId(REFERRAL_CONTRACT_ID, 'referral');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -909,10 +914,7 @@ export async function buildCancelWithdrawalRequestTx(
 }
 
 /** Permissionless: anyone can trigger a drain attempt against current liquidity. */
-export async function buildDrainWithdrawalQueueTx(
-  caller: string,
-  token: string,
-): Promise<string> {
+export async function buildDrainWithdrawalQueueTx(caller: string, token: string): Promise<string> {
   const account = await getRpcAccount(caller);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -977,10 +979,7 @@ function rateModelConfigToScVal(config: RateModelConfig): xdr.ScVal {
   return xdr.ScVal.scvMap([
     entry('base_rate_bps', nativeToScVal(config.baseRateBps, { type: 'u32' })),
     entry('max_rate_bps', nativeToScVal(config.maxRateBps, { type: 'u32' })),
-    entry(
-      'optimal_utilization_bps',
-      nativeToScVal(config.optimalUtilizationBps, { type: 'u32' }),
-    ),
+    entry('optimal_utilization_bps', nativeToScVal(config.optimalUtilizationBps, { type: 'u32' })),
     entry('slope1_bps', nativeToScVal(config.slope1Bps, { type: 'u32' })),
     entry('slope2_bps', nativeToScVal(config.slope2Bps, { type: 'u32' })),
   ]);
@@ -2321,12 +2320,7 @@ export async function buildSlashOracleTx(params: {
 
 // ---- #867: Compliance registry ----
 
-export type ComplianceStatusUi =
-  | 'Unscreened'
-  | 'Cleared'
-  | 'Flagged'
-  | 'Blocked'
-  | 'PendingReview';
+export type ComplianceStatusUi = 'Unscreened' | 'Cleared' | 'Flagged' | 'Blocked' | 'PendingReview';
 
 export type RiskTierUi = 'Low' | 'Medium' | 'High';
 
@@ -2387,9 +2381,7 @@ export async function getComplianceRecord(
   };
 }
 
-export async function getComplianceHistory(
-  address: StellarAddress,
-): Promise<ComplianceRecordUi[]> {
+export async function getComplianceHistory(address: StellarAddress): Promise<ComplianceRecordUi[]> {
   const sim = await simulateTx(
     requireComplianceContractId(),
     'get_screening_history',
@@ -2488,6 +2480,56 @@ export async function fetchComplianceServiceFlags(): Promise<
   } catch {
     return [];
   }
+}
+
+// ---- #799: Referral program ----
+
+export async function getReferrer(referee: string): Promise<string | null> {
+  const sim = await simulateTx(
+    REFERRAL_CONTRACT_ID,
+    'get_referrer',
+    [new Address(referee).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  return raw ? (raw as string) : null;
+}
+
+export async function getReferralStats(referrer: string): Promise<ReferralStats> {
+  const sim = await simulateTx(
+    REFERRAL_CONTRACT_ID,
+    'get_stats',
+    [new Address(referrer).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    referrer: raw.referrer as StellarAddress,
+    referralCount: Number(raw.referral_count ?? 0),
+  };
+}
+
+export async function buildRegisterReferralTx(referee: string, referrer: string): Promise<string> {
+  const account = await getRpcAccount(referee);
+  const contract = new Contract(REFERRAL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call('register', new Address(referee).toScVal(), new Address(referrer).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
 export { submitTx };

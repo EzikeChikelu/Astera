@@ -8,6 +8,7 @@ extern crate std;
 // - Admin: initialize(), admin-only setters
 // - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
 // - Oracle: mark_verified(), mark_disputed()
+// - Keeper (#801): mark_defaulted() only — no other admin/pool privileges
 // - Anyone: cleanup_expired_storage(), read-only view functions (e.g., get_invoice)
 
 use soroban_sdk::{
@@ -162,6 +163,9 @@ pub enum InvoiceError {
     ComplianceNotCleared = 38,
     ComplianceCheckFailed = 39,
     ComplianceRegistryNotConfigured = 40,
+    // #798: create_invoice() input validation
+    InvalidAmount = 41,
+    InvalidDueDate = 42,
 }
 
 #[contracttype]
@@ -319,6 +323,10 @@ pub enum DataKey {
     // #867: optional compliance registry + opt-in gate
     ComplianceRegistry,
     RequireComplianceCheck,
+    // #801: keeper allowlist — addresses permitted to call mark_defaulted()
+    // on behalf of an automated monitor (e.g. Stellar Turrets), in addition
+    // to the pool contract.
+    KeeperIds,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -646,6 +654,17 @@ fn resolve_invoice_grace_period_days(env: &Env, invoice: &Invoice) -> u32 {
         .get(&DataKey::GracePeriodDays)
         .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
     invoice.grace_period_override.unwrap_or(global_grace)
+}
+
+/// #801: whether `address` is a whitelisted keeper allowed to call
+/// `mark_defaulted()` on behalf of an automated monitor.
+fn is_keeper(env: &Env, address: &Address) -> bool {
+    let keepers: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::KeeperIds)
+        .unwrap_or_else(|| Vec::new(env));
+    keepers.contains(address)
 }
 
 fn validate_due_date(env: &Env, due_date: u64) {
@@ -1125,6 +1144,75 @@ impl InvoiceContract {
             .unwrap_or(false)
     }
 
+    /// #801: whitelist `keeper` as an address permitted to call
+    /// `mark_defaulted()`. Admin-only; a keeper cannot call any other
+    /// admin- or pool-gated function.
+    pub fn add_keeper(env: Env, admin: Address, keeper: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let mut keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !keepers.contains(&keeper) {
+            keepers.push_back(keeper.clone());
+            env.storage().instance().set(&DataKey::KeeperIds, &keepers);
+        }
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "keeper_added")), (admin, keeper));
+    }
+
+    /// #801: revoke a previously whitelisted keeper. Admin-only.
+    pub fn remove_keeper(env: Env, admin: Address, keeper: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut remaining: Vec<Address> = Vec::new(&env);
+        for i in 0..keepers.len() {
+            let k = keepers.get(i).unwrap();
+            if k != keeper {
+                remaining.push_back(k);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperIds, &remaining);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "keeper_removed")), (admin, keeper));
+    }
+
+    /// #801: list all whitelisted keeper addresses.
+    pub fn list_keepers(env: Env) -> Vec<Address> {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn get_metadata_image_uri(env: Env) -> String {
         env.storage()
             .persistent()
@@ -1204,7 +1292,7 @@ impl InvoiceContract {
             }
         }
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
         let max_invoice_amount: i128 = env
             .storage()
@@ -1213,6 +1301,11 @@ impl InvoiceContract {
             .expect("max invoice amount not set");
         if amount > max_invoice_amount {
             panic!("invoice amount exceeds maximum");
+        }
+        // #798: due_date must lie in the future regardless of the
+        // admin-configurable min-due-date window (which may be set to 0).
+        if due_date <= env.ledger().timestamp() {
+            panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
         validate_min_due_date_window(&env, due_date);
         validate_due_date(&env, due_date);
@@ -1784,6 +1877,10 @@ impl InvoiceContract {
         );
     }
 
+    /// #801: callable by the pool contract (existing flow) or by a
+    /// whitelisted keeper — e.g. an automated Turret/cron monitor that
+    /// triggers defaults once the grace period has expired. Keepers may
+    /// only call this function; they hold no other admin privileges.
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
         pool.require_auth();
         require_not_paused(&env);
@@ -1793,8 +1890,8 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::Pool)
             .expect("not initialized");
-        if pool != authorized_pool {
-            panic!("unauthorized pool");
+        if pool != authorized_pool && !is_keeper(&env, &pool) {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let mut invoice: Invoice = env
             .storage()
@@ -3262,13 +3359,13 @@ mod test {
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
     }
 
+    // #798: create_invoice() input validation — amount and due_date
     #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_create_invoice_zero_amount_panics() {
+    fn test_create_invoice_zero_amount_returns_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "X"),
             &0i128,
@@ -3277,16 +3374,43 @@ mod test {
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
         );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidAmount.into()
+            ))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #23)")]
-    fn test_create_invoice_past_due_date_panics() {
+    fn test_create_invoice_negative_amount_returns_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "X"),
+            &-1i128,
+            &(env.ledger().timestamp() + 1),
+            &String::from_str(&env, "d"),
+            &String::from_str(&env, "h"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidAmount.into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_past_due_date_returns_invalid_due_date() {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "X"),
             &100i128,
@@ -3294,6 +3418,12 @@ mod test {
             &String::from_str(&env, "d"),
             &String::from_str(&env, "h"),
             &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::InvalidDueDate.into()
+            ))
         );
     }
 
@@ -3876,6 +4006,80 @@ mod test {
             .with_mut(|l| l.timestamp = due + (15 * SECS_PER_DAY));
         client.mark_defaulted(&id, &pool);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+    }
+
+    // #801: keeper role
+    #[test]
+    fn test_keeper_can_mark_defaulted_after_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let keeper = Address::generate(&env);
+        client.add_keeper(&admin, &keeper);
+        assert_eq!(client.list_keepers(), soroban_sdk::vec![&env, keeper.clone()]);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        client.mark_defaulted(&id, &keeper);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+    }
+
+    #[test]
+    fn test_non_keeper_cannot_mark_defaulted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _owner) = setup_funded_invoice(&env);
+        let stranger = Address::generate(&env);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        let result = client.try_mark_defaulted(&id, &stranger);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
+    }
+
+    #[test]
+    fn test_removed_keeper_cannot_mark_defaulted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let keeper = Address::generate(&env);
+        client.add_keeper(&admin, &keeper);
+        client.remove_keeper(&admin, &keeper);
+        assert_eq!(client.list_keepers().len(), 0);
+
+        let id = 1u64;
+        let due = client.get_invoice(&id).due_date;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+
+        let result = client.try_mark_defaulted(&id, &keeper);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
+    }
+
+    #[test]
+    fn test_add_keeper_non_admin_returns_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let attacker = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let result = client.try_add_keeper(&attacker, &keeper);
+        assert_eq!(
+            result,
+            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+        );
     }
 
     #[test]
