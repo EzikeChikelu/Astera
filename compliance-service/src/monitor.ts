@@ -3,7 +3,7 @@
  * patterns and calls compliance.request_review on-chain when triggered.
  */
 
-import { Keypair, TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc, Address, nativeToScVal } from '@stellar/stellar-sdk';
+import { Keypair, TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc, Address, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
 import type { ComplianceConfig, MonitorAlert } from './types';
 
 interface DepositTick {
@@ -11,20 +11,35 @@ interface DepositTick {
   amount: bigint;
 }
 
+/** #982: called when a tracked subject's clearance has reached its rescreening interval. */
+export type RescreenHandler = (address: string) => Promise<void>;
+
 export class Monitor {
   private readonly config: ComplianceConfig;
   private readonly keypair: Keypair;
   private readonly server: StellarRpc.Server;
   private readonly deposits = new Map<string, DepositTick[]>();
   private readonly alerts: MonitorAlert[] = [];
+  private readonly trackedSubjects = new Set<string>();
   private cursor = 'now';
   private running = false;
   processedCount = 0;
+  private onRescreenDue?: RescreenHandler;
 
   constructor(config: ComplianceConfig) {
     this.config = config;
     this.keypair = Keypair.fromSecret(config.screenerSecretKey);
     this.server = new StellarRpc.Server(config.rpcUrl, { allowHttp: true });
+  }
+
+  /** Register an address whose clearance should be periodically re-checked. */
+  trackSubject(address: string): void {
+    this.trackedSubjects.add(address);
+  }
+
+  /** Install the callback invoked when a tracked subject is due for re-screening. */
+  setRescreenHandler(handler: RescreenHandler): void {
+    this.onRescreenDue = handler;
   }
 
   listAlerts(): MonitorAlert[] {
@@ -35,6 +50,7 @@ export class Monitor {
     this.running = true;
     console.log('[monitor] starting Horizon poll loop');
     void this.pollLoop();
+    void this.rescreenLoop();
   }
 
   stop(): void {
@@ -70,6 +86,63 @@ export class Monitor {
       await this.handleRecord(rec);
       this.processedCount += 1;
     }
+  }
+
+  /** #982: periodically re-screens tracked subjects once their on-chain clearance expires. */
+  private async rescreenLoop(): Promise<void> {
+    while (this.running) {
+      await sleep(this.config.rescreenCheckIntervalMs);
+      try {
+        await this.rescreenOnce();
+      } catch (err) {
+        console.error('[monitor] rescreen check error:', err);
+      }
+    }
+  }
+
+  private async rescreenOnce(): Promise<void> {
+    if (this.trackedSubjects.size === 0 || !this.onRescreenDue || !this.config.complianceContractId) return;
+
+    const intervalSecs = Number(await this.readContract('get_rescreening_interval', []));
+    const now = Math.floor(Date.now() / 1000);
+
+    for (const address of this.trackedSubjects) {
+      try {
+        const record = (await this.readContract('get_compliance_record', [
+          new Address(address).toScVal(),
+        ])) as Record<string, unknown> | null;
+        if (!record) continue;
+
+        const expiresAt = Number(record.expires_at ?? 0);
+        const screenedAt = Number(record.screened_at ?? 0);
+        const dueAt = expiresAt !== 0 ? expiresAt : screenedAt + intervalSecs;
+        if (now < dueAt) continue;
+
+        console.log(`[monitor] rescreening ${address} (due at ${dueAt}, now ${now})`);
+        await this.onRescreenDue(address);
+      } catch (err) {
+        console.error(`[monitor] rescreen failed for ${address}:`, err);
+      }
+    }
+  }
+
+  /** Read-only contract call via simulation (no signing/submission needed). */
+  private async readContract(method: string, args: ReturnType<typeof nativeToScVal>[]): Promise<unknown> {
+    const account = await this.server.getAccount(this.keypair.publicKey());
+    const contract = new Contract(this.config.complianceContractId);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call(method, ...args))
+      .setTimeout(30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`simulate ${method} failed: ${sim.error}`);
+    }
+    return scValToNative(sim.result!.retval);
   }
 
   private async handleRecord(rec: Record<string, unknown>): Promise<void> {

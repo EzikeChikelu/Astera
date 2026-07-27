@@ -49,7 +49,9 @@ fn test_register_rejects_self_referral() {
     let result = client.try_register(&referee, &referee);
     assert_eq!(
         result,
-        Err(Ok::<soroban_sdk::Error, _>(ReferralError::SelfReferral.into()))
+        Err(Ok::<soroban_sdk::Error, _>(
+            ReferralError::SelfReferral.into()
+        ))
     );
 }
 
@@ -94,7 +96,9 @@ fn test_record_activity_rejects_non_pool_caller() {
     );
     assert_eq!(
         result,
-        Err(Ok::<soroban_sdk::Error, _>(ReferralError::Unauthorized.into()))
+        Err(Ok::<soroban_sdk::Error, _>(
+            ReferralError::Unauthorized.into()
+        ))
     );
 }
 
@@ -160,10 +164,7 @@ fn test_record_activity_credits_borrow_reward_and_activates_once() {
     );
     assert_eq!(reward1, 50_0000000i128);
     assert_eq!(client.get_stats(&referrer).referral_count, 1);
-    assert_eq!(
-        client.get_pending_reward(&referrer, &token),
-        50_0000000i128
-    );
+    assert_eq!(client.get_pending_reward(&referrer, &token), 50_0000000i128);
 
     // A second qualifying activity accrues more reward but does not bump
     // referral_count again (activation is a one-time event).
@@ -176,10 +177,7 @@ fn test_record_activity_credits_borrow_reward_and_activates_once() {
     );
     assert_eq!(reward2, 10_0000000i128);
     assert_eq!(client.get_stats(&referrer).referral_count, 1);
-    assert_eq!(
-        client.get_pending_reward(&referrer, &token),
-        60_0000000i128
-    );
+    assert_eq!(client.get_pending_reward(&referrer, &token), 60_0000000i128);
 }
 
 #[test]
@@ -235,7 +233,9 @@ fn test_set_reward_bps_above_max_rejected() {
     let result = client.try_set_borrow_reward_bps(&admin, &10_001u32);
     assert_eq!(
         result,
-        Err(Ok::<soroban_sdk::Error, _>(ReferralError::InvalidBps.into()))
+        Err(Ok::<soroban_sdk::Error, _>(
+            ReferralError::InvalidBps.into()
+        ))
     );
 }
 

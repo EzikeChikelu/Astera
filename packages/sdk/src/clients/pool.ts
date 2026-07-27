@@ -1,5 +1,6 @@
 import { rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { BaseClient, nativeToScVal, scValToNative, Address, xdr } from './base';
+import { Errors as PoolErrors } from '../generated/pool';
 import type {
   ClientConfig,
   PoolConfig,
@@ -96,6 +97,8 @@ function mapFundedInvoice(raw: unknown): FundedInvoice | null {
 }
 
 export class PoolClient extends BaseClient {
+  protected override readonly errors = PoolErrors;
+
   constructor(config: ClientConfig) {
     super(config);
   }

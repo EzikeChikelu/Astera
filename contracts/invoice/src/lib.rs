@@ -3850,10 +3850,7 @@ mod test {
         client.record_funding(&id, &i128::MAX, &pool);
         // Second partial funding of 1 must overflow
         let result = client.try_record_funding(&id, &1i128, &pool);
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            InvoiceError::AmountOverflow
-        );
+        assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
     }
 
     #[test]

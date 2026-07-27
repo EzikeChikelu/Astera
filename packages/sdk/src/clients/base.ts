@@ -6,14 +6,18 @@ import {
   Keypair,
 } from '@stellar/stellar-sdk';
 import { simulateTx } from '../stellar';
+import { parseContractError } from '../errors';
 import type { ClientConfig, Signer, TransactionProgress } from '../types';
 
 export { simulateTx } from '../stellar';
 export { nativeToScVal, scValToNative, Address, xdr } from '../stellar';
+export { ContractError, parseContractError } from '../errors';
 
 export class BaseClient {
   public readonly server: StellarRpc.Server;
   public readonly config: ClientConfig;
+  /** Contract-specific `#[contracterror]` map used to type simulation/tx failures. Set by subclasses. */
+  protected readonly errors: Record<number, { message: string }> = {};
 
   constructor(config: ClientConfig) {
     this.server = new StellarRpc.Server(config.rpcUrl);
@@ -51,7 +55,7 @@ export class BaseClient {
 
     const sim = await this.server.simulateTransaction(tx);
     if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw parseContractError(sim.error, this.errors);
     }
 
     const prepared = StellarRpc.assembleTransaction(tx, sim).build();
@@ -63,7 +67,11 @@ export class BaseClient {
     method: string,
     args: import('@stellar/stellar-sdk').xdr.ScVal[],
   ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
-    return simulateTx(this.server, this.network, this.contractId, method, args, SIMULATION_SOURCE);
+    const sim = await simulateTx(this.server, this.network, this.contractId, method, args, SIMULATION_SOURCE);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw parseContractError(sim.error, this.errors);
+    }
+    return sim;
   }
 
   private async resolveSigner(txXdr: string): Promise<string> {
