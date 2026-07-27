@@ -28,6 +28,9 @@ const MAX_HISTORY_ENTRIES: u32 = 64;
 const MAX_FLAGGED_LIST: u32 = 256;
 const MAX_PENDING_LIST: u32 = 256;
 const MAX_SCREENER_LIST: u32 = 64;
+/// #927: minimum seconds between request_review calls for the same address
+/// from the same caller. Prevents unbounded growth of the pending-review list.
+const REVIEW_REQUEST_COOLDOWN_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -46,6 +49,8 @@ pub enum ComplianceError {
     AddressNotFound = 10,
     ListFull = 11,
     InvalidReason = 12,
+    // #927: caller has already requested review for this address within the cooldown window.
+    ReviewRequestTooSoon = 13,
 }
 
 #[contracttype]
@@ -113,6 +118,8 @@ pub enum DataKey {
     PendingScreener(Address),
     FlaggedIds,
     PendingReviewIds,
+    // #927: last request_review timestamp keyed by (caller, target address).
+    ReviewRequestedAt(Address, Address),
 }
 
 const EVT: Symbol = symbol_short!("COMPLY");
@@ -437,6 +444,7 @@ impl ComplianceContract {
     /// Permissionless flagging: moves a Cleared address to PendingReview so
     /// privileged actions pause until a screener re-clears them. Callable by
     /// the off-chain monitoring service without screener privileges.
+    /// #927: rate-limited per (caller, address) pair to prevent list spam.
     pub fn request_review(
         env: Env,
         caller: Address,
@@ -447,6 +455,20 @@ impl ComplianceContract {
         require_not_paused(&env);
 
         let now = env.ledger().timestamp();
+
+        // #927: enforce cooldown — same caller cannot re-request review for the
+        // same address within REVIEW_REQUEST_COOLDOWN_SECS.
+        let cooldown_key = DataKey::ReviewRequestedAt(caller.clone(), address.clone());
+        if let Some(last_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&cooldown_key)
+        {
+            if now < last_at.saturating_add(REVIEW_REQUEST_COOLDOWN_SECS) {
+                return Err(ComplianceError::ReviewRequestTooSoon);
+            }
+        }
+        env.storage().instance().set(&cooldown_key, &now);
         let existing: Option<ComplianceRecord> = env
             .storage()
             .persistent()
@@ -541,6 +563,39 @@ impl ComplianceContract {
             }
             None => ComplianceStatus::Unscreened,
         }
+    }
+
+    /// #928: Batch variant of get_effective_status. Returns statuses in the
+    /// same order as the input addresses, reducing cross-contract calls for
+    /// flows that touch multiple addresses (e.g. fund_multiple_invoices).
+    pub fn get_effective_status_batch(
+        env: Env,
+        addresses: Vec<Address>,
+    ) -> Vec<ComplianceStatus> {
+        let now = env.ledger().timestamp();
+        let mut results = Vec::new(&env);
+        for i in 0..addresses.len() {
+            let addr = addresses.get(i).unwrap();
+            let status = match env
+                .storage()
+                .persistent()
+                .get::<DataKey, ComplianceRecord>(&DataKey::Record(addr))
+            {
+                Some(r) => {
+                    if matches!(r.status, ComplianceStatus::Cleared)
+                        && r.expires_at != 0
+                        && now >= r.expires_at
+                    {
+                        ComplianceStatus::Unscreened
+                    } else {
+                        r.status
+                    }
+                }
+                None => ComplianceStatus::Unscreened,
+            };
+            results.push_back(status);
+        }
+        results
     }
 
     pub fn get_compliance_record(env: Env, address: Address) -> Option<ComplianceRecord> {

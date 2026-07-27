@@ -399,10 +399,16 @@ impl Governance {
         if caller != proposal.proposer && caller != config.admin {
             return Err(GovernanceError::Unauthorized);
         }
-        if proposal.status == ProposalStatus::Cancelled
-            || proposal.status == ProposalStatus::Executed
-        {
-            return Err(GovernanceError::ProposalInactive);
+        // #929: also reject Expired and Rejected — only Active/Passed proposals
+        // can be cancelled; everything else is already in a terminal state.
+        match proposal.status {
+            ProposalStatus::Cancelled
+            | ProposalStatus::Executed
+            | ProposalStatus::Expired
+            | ProposalStatus::Rejected => {
+                return Err(GovernanceError::InvalidProposalState);
+            }
+            ProposalStatus::Active | ProposalStatus::Passed => {}
         }
 
         proposal.status = ProposalStatus::Cancelled;
@@ -456,6 +462,26 @@ impl Governance {
 
     pub fn get_config(env: Env) -> Result<GovernanceConfig, GovernanceError> {
         load_config(&env)
+    }
+
+    /// #930: Read-only preview of a voter's current voting weight for a given
+    /// proposal. Uses the same snapshot-based weight as `vote()` so callers see
+    /// exactly how much their vote will count before submitting a transaction.
+    /// Returns 0 when the proposal does not exist or the voter held no shares
+    /// at the snapshot timestamp.
+    pub fn get_voting_power(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<i128, GovernanceError> {
+        let config = load_config(&env)?;
+        let proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        let weight = proposal_weight(&env, &config.share_token, &voter, proposal.created_at);
+        Ok(weight)
     }
 
     /// Updates the quorum and pass-threshold, gated to the address holding
