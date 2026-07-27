@@ -167,6 +167,9 @@ pub enum PoolError {
     InvalidLoyaltyTiers = 86,
     // #992: deposit's optional min_rate guard rejected the current rate
     RateBelowMinimum = 87,
+    // #864: role-based multisig access-control
+    AccessControlNotConfigured = 88,
+    AccessControlAlreadyConfigured = 89,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -785,7 +788,15 @@ const LOYALTY_TIERS: Symbol = symbol_short!("loy_tier");
 // 50-variant ceiling above). Restored as Symbol keys, matching the same
 // workaround already used for compliance/Reflector config.
 const INSURANCE_CFG: Symbol = symbol_short!("ins_cfg");
-const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
+// Pre-existing build breakage found while working this branch: read/written
+// by set_auction_contract/get_auction_contract/fund_invoice_with_discount,
+// but never declared on `main` — same Symbol-key workaround as the other
+// post-#863 additions above (DataKey is already at the 50-variant ceiling).
+const AUCTION_CONTRACT: Symbol = symbol_short!("auct_ctr");
+// #864: role-based multisig access-control contract, if configured. Symbol
+// key, not a DataKey variant — DataKey is already at Soroban's 50-variant
+// ceiling (see #867/#777/#866/#799/#869 above).
+const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
 const ORACLE_STALE_SECS: Symbol = symbol_short!("o_stale");
 // #777: per-token admin fallback price, stored as a single Map so it
 // doesn't need its own DataKey variant either.
@@ -1149,17 +1160,13 @@ fn record_rate_snapshot(env: &Env, token: &Address) {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), len), &snapshot);
-        env.storage()
-            .instance()
-            .set(&bounds_key, &(len + 1, start));
+        env.storage().instance().set(&bounds_key, &(len + 1, start));
     } else {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), start), &snapshot);
         let new_start = (start + 1) % MAX_RATE_HISTORY;
-        env.storage()
-            .instance()
-            .set(&bounds_key, &(len, new_start));
+        env.storage().instance().set(&bounds_key, &(len, new_start));
     }
 
     // Indexed off-chain into a time-series table for the rate-history API.
@@ -1719,7 +1726,7 @@ fn fund_invoice_request(
     }
 
     // Load existing FundedInvoice if this is a partial funding, or create new
-    let is_first_funding = !env
+    let _is_first_funding = !env
         .storage()
         .persistent()
         .has(&DataKey::FundedInvoice(request.invoice_id));
@@ -1745,7 +1752,13 @@ fn fund_invoice_request(
     };
     // #869: resolve factoring fee at funding time; auction contract may
     // override this with a discount via fund_invoice_with_discount.
-    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone(), &request.token)?;
+    let factoring_fee = resolve_factoring_fee(
+        env,
+        config,
+        request.principal,
+        request.sme.clone(),
+        &request.token,
+    )?;
     let funded_key = DataKey::FundedInvoice(request.invoice_id);
     let is_partial = env.storage().persistent().has(&funded_key);
     if is_partial {
@@ -1783,7 +1796,7 @@ fn fund_invoice_request(
 
     // Update invoice contract's funded_amount via cross-contract call
     let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
-    let _ = invoice_client.try_add_funding(
+    let _ = invoice_client.try_record_funding(
         &request.invoice_id,
         &request.principal,
         &env.current_contract_address(),
@@ -2125,7 +2138,7 @@ impl FundingPool {
 
         for i in 0..tokens.len() {
             if tokens.get(i).ok_or(PoolError::StorageCorrupted)? == token {
-                return Err(PoolError::TokenAlreadySupported);
+                return Err(PoolError::TokenAlreadyAccepted);
             }
         }
 
@@ -3552,7 +3565,13 @@ impl FundingPool {
             due_date,
             token,
         };
-        fund_invoice_request(&env, &discounted_config, &accepted_tokens, &mut stats, &request)?;
+        fund_invoice_request(
+            &env,
+            &discounted_config,
+            &accepted_tokens,
+            &mut stats,
+            &request,
+        )?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         Self::non_reentrant_end(&env);
@@ -3832,7 +3851,7 @@ impl FundingPool {
             ))
         })();
         Self::non_reentrant_end(env);
-        let (fully_repaid, token, principal, repaid_amount, available_amount) = guarded_result?;
+        let (fully_repaid, token, _principal, repaid_amount, available_amount) = guarded_result?;
 
         // #863: a repayment changes utilization (deployed capital and/or pool
         // value) — record a rate sample for the history chart.
@@ -4898,6 +4917,240 @@ impl FundingPool {
                 .publish((EVT, symbol_short!("rev_wdraw")), (token, amount, treasury));
             Ok(())
         })
+    }
+
+    // ---- #864: role-based multisig access control (additive) ----
+    //
+    // Every entrypoint below is a parallel authorization path alongside the
+    // legacy single-admin one above — it does not replace or disable any
+    // existing admin-gated function. A deployment that never calls
+    // `set_access_control` behaves exactly as before.
+
+    /// Registers the `access_control` contract whose approved multisig
+    /// proposals may call the `*_via_ac` entrypoints below.
+    /// Admin-gated (legacy path), not hard-locked to a single call so a
+    /// misconfigured deployment can be corrected.
+    pub fn set_access_control(
+        env: Env,
+        admin: Address,
+        access_control: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&ACCESS_CONTROL, &access_control);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (admin, access_control));
+        Ok(())
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ACCESS_CONTROL)
+    }
+
+    /// Unified pause/unpause via an access-control-approved multisig
+    /// proposal. `true` pauses, `false` unpauses — same effect as the
+    /// legacy `pause()`/`unpause()` pair.
+    pub fn set_paused_via_ac(
+        env: Env,
+        access_control: Address,
+        paused: bool,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events().publish(
+            (EVT, symbol_short!("ac_pause")),
+            (access_control, paused, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    /// Direct yield setter via access control — same cooldown/max-step
+    /// guards as the legacy `set_yield()`.
+    pub fn set_yield_via_ac(
+        env: Env,
+        access_control: Address,
+        new_yield_bps: u32,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        if new_yield_bps > 5_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let now = env.ledger().timestamp();
+        if now
+            < config
+                .last_yield_change_at
+                .saturating_add(config.yield_change_cooldown_secs)
+        {
+            return Err(PoolError::InvalidAmount);
+        }
+        let current = config.yield_bps;
+        let delta = new_yield_bps.abs_diff(current);
+        if delta > config.max_yield_change_bps {
+            return Err(PoolError::InvalidAmount);
+        }
+        config.yield_bps = new_yield_bps;
+        config.last_yield_change_at = now;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("ac_yield")),
+            (access_control, current, new_yield_bps),
+        );
+        Ok(())
+    }
+
+    pub fn set_treasury_via_ac(
+        env: Env,
+        access_control: Address,
+        treasury: Address,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.events()
+            .publish((EVT, symbol_short!("ac_treas")), (access_control, treasury));
+        Ok(())
+    }
+
+    pub fn withdraw_revenue_via_ac(
+        env: Env,
+        access_control: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        non_reentrant!(&env, {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Treasury)
+                .ok_or(PoolError::TreasuryNotConfigured)?;
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            if amount > tt.protocol_revenue {
+                return Err(PoolError::InsufficientRevenue);
+            }
+            tt.protocol_revenue -= amount;
+            env.storage().instance().set(&token_totals_key, &tt);
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&env.current_contract_address(), &treasury, &amount);
+            env.events()
+                .publish((EVT, symbol_short!("ac_rev")), (token, amount, treasury));
+            Ok(())
+        })
+    }
+
+    pub fn set_oracle_contract_via_ac(
+        env: Env,
+        access_control: Address,
+        oracle: Address,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        env.storage().instance().set(&REFLECTOR_ORACLE, &oracle);
+        env.events()
+            .publish((EVT, symbol_short!("ac_orcl")), (access_control, oracle));
+        Ok(())
+    }
+
+    pub fn set_kyc_required_via_ac(
+        env: Env,
+        access_control: Address,
+        required: bool,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::KycRequired, &required);
+        env.events().publish(
+            (EVT, symbol_short!("ac_kycreq")),
+            (access_control, required),
+        );
+        Ok(())
+    }
+
+    pub fn set_investor_kyc_via_ac(
+        env: Env,
+        access_control: Address,
+        investor: Address,
+        approved: bool,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+
+        let config = get_config_cached(&env)?;
+        if investor == config.admin
+            || investor == env.current_contract_address()
+            || investor == config.invoice_contract
+        {
+            return Err(PoolError::Unauthorized);
+        }
+
+        let status = if approved {
+            KycStatus::Approved
+        } else {
+            KycStatus::Rejected
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvestorKyc(investor.clone()), &status);
+        env.events().publish(
+            (EVT, symbol_short!("ac_kycset")),
+            (access_control, investor, approved),
+        );
+        Ok(())
+    }
+
+    pub fn set_max_utilization_via_ac(
+        env: Env,
+        access_control: Address,
+        max_bps: u32,
+    ) -> Result<(), PoolError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if max_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.max_utilization_bps = max_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("ac_util")), max_bps);
+        Ok(())
     }
 
     // ---- #773: loyalty bonus APY for long-term depositors ----
@@ -6148,6 +6401,25 @@ impl FundingPool {
             .get(&DataKey::Config)
             .ok_or(PoolError::NotInitialized)?;
         if admin != &config.admin {
+            return Err(PoolError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// #864: verifies `caller` is the registered `access_control` contract.
+    /// `caller.require_auth()` is checked by every `*_via_ac`
+    /// entrypoint before calling this — Soroban's host validates that
+    /// `require_auth()` on a contract address only succeeds when that
+    /// contract is actually the one invoking this call in the current
+    /// transaction (the same trust model already used for
+    /// `update_invoice_due_date` trusting `invoice_contract`).
+    fn require_access_control(env: &Env, caller: &Address) -> PoolResult<()> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&ACCESS_CONTROL)
+            .ok_or(PoolError::AccessControlNotConfigured)?;
+        if caller != &configured {
             return Err(PoolError::Unauthorized);
         }
         Ok(())

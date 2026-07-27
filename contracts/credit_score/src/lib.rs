@@ -64,6 +64,11 @@ pub enum CreditScoreError {
     DisputeNotFound = 23,
     /// #868: internal/external attestation blend weights are invalid (must sum to 10_000 bps).
     InvalidAttestationConfig = 24,
+    /// #864: role-based multisig access-control contract not registered.
+    AccessControlNotConfigured = 25,
+    /// #864: attestor_type discriminant passed to register_attestor_via_ac
+    /// didn't match any known AttestorType variant.
+    InvalidAttestorType = 26,
 }
 
 /// Semantic version of this credit-score contract (#237).
@@ -452,6 +457,9 @@ pub enum DataKey {
 }
 
 const EVT: Symbol = symbol_short!("credit");
+// #864: optional role-based multisig access-control contract. Symbol key
+// (not a DataKey variant), matching the same convention used in pool/invoice.
+const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
 
 fn require_not_paused(env: &Env) {
     if env
@@ -1419,6 +1427,127 @@ impl CreditScoreContract {
         if admin != &stored_admin {
             panic_with_error!(env, CreditScoreError::Unauthorized);
         }
+    }
+
+    /// #864: verifies `caller` is the registered `access_control` contract.
+    fn require_access_control(env: &Env, caller: &Address) {
+        let configured: Option<Address> = env.storage().instance().get(&ACCESS_CONTROL);
+        match configured {
+            Some(configured) if &configured == caller => {}
+            Some(_) => panic_with_error!(env, CreditScoreError::Unauthorized),
+            None => panic_with_error!(env, CreditScoreError::AccessControlNotConfigured),
+        }
+    }
+
+    /// Registers the `access_control` contract whose approved multisig
+    /// proposals may call the `*_via_ac` entrypoints below. Admin-gated
+    /// (legacy path).
+    pub fn set_access_control(env: Env, admin: Address, access_control: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&ACCESS_CONTROL, &access_control);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (admin, access_control));
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ACCESS_CONTROL)
+    }
+
+    /// Unified pause/unpause via an access-control-approved multisig
+    /// proposal. `true` pauses, `false` unpauses.
+    pub fn set_paused_via_ac(env: Env, access_control: Address, paused: bool) {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control);
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events()
+            .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
+    }
+
+    pub fn set_late_threshold_via_ac(env: Env, access_control: Address, days: i64) {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control);
+        if !(1..=365).contains(&days) {
+            panic_with_error!(&env, CreditScoreError::InvalidLateThreshold);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::LateThreshold, &days);
+        env.events().publish((EVT, symbol_short!("ac_lt")), days);
+    }
+
+    pub fn set_score_thresholds_via_ac(
+        env: Env,
+        access_control: Address,
+        excellent: u32,
+        very_good: u32,
+        good: u32,
+        fair: u32,
+    ) {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        let thresholds = ScoreThresholds {
+            excellent,
+            very_good,
+            good,
+            fair,
+        };
+        if !(thresholds.excellent > thresholds.very_good
+            && thresholds.very_good > thresholds.good
+            && thresholds.good > thresholds.fair
+            && thresholds.fair > BASE_SCORE)
+        {
+            panic_with_error!(&env, CreditScoreError::InvalidThresholds);
+        }
+        let old = Self::get_score_thresholds(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoreThresholds, &thresholds);
+        env.events().publish(
+            (EVT, symbol_short!("ac_thresh")),
+            (old.excellent, old.very_good, old.good, old.fair),
+        );
+    }
+
+    /// `attestor_type` is decoded the same way credit_score's public
+    /// `AttestorType` enum is ordered: 0=BusinessRegistry, 1=CreditBureau,
+    /// 2=ExternalProtocol, 3=Manual.
+    pub fn register_attestor_via_ac(
+        env: Env,
+        access_control: Address,
+        address: Address,
+        attestor_type: u32,
+        weight_bps: u32,
+    ) {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        if weight_bps == 0 || weight_bps > MAX_WEIGHT_BPS {
+            panic_with_error!(&env, CreditScoreError::InvalidAttestorWeight);
+        }
+        let decoded_type = match attestor_type {
+            0 => AttestorType::BusinessRegistry,
+            1 => AttestorType::CreditBureau,
+            2 => AttestorType::ExternalProtocol,
+            3 => AttestorType::Manual,
+            _ => panic_with_error!(&env, CreditScoreError::InvalidAttestorType),
+        };
+
+        let info = AttestorInfo {
+            address: address.clone(),
+            attestor_type: decoded_type,
+            is_active: true,
+            weight_bps,
+            registered_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestor(address.clone()), &info);
+        env.events()
+            .publish((EVT, symbol_short!("ac_attest")), (access_control, address));
     }
 
     /// Set the upgrade timelock duration in seconds (#338).

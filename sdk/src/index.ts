@@ -7,4 +7,5 @@ export { Errors as CreditScoreErrors } from './generated/credit_score';
 export { GovernanceError } from './generated/governance';
 export { Errors as OracleRegistryErrors } from './generated/oracle_registry';
 export { Errors as ComplianceErrors } from './generated/compliance';
+export { Errors as AccessControlErrors } from './generated/access_control';
 export * from './events';

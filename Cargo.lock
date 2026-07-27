@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "access_control"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -401,6 +408,7 @@ dependencies = [
 name = "credit_score"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "proptest",
  "soroban-sdk",
 ]
@@ -1047,6 +1055,7 @@ dependencies = [
 name = "invoice"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "proptest",
  "soroban-sdk",
 ]
@@ -1277,6 +1286,7 @@ dependencies = [
 name = "pool"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "compliance",
  "proptest",
  "referral",

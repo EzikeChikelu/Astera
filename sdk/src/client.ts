@@ -24,4 +24,10 @@ export type {
   RiskTier,
   ComplianceRecord,
   ScreeningHistoryEntry,
+  Role,
+  MultiSigConfig,
+  ProposalStatus,
+  ActionPayload,
+  Proposal,
 } from '../../packages/sdk/src/types';
+export { ALL_ROLES, ROLE_LABELS } from '../../packages/sdk/src/types';

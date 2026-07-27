@@ -176,6 +176,12 @@ pub enum InvoiceError {
     // crate builds; not part of any of the four assigned issues.
     InvalidAmount = 43,
     InvalidDueDate = 44,
+    // #864: role-based multisig access-control
+    AccessControlNotConfigured = 45,
+    // Pre-existing build breakage found while working this branch: raised by
+    // create_invoice's #747 collision guard but missing from this enum on
+    // `main`. Restored here so the crate builds; unrelated to #864.
+    IDCollision = 46,
 }
 
 #[contracttype]
@@ -308,6 +314,10 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
+    // Pre-existing build breakage found while working this branch: read/
+    // written by the dispute-raise/resolve flow but missing from this enum
+    // on `main`. Restored here so the crate builds; unrelated to #864.
+    Dispute(u64),
     ContractVersion,
     MigrationVersion,
     RequireRegisteredDebtor,
@@ -338,15 +348,22 @@ pub enum DataKey {
     KeeperIds,
     // #775: borrower opt-out from the public invoice sharing link
     Private(u64),
-    // #801: whitelisted keeper addresses permitted to call mark_defaulted().
-    // Pre-existing build breakage found while working this branch: used by
-    // add_keeper/remove_keeper/list_keepers/is_keeper but missing from this
-    // enum on `main`. Added here so the crate builds; not part of any of the
-    // four assigned issues.
-    KeeperIds,
 }
 
 const EVT: Symbol = symbol_short!("invoice");
+// #864: optional role-based multisig access-control contract. Symbol key
+// (not a DataKey variant) so it can be added without touching DataKey's
+// discriminant layout.
+const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
+
+fn require_access_control(env: &Env, caller: &Address) {
+    let configured: Option<Address> = env.storage().instance().get(&ACCESS_CONTROL);
+    match configured {
+        Some(configured) if &configured == caller => {}
+        Some(_) => panic_with_error!(env, InvoiceError::Unauthorized),
+        None => panic_with_error!(env, InvoiceError::AccessControlNotConfigured),
+    }
+}
 
 fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     if invoice.status != InvoiceStatus::Pending {
@@ -1097,6 +1114,10 @@ impl InvoiceContract {
         env.storage().instance().get(&DataKey::OracleRegistry)
     }
 
+    pub fn get_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Oracle)
+    }
+
     /// #861: when `true`, `verify_invoice` (the legacy 1-of-2 oracle path)
     /// rejects direct calls and every invoice must instead go through the
     /// registered `oracle_registry`'s stake-weighted consensus flow, which
@@ -1211,6 +1232,132 @@ impl InvoiceContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, Symbol::new(&env, "keeper_added")), (admin, keeper));
+    }
+
+    // ---- #864: role-based multisig access control (additive) ----
+    //
+    // Every entrypoint below is a parallel authorization path alongside the
+    // legacy single-admin one above — it does not replace or disable any
+    // existing admin-gated function.
+
+    /// Registers the `access_control` contract whose approved multisig
+    /// proposals may call the `*_via_ac` entrypoints below. Admin-gated
+    /// (legacy path).
+    pub fn set_access_control(env: Env, admin: Address, access_control: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&ACCESS_CONTROL, &access_control);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "set_ac")), (admin, access_control));
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ACCESS_CONTROL)
+    }
+
+    /// Unified pause/unpause via an access-control-approved multisig
+    /// proposal. `true` pauses, `false` unpauses.
+    pub fn set_paused_via_ac(env: Env, access_control: Address, paused: bool) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, symbol_short!("ac_pause")),
+            (access_control, paused, env.ledger().timestamp()),
+        );
+    }
+
+    pub fn set_oracle_via_ac(env: Env, access_control: Address, oracle: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        let old_oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
+        env.storage().instance().set(&DataKey::Oracle, &oracle);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "ac_oracle")),
+            (access_control, old_oracle, oracle),
+        );
+    }
+
+    pub fn register_debtor_via_ac(
+        env: Env,
+        access_control: Address,
+        debtor_id: String,
+        debtor_name: String,
+        max_exposure: i128,
+    ) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        if max_exposure <= 0 {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
+        let record = DebtorRecord {
+            debtor_id: debtor_id.clone(),
+            debtor_name,
+            max_exposure,
+            current_exposure: 0,
+            is_active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id.clone()), &record);
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !ids.contains(&debtor_id) {
+            ids.push_back(debtor_id);
+            env.storage().instance().set(&DataKey::DebtorIds, &ids);
+        }
+        bump_instance(&env);
+    }
+
+    pub fn deactivate_debtor_via_ac(env: Env, access_control: Address, debtor_id: String) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        let mut record: DebtorRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id.clone()))
+            .expect("debtor not found");
+        record.is_active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id), &record);
+        bump_instance(&env);
+    }
+
+    pub fn add_keeper_via_ac(env: Env, access_control: Address, keeper: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        let mut keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !keepers.contains(&keeper) {
+            keepers.push_back(keeper.clone());
+            env.storage().instance().set(&DataKey::KeeperIds, &keepers);
+        }
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "ac_keeper")),
+            (access_control, keeper),
+        );
     }
 
     /// #801: revoke a previously whitelisted keeper. Admin-only.
@@ -1432,11 +1579,7 @@ impl InvoiceContract {
         let id = count + 1;
 
         // #747: Refresh TTL on the invoice counter to prevent expiry and ID collisions
-        env.storage().instance().extend_ttl(
-            &DataKey::InvoiceCount,
-            INSTANCE_BUMP_AMOUNT,
-            INSTANCE_BUMP_AMOUNT,
-        );
+        bump_instance(&env);
         let pool_addr: Address = env
             .storage()
             .instance()
@@ -3850,10 +3993,7 @@ mod test {
         client.record_funding(&id, &i128::MAX, &pool);
         // Second partial funding of 1 must overflow
         let result = client.try_record_funding(&id, &1i128, &pool);
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            InvoiceError::AmountOverflow
-        );
+        assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
     }
 
     #[test]

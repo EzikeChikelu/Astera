@@ -9,6 +9,7 @@ import {
   ORACLE_REGISTRY_CONTRACT_ID,
   COMPLIANCE_CONTRACT_ID,
   REFERRAL_CONTRACT_ID,
+  ACCESS_CONTROL_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -47,7 +48,12 @@ import type {
   RateModelConfig,
   RateSnapshot,
   ReferralStats,
+  Role,
+  MultiSigConfig,
+  ActionPayload,
+  Proposal,
 } from './types';
+import { ALL_ROLES } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
 // `./scripts/gen-bindings.sh`; see CONTRIBUTING.md.
@@ -2618,6 +2624,270 @@ export async function buildRegisterReferralTx(referee: string, referrer: string)
   })
     .addOperation(
       contract.call('register', new Address(referee).toScVal(), new Address(referrer).toScVal()),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #864: role-based multisig access control ----
+
+const SIMULATION_SOURCE = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+
+function roleToScVal(role: Role): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(role, { type: 'symbol' })]);
+}
+
+/**
+ * Encodes an `ActionPayload` (mirrors contracts/access_control/src/lib.rs's
+ * `ActionPayload` enum) the same way `attestorTypeToScVal` above encodes a
+ * unit-variant enum, extended for tuple-variant payloads: a Vec whose first
+ * element is the variant name (Symbol) followed by its fields in order.
+ */
+function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
+  const tag = nativeToScVal(action.tag, { type: 'symbol' });
+  switch (action.tag) {
+    case 'SetPaused':
+    case 'SetKycRequired':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'bool' })]);
+    case 'SetYield':
+    case 'SetMaxUtilization':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u32' })]);
+    case 'SetTreasury':
+    case 'SetOracleContract':
+    case 'SetOracle':
+    case 'AddKeeper':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
+    case 'WithdrawRevenue':
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(action.values[0]).toScVal(),
+        nativeToScVal(action.values[1], { type: 'i128' }),
+      ]);
+    case 'SetInvestorKyc':
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(action.values[0]).toScVal(),
+        nativeToScVal(action.values[1], { type: 'bool' }),
+      ]);
+    case 'RegisterDebtor':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'string' }),
+        nativeToScVal(action.values[1], { type: 'string' }),
+        nativeToScVal(action.values[2], { type: 'i128' }),
+      ]);
+    case 'DeactivateDebtor':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'string' })]);
+    case 'SetLateThreshold':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'i64' })]);
+    case 'SetScoreThresholds':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u32' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u32' }),
+        nativeToScVal(action.values[3], { type: 'u32' }),
+      ]);
+    case 'RegisterAttestor':
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(action.values[0]).toScVal(),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u32' }),
+      ]);
+    case 'AddSigner':
+    case 'RemoveSigner':
+      return xdr.ScVal.scvVec([
+        tag,
+        roleToScVal(action.values[0]),
+        new Address(action.values[1]).toScVal(),
+      ]);
+    case 'SetThreshold':
+      return xdr.ScVal.scvVec([
+        tag,
+        roleToScVal(action.values[0]),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+      ]);
+  }
+}
+
+/**
+ * `scValToNative` decodes our `[tag, ...fields]` vec encoding of an
+ * `ActionPayload` variant into a flat native array (e.g. `['SetYield', 650]`),
+ * not the `{ tag, values }` shape `ActionPayload` expects — reshape it here.
+ */
+function actionPayloadFromNative(raw: unknown): ActionPayload {
+  const [tag, ...values] = raw as [ActionPayload['tag'], ...unknown[]];
+  return { tag, values } as ActionPayload;
+}
+
+function proposalFromScVal(raw: Record<string, unknown>): Proposal {
+  return {
+    role: enumTagFromNative<Role>(raw.role),
+    target: raw.target as StellarAddress,
+    action: actionPayloadFromNative(raw.action),
+    proposer: raw.proposer as StellarAddress,
+    approvals: (raw.approvals as StellarAddress[]) ?? [],
+    createdAt: Number(raw.created_at ?? 0),
+    expiresAt: Number(raw.expires_at ?? 0),
+    status: enumTagFromNative<ProposalStatusRaw>(raw.status) as unknown as Proposal['status'],
+  };
+}
+
+type ProposalStatusRaw = 'Pending' | 'Approved' | 'Executed' | 'Rejected';
+
+export async function getRoleConfig(role: Role): Promise<MultiSigConfig | null> {
+  const sim = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'get_role_config',
+    [roleToScVal(role)],
+    SIMULATION_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
+  if (!raw) return null;
+  return {
+    signers: (raw.signers as StellarAddress[]) ?? [],
+    threshold: Number(raw.threshold ?? 0),
+  };
+}
+
+/** Fetches every role's config in one round-trip, for the admin roles page. */
+export async function listAllRoleConfigs(): Promise<Record<Role, MultiSigConfig | null>> {
+  const entries = await Promise.all(
+    ALL_ROLES.map(async (role) => [role, await getRoleConfig(role)] as const),
+  );
+  return Object.fromEntries(entries) as Record<Role, MultiSigConfig | null>;
+}
+
+export async function isRoleSigner(role: Role, address: string): Promise<boolean> {
+  const sim = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'is_signer',
+    [roleToScVal(role), new Address(address).toScVal()],
+    SIMULATION_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function getProposal(proposalId: number): Promise<Proposal | null> {
+  const sim = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'get_proposal',
+    [nativeToScVal(proposalId, { type: 'u64' })],
+    SIMULATION_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
+  return raw ? proposalFromScVal(raw) : null;
+}
+
+async function getNextProposalId(): Promise<number> {
+  const sim = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'get_next_proposal_id',
+    [],
+    SIMULATION_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+/**
+ * Fetches every proposal in `0..getNextProposalId()` — no pagination, since
+ * this governance system is meant for tens of proposals, not thousands.
+ */
+export async function listProposals(): Promise<Array<{ id: number; proposal: Proposal }>> {
+  if (!ACCESS_CONTROL_CONTRACT_ID) return [];
+  const nextId = await getNextProposalId();
+  const results: Array<{ id: number; proposal: Proposal }> = [];
+  for (let id = 0; id < nextId; id++) {
+    const proposal = await getProposal(id);
+    if (proposal) results.push({ id, proposal });
+  }
+  return results;
+}
+
+export async function buildProposeActionTx(params: {
+  role: Role;
+  proposer: string;
+  target: string;
+  action: ActionPayload;
+}): Promise<string> {
+  const account = await getRpcAccount(params.proposer);
+  const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'propose_action',
+        roleToScVal(params.role),
+        new Address(params.proposer).toScVal(),
+        new Address(params.target).toScVal(),
+        actionPayloadToScVal(params.action),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+function buildSignerOnlyActionTx(
+  method: 'approve_action' | 'reject_action' | 'revoke_approval',
+): (params: { signer: string; proposalId: number }) => Promise<string> {
+  return async ({ signer, proposalId }) => {
+    const account = await getRpcAccount(signer);
+    const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
+
+    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+      .addOperation(
+        contract.call(
+          method,
+          new Address(signer).toScVal(),
+          nativeToScVal(proposalId, { type: 'u64' }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await simulateRpcTransaction(tx);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+  };
+}
+
+export const buildApproveActionTx = buildSignerOnlyActionTx('approve_action');
+export const buildRejectActionTx = buildSignerOnlyActionTx('reject_action');
+export const buildRevokeApprovalTx = buildSignerOnlyActionTx('revoke_approval');
+
+export async function buildExecuteActionTx(params: {
+  caller: string;
+  proposalId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'execute_action',
+        new Address(params.caller).toScVal(),
+        nativeToScVal(params.proposalId, { type: 'u64' }),
+      ),
     )
     .setTimeout(30)
     .build();

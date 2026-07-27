@@ -44,6 +44,9 @@ export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRAC
 // #799: on-chain referral program — optional, unset until deployed.
 export const REFERRAL_CONTRACT_ID = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID ?? '';
 
+// #864: role-based multisig access-control registry — optional, unset until deployed.
+export const ACCESS_CONTROL_CONTRACT_ID = process.env.NEXT_PUBLIC_ACCESS_CONTROL_CONTRACT_ID ?? '';
+
 export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
