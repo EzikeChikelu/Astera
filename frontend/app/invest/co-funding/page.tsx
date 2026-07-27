@@ -1,21 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import toast from 'react-hot-toast';
+import { mutate } from 'swr';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
 import type { CoFundingRound } from '@/lib/types';
 import { toStroops, formatUSDC } from '@/lib/stellar';
 import {
-  listCoFundingRounds,
-  getCoFundingRound,
-  getInvestorCoFundPositions,
   buildCommitToInvoiceTx,
   buildWithdrawCoFundingCommitmentTx,
   buildTransferCoFundShareTx,
   submitTx,
 } from '@/lib/contracts';
+import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
 
 const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -26,55 +25,18 @@ const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
 
 export default function CoFundingPage() {
   const { wallet } = useStore();
-  const [rounds, setRounds] = useState<CoFundingRound[]>([]);
-  const [loading, setLoading] = useState(true);
   const [txLoading, setTxLoading] = useState(false);
 
   const [commitAmounts, setCommitAmounts] = useState<Record<number, string>>({});
 
-  const [positions, setPositions] = useState<Array<{ invoiceId: number; bps: number }>>([]);
-  const [positionsLoading, setPositionsLoading] = useState(false);
+  const { data: rounds = [], isLoading: loading } = useCoFundingRounds();
+  const { data: positions = [], isLoading: positionsLoading } = useCoFundingPositions(
+    wallet.address ?? null,
+  );
 
   const [transferTarget, setTransferTarget] = useState<number | null>(null);
   const [transferTo, setTransferTo] = useState('');
   const [transferBps, setTransferBps] = useState('10000');
-
-  const loadRounds = useCallback(async () => {
-    setLoading(true);
-    try {
-      const ids = await listCoFundingRounds();
-      const loaded = await Promise.all(ids.map((id) => getCoFundingRound(id)));
-      setRounds(loaded.filter((r): r is CoFundingRound => r !== null));
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadPositions = useCallback(async () => {
-    if (!wallet.address) {
-      setPositions([]);
-      return;
-    }
-    setPositionsLoading(true);
-    try {
-      const pos = await getInvestorCoFundPositions(wallet.address);
-      setPositions(pos);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setPositionsLoading(false);
-    }
-  }, [wallet.address]);
-
-  useEffect(() => {
-    loadRounds();
-  }, [loadRounds]);
-
-  useEffect(() => {
-    loadPositions();
-  }, [loadPositions]);
 
   async function signAndSubmit(xdr: string) {
     const freighter = await import('@stellar/freighter-api');
@@ -105,7 +67,8 @@ export default function CoFundingPage() {
       await signAndSubmit(xdr);
       toast.success(`Committed to invoice #${round.invoiceId}.`);
       setCommitAmounts((prev) => ({ ...prev, [round.invoiceId]: '' }));
-      await Promise.all([loadRounds(), loadPositions()]);
+      mutate('co-funding-rounds');
+      if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
@@ -121,7 +84,8 @@ export default function CoFundingPage() {
       const xdr = await buildWithdrawCoFundingCommitmentTx({ investor, invoiceId });
       await signAndSubmit(xdr);
       toast.success(`Withdrew commitment from invoice #${invoiceId}.`);
-      await Promise.all([loadRounds(), loadPositions()]);
+      mutate('co-funding-rounds');
+      if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
@@ -154,7 +118,7 @@ export default function CoFundingPage() {
       toast.success(`Transferred ${(bps / 100).toFixed(2)}% of invoice #${transferTarget}.`);
       setTransferTarget(null);
       setTransferTo('');
-      await loadPositions();
+      if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Transaction failed.');
     } finally {
