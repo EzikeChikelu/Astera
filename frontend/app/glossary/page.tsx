@@ -4,6 +4,8 @@ import { glossary } from '@/lib/glossary';
 export const metadata: Metadata = {
   title: 'Glossary — Astera',
   description: 'Plain-language explanations of the Stellar and Soroban terms used across Astera.',
+  // #783: canonical tag, resolved against metadataBase in the root layout.
+  alternates: { canonical: '/glossary' },
 };
 
 export default function GlossaryPage() {

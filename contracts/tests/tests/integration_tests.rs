@@ -46,6 +46,28 @@ fn test_env() -> Env {
     env
 }
 
+/// #774: a named set of standard test actors, generated fresh per test via
+/// `Address::generate` (never a hardcoded address literal — those break the
+/// instant Soroban's `testutils` address-generation format changes between
+/// SDK versions). Centralizing the three roles most integration tests need
+/// also avoids copy-paste mistakes where the same generated address gets
+/// reused for two logically different actors.
+struct TestActors {
+    admin: Address,
+    sme: Address,
+    investor: Address,
+}
+
+impl TestActors {
+    fn new(env: &Env) -> Self {
+        Self {
+            admin: Address::generate(env),
+            sme: Address::generate(env),
+            investor: Address::generate(env),
+        }
+    }
+}
+
 fn initialize_pool(
     pool_client: &pool::Client<'_>,
     admin: &Address,
@@ -112,9 +134,7 @@ fn test_complete_invoice_lifecycle() {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
 
     // Deploy contracts
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
+    let actors = TestActors::new(&env);
     let token_admin = Address::generate(&env);
 
     let invoice_id = env.register_contract_wasm(None, invoice::WASM);
@@ -132,28 +152,29 @@ fn test_complete_invoice_lifecycle() {
 
     // Initialize contracts
     invoice_client.initialize(
-        &admin,
+        &actors.admin,
         &pool_id,
         &10_000_000_000i128,
         &(30u64 * 86_400u64),
         &7u32,
     );
     share_client.initialize(
-        &admin,
+        &actors.admin,
         &7u32,
         &String::from_str(&env, "Pool Shares"),
         &String::from_str(&env, "POOL"),
     );
-    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
-    credit_client.initialize(&admin, &invoice_id, &pool_id);
+    initialize_pool(&pool_client, &actors.admin, &usdc_id, &share_id, &invoice_id);
+    credit_client.initialize(&actors.admin, &invoice_id, &pool_id);
 
     // Mint tokens to investor and SME
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&investor, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
+        .mint(&actors.investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&actors.sme, &10_000_000_000i128);
 
     // Step 1: Investor deposits into pool
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&actors.investor, &usdc_id, &5_000_000_000i128);
     let totals = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals.pool_value, 5_000_000_000i128);
     // Assert deposit event includes depositor and token
@@ -180,7 +201,7 @@ fn test_complete_invoice_lifecycle() {
     // Step 2: SME creates invoice
     let due_date = env.ledger().timestamp() + 30 * 86_400; // 30 days
     let inv_id = invoice_client.create_invoice(
-        &sme,
+        &actors.sme,
         &String::from_str(&env, "ACME Corp"),
         &2_000_000_000i128,
         &due_date,
@@ -192,10 +213,10 @@ fn test_complete_invoice_lifecycle() {
 
     // Step 3: Pool funds the invoice
     pool_client.fund_invoice(
-        &admin,
+        &actors.admin,
         &inv_id,
         &2_000_000_000i128,
-        &sme,
+        &actors.sme,
         &due_date,
         &usdc_id,
     );
@@ -232,7 +253,7 @@ fn test_complete_invoice_lifecycle() {
     // Step 4: SME repays invoice
     env.ledger().with_mut(|l| l.timestamp += 25 * 86_400); // 25 days later
     let amount_due = pool_client.estimate_repayment(&inv_id, &None);
-    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    pool_client.repay_invoice(&inv_id, &actors.sme, &amount_due);
 
     // Assert repaid event includes payer
     let events = env.events().all();
@@ -284,7 +305,7 @@ fn test_complete_invoice_lifecycle() {
     credit_client.record_payment(
         &pool_id,
         &inv_id,
-        &sme,
+        &actors.sme,
         &2_000_000_000i128,
         &due_date,
         &env.ledger().timestamp(),
@@ -311,14 +332,14 @@ fn test_complete_invoice_lifecycle() {
         "payment event must include (caller, sme, invoice_id, status, score, timestamp)"
     );
 
-    let credit_data = credit_client.get_credit_score(&sme);
+    let credit_data = credit_client.get_credit_score(&actors.sme);
     assert_eq!(credit_data.total_invoices, 1);
     assert_eq!(credit_data.paid_on_time, 1);
     assert!(credit_data.score > 500);
 
     // Step 7: Investor withdraws with yield
-    let shares = share_client.balance(&investor);
-    pool_client.withdraw(&investor, &usdc_id, &shares);
+    let shares = share_client.balance(&actors.investor);
+    pool_client.withdraw(&actors.investor, &usdc_id, &shares);
 
     // Assert withdraw event includes investor and token
     let events = env.events().all();
@@ -344,7 +365,8 @@ fn test_complete_invoice_lifecycle() {
         "withdraw event must include (investor, token, amount, shares, timestamp)"
     );
 
-    let investor_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
+    let investor_balance =
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&actors.investor);
     assert!(investor_balance > 5_000_000_000i128); // Should have earned yield
 }
 

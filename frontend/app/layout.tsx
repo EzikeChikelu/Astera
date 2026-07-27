@@ -4,7 +4,7 @@ import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
 import SWRProvider from '@/components/SWRProvider';
 import { Toaster } from 'react-hot-toast';
-import { assertEnvValid } from '@/lib/env';
+import { assertEnvValid, getAppUrl } from '@/lib/env';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -13,11 +13,8 @@ export const viewport: Viewport = {
 };
 
 // #765: base URL used to resolve relative OG/Twitter image paths into the
-// absolute URLs social platforms require. Falls back to the Vercel preview
-// URL, then localhost, so previews still render correctly in development.
-const APP_URL =
-  process.env.NEXT_PUBLIC_APP_URL ??
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+// absolute URLs social platforms require.
+const APP_URL = getAppUrl();
 
 const SITE_TITLE = 'Astera — Real World Assets on Stellar';
 const SITE_DESCRIPTION =

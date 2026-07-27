@@ -423,6 +423,35 @@ export default function InvestPage() {
                         })}
                       </p>
                     )}
+                    {mode === 'withdraw' && tokenTotals && (
+                      // #782: pool_value minus deployed capital is the actual
+                      // ceiling on any single withdrawal — a user's own share
+                      // balance can exceed this when most of the pool is
+                      // deployed in active invoices.
+                      (() => {
+                        const poolLiquidity =
+                          tokenTotals.totalDeposited > tokenTotals.totalDeployed
+                            ? tokenTotals.totalDeposited - tokenTotals.totalDeployed
+                            : 0n;
+                        const exceedsLiquidity =
+                          !!amount && toStroops(parseFloat(amount || '0')) > poolLiquidity;
+                        return (
+                          <p
+                            className={`text-xs mt-1 ${exceedsLiquidity ? 'text-red-400' : 'text-brand-muted'}`}
+                          >
+                            {exceedsLiquidity
+                              ? t('exceedsLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })
+                              : t('poolLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })}
+                          </p>
+                        );
+                      })()
+                    )}
                     {mode === 'deposit' && tokenDepositCap > 0n && tokenTotals && (
                       <div className="mt-3">
                         <div className="flex justify-between text-xs text-brand-muted mb-1">

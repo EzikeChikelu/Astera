@@ -94,6 +94,8 @@
     "noTokens": "No hay tokens configurados",
     "amountLabel": "Importe ({token})",
     "available": "Disponible: {amount} {token}",
+    "poolLiquidity": "Liquidez del pool: {amount} {token} disponible para retirar",
+    "exceedsLiquidity": "Excede la liquidez disponible del pool de {amount} {token}",
     "processing": "Procesando...",
     "retry": "Reintentar transaccion",
     "notes": {

@@ -111,6 +111,8 @@
     "noTokens": "Aucun jeton configuré",
     "amountLabel": "Montant ({token})",
     "available": "Disponible: {amount} {token}",
+    "poolLiquidity": "Liquidité du pool : {amount} {token} disponible au retrait",
+    "exceedsLiquidity": "Dépasse la liquidité disponible du pool de {amount} {token}",
     "processing": "Traitement...",
     "retry": "Réessayer la transaction",
     "notes": {

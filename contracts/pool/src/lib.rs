@@ -2549,9 +2549,14 @@ impl FundingPool {
             .checked_div(rate_bps as i128)
             .ok_or(PoolError::AmountOverflow)?;
 
+        // #782: reject before any state change (share burn / pool_value update
+        // below) when the pool doesn't have enough undeployed liquidity to
+        // cover this withdrawal — otherwise the accounting step could
+        // succeed while the token transfer later fails, burning the
+        // investor's shares without paying them out.
         let available_liquidity = tt.pool_value - tt.total_deployed;
         if available_liquidity < usdc_amount {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::InsufficientLiquidity);
         }
 
         // #244: single-withdrawal cap (skip for admin) — compare in USDC terms
@@ -7985,6 +7990,47 @@ mod test {
         // Attempt to withdraw more shares than owned
         let result = client.try_withdraw(&investor, &usdc_id, &1_000i128);
         assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_withdraw_insufficient_liquidity_rejected_before_burning_shares() {
+        // #782: 90% of the pool deployed into a funded invoice, leaving only
+        // 10% liquid. An investor's shares are worth the full deposit, but
+        // the pool cannot actually pay out that much — withdraw() must
+        // reject with InsufficientLiquidity *before* burning any shares,
+        // not fail at the token transfer after accounting already changed.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &900i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        assert_eq!(client.available_liquidity(&usdc_id), 100);
+
+        let share_client = token::Client::new(&env, &share_token);
+        let shares_before = share_client.balance(&investor);
+
+        let result = client.try_withdraw(&investor, &usdc_id, &shares_before);
+        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+
+        // Shares must NOT be burned and pool_value must be untouched.
+        assert_eq!(share_client.balance(&investor), shares_before);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 1_000);
+
+        // A withdrawal that fits within the 100 still-liquid units succeeds.
+        client.withdraw(&investor, &usdc_id, &100);
+        assert_eq!(share_client.balance(&investor), shares_before - 100);
     }
 
     #[test]
