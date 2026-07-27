@@ -19,6 +19,7 @@ import type {
   CoFundingRound,
   OracleInfo,
   VerificationRound,
+  RegistryConfig,
   RateModelConfig,
   RateSnapshot,
   ComplianceStatus,
@@ -276,6 +277,9 @@ export class AsteraClient {
 
     getOracleInfo: (operator: string): Promise<OracleInfo | null> =>
       this.oracleRegistryClient.getOracleInfo(operator),
+
+    getRegistryConfig: (): Promise<RegistryConfig> =>
+      this.oracleRegistryClient.getRegistryConfig(),
 
     openRound: (params: {
       signer: (txXdr: string) => Promise<string>;
