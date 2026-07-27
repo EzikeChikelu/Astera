@@ -50,6 +50,7 @@ import {
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
 import { parseStellarAddress } from '@/lib/types';
 import type {
@@ -298,8 +299,9 @@ export default function InvoiceDetailPage() {
   }, [loadInvoice]);
 
   const days = metadata ? daysUntil(metadata.dueDate) : 0;
-  const isOwner = invoice ? wallet.address === invoice.owner : false;
-  const isAdmin = poolConfig ? wallet.address === poolConfig.admin : false;
+  const isOwner = Boolean(invoice && wallet.connected && wallet.address === invoice.owner);
+  const isAdmin = Boolean(poolConfig && wallet.connected && wallet.address === poolConfig.admin);
+  const canViewInvoice = !isPrivate || isOwner;
   const statusSteps: TransactionStep[] = invoice
     ? [
         { label: 'Created', done: true, ts: invoice.createdAt },
@@ -373,7 +375,13 @@ export default function InvoiceDetailPage() {
 
   const repaySimulation = useTransactionSimulation(
     simulateRepay,
-    isOwner && metadata.status === 'Funded' && !!fundedInvoice && !fullyRepaid && !!wallet.address && !!invoice && (!!repayAmount || remainingDue > 0n),
+    isOwner &&
+      metadata.status === 'Funded' &&
+      !!fundedInvoice &&
+      !fullyRepaid &&
+      !!wallet.address &&
+      !!invoice &&
+      (!!repayAmount || remainingDue > 0n),
   );
 
   async function handleRepay() {
@@ -616,8 +624,8 @@ export default function InvoiceDetailPage() {
   }
 
   // #775: the borrower opted this invoice out of the public sharing link —
-  // hide it from everyone except the owner, same as a genuinely missing invoice.
-  if (isPrivate && !isOwner) {
+  // hide it from everyone except the connected owner, same as a genuinely missing invoice.
+  if (!canViewInvoice) {
     return (
       <div className="min-h-screen pt-24 px-4 sm:px-6 flex flex-col items-center justify-center text-center">
         <p className="text-red-400 mb-4">Invoice not found.</p>
@@ -976,8 +984,8 @@ export default function InvoiceDetailPage() {
             <div>
               <h2 className="text-lg font-semibold mb-1">Fund This Invoice</h2>
               <p className="text-xs text-brand-muted">
-                Join other lenders co-funding this invoice. Committed capital earns a
-                proportional share of this invoice&apos;s principal and interest.
+                Join other lenders co-funding this invoice. Committed capital earns a proportional
+                share of this invoice&apos;s principal and interest.
               </p>
             </div>
 
