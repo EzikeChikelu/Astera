@@ -20,14 +20,25 @@ const CSRF_COOKIE = 'csrf_token';
 const CSRF_HEADER = 'x-csrf-token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WALLET_SIGNATURE_EXEMPT = new Set(['/api/auth/challenge', '/api/auth/token']);
+const SUPPORTED_LOCALES = new Set(['en', 'fr']);
 
 function generateToken(): string {
   return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
 }
 
+function extractLocaleFromPath(pathname: string): string | null {
+  const segments = pathname.split('/').filter(Boolean);
+  if (segments.length > 0 && SUPPORTED_LOCALES.has(segments[0])) {
+    return segments[0];
+  }
+  return null;
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const cookieToken = request.cookies.get(CSRF_COOKIE)?.value;
+  const pathLocale = extractLocaleFromPath(pathname);
+  const localeCookie = request.cookies.get('NEXT_LOCALE')?.value;
 
   if (
     pathname.startsWith('/api/') &&
@@ -42,14 +53,18 @@ export function middleware(request: NextRequest) {
 
   const response = NextResponse.next();
 
+  // #971: Preserve requested locale on deep link navigations by setting
+  // NEXT_LOCALE cookie when navigating directly to a locale-prefixed route.
+  if (pathLocale && localeCookie !== pathLocale) {
+    response.cookies.set('NEXT_LOCALE', pathLocale, {
+      path: '/',
+      maxAge: 31536000,
+      sameSite: 'lax',
+    });
+  }
+
   // Mint a token on first contact (session start) so the frontend has one to
-  // echo back by the time it makes its first mutating request. Runs on page
-  // navigations too (see matcher below), not just /api/*, since that's the
-  // only way the cookie exists before the very first POST. Deliberately NOT
-  // HttpOnly: the double-submit pattern depends on same-origin JS being able
-  // to read the cookie and attach it as a header — an attacker's cross-site
-  // page can trigger a request but cannot read this cookie itself, so it
-  // can't reproduce the header.
+  // echo back by the time it makes its first mutating request.
   if (!cookieToken) {
     response.cookies.set(CSRF_COOKIE, generateToken(), {
       httpOnly: false,

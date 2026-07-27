@@ -143,8 +143,14 @@ function CleanupResultToast({ result }: { result: CleanupResult | null }) {
 
 // ─── Main page component ──────────────────────────────────────────────────────
 
+interface ServiceHealthState {
+  status: 'ok' | 'degraded' | 'down';
+  checks: Record<string, { name: string; status: 'ok' | 'degraded' | 'down'; detail?: string }>;
+}
+
 export default function StorageMonitoringPage() {
   const [health, setHealth] = useState<StorageHealth | null>(null);
+  const [services, setServices] = useState<ServiceHealthState | null>(null);
   const [loading, setLoading] = useState(true);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null);
@@ -156,15 +162,13 @@ export default function StorageMonitoringPage() {
     setLoading(true);
     setError(null);
     try {
-      // ── Replace these with your actual Soroban contract client calls ──────
-      // Example using a typed contract client:
-      //
-      // const stats = await invoiceContractClient.get_storage_stats();
-      // const cost  = await invoiceContractClient.estimate_storage_cost();
-      // const terminalIds = await fetchTerminalInvoiceIds(); // your query
-      //
-      // For now we simulate with realistic mock data so the UI is demonstrable.
-      await new Promise((r) => setTimeout(r, 600));
+      const apiHealthRes = await fetch('/api/health').catch(() => null);
+      if (apiHealthRes && apiHealthRes.ok) {
+        const data = await apiHealthRes.json();
+        setServices(data);
+      }
+
+      await new Promise((r) => setTimeout(r, 400));
 
       const mockStats: StorageStats = {
         total_invoices: 247n,
@@ -175,8 +179,6 @@ export default function StorageMonitoringPage() {
       const estimatedCost =
         mockStats.active_invoices * STROOPS_PER_LEDGER_PER_ENTRY * LEDGERS_PER_MONTH;
 
-      // IDs of invoices in terminal state that haven't been cleaned yet.
-      // In production: query your indexer for Paid/Defaulted/Cancelled/Expired IDs.
       const cleanableIds: bigint[] = Array.from({ length: 12 }, (_, i) => BigInt(i + 100));
 
       setHealth({
@@ -302,6 +304,67 @@ export default function StorageMonitoringPage() {
 
         {/* ── Cleanup result toast ── */}
         <CleanupResultToast result={cleanupResult} />
+
+        {/* ── Off-chain service liveness ── */}
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-[11px] font-black uppercase tracking-widest text-slate-400">
+              Off-Chain Services Health
+            </h2>
+            {services && (
+              <span
+                className={`text-xs font-mono font-semibold px-2.5 py-1 rounded-full border ${
+                  services.status === 'ok'
+                    ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                    : services.status === 'degraded'
+                      ? 'text-amber-400 border-amber-500/30 bg-amber-500/10'
+                      : 'text-rose-400 border-rose-500/30 bg-rose-500/10'
+                }`}
+              >
+                Overall: {services.status.toUpperCase()}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <StatCard
+              label="Stellar RPC"
+              value={services?.checks?.stellar_rpc?.status.toUpperCase() ?? 'UNKNOWN'}
+              sub={services?.checks?.stellar_rpc?.detail ?? 'Checking...'}
+              accent={
+                services?.checks?.stellar_rpc?.status === 'ok'
+                  ? 'green'
+                  : services?.checks?.stellar_rpc?.status === 'degraded'
+                    ? 'amber'
+                    : 'red'
+              }
+            />
+            <StatCard
+              label="Oracle Service"
+              value={services?.checks?.oracle_service?.status.toUpperCase() ?? 'UNKNOWN'}
+              sub={services?.checks?.oracle_service?.detail ?? 'Checking...'}
+              accent={
+                services?.checks?.oracle_service?.status === 'ok'
+                  ? 'green'
+                  : services?.checks?.oracle_service?.status === 'degraded'
+                    ? 'amber'
+                    : 'red'
+              }
+            />
+            <StatCard
+              label="Compliance Service"
+              value={services?.checks?.compliance_service?.status.toUpperCase() ?? 'UNKNOWN'}
+              sub={services?.checks?.compliance_service?.detail ?? 'Checking...'}
+              accent={
+                services?.checks?.compliance_service?.status === 'ok'
+                  ? 'green'
+                  : services?.checks?.compliance_service?.status === 'degraded'
+                    ? 'amber'
+                    : 'red'
+              }
+            />
+          </div>
+        </div>
 
         {/* ── Stat grid ── */}
         {loading && !health ? (
