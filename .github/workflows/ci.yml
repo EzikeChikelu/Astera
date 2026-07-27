@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown,wasm32v1-none
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
       - name: Lint contracts with clippy
@@ -42,6 +42,22 @@ jobs:
       - name: Run integration tests
         timeout-minutes: 15
         run: cargo test -p integration-tests --test integration_tests
+      # #781: code coverage for the Soroban contracts. Runs after the tests
+      # above (not instead of them) since cargo-llvm-cov's own instrumented
+      # `cargo test` still needs the prebuilt wasm32v1-none release
+      # artifacts from the "Build contracts for integration tests" step.
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Generate contracts coverage report
+        timeout-minutes: 15
+        run: cargo llvm-cov --workspace --lcov --output-path contracts-lcov.info
+      - name: Upload contracts coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: contracts-lcov.info
+          flags: contracts
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Check WASM size
@@ -120,6 +136,19 @@ jobs:
       - name: Run cross-contract integration tests
         working-directory: .
         run: cargo test --manifest-path contracts/tests/Cargo.toml
+
+      # #781: frontend Jest coverage, uploaded to Codecov under its own flag
+      # so contract and frontend coverage are tracked (and can regress)
+      # independently.
+      - name: Frontend tests with coverage
+        run: npm test -- --coverage --coverageReporters=lcov
+      - name: Upload frontend coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: frontend/coverage/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   # E2E Tests job is temporarily disabled: frontend/e2e/contract-ids.ts
   # deliberately fails fast in CI when real (non-placeholder) contract IDs

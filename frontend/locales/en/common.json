@@ -111,6 +111,8 @@
     "noTokens": "No tokens configured",
     "amountLabel": "Amount ({token})",
     "available": "Available: {amount} {token}",
+    "poolLiquidity": "Pool liquidity: {amount} {token} available to withdraw",
+    "exceedsLiquidity": "Exceeds available pool liquidity of {amount} {token}",
     "processing": "Processing...",
     "retry": "Retry transaction",
     "notes": {
