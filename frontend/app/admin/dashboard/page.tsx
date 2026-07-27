@@ -14,6 +14,7 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
@@ -47,6 +48,7 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export default function AdminDashboardPage() {
+  const t = useTranslations('Admin.dashboard');
   const { poolConfig, setPoolConfig, wallet } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,7 +75,7 @@ export default function AdminDashboardPage() {
       setInvoices(batches.flat());
       setLastRefreshed(new Date());
     } catch (e) {
-      toast.error('Failed to load protocol statistics.');
+      toast.error(t('failedToLoad'));
       console.error(e);
     } finally {
       setLoading(false);
@@ -100,10 +102,10 @@ export default function AdminDashboardPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      toast.success(protocolPaused ? 'Protocol unpaused.' : 'Protocol paused.');
+      toast.success(protocolPaused ? t('unpause') : t('pause'));
       await loadData();
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Failed to update protocol pause state.';
+      const message = e instanceof Error ? e.message : t('failedToLoad');
       toast.error(message);
       console.error(e);
     } finally {
@@ -178,123 +180,117 @@ export default function AdminDashboardPage() {
     <div className="space-y-8">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
         <div>
-          <h1 className="text-3xl font-bold mb-2">Protocol Dashboard</h1>
-          <p className="text-brand-muted text-sm">
-            Real-time overview of the Astera liquidity pool.
-          </p>
+          <h1 className="text-3xl font-bold mb-2">{t('title')}</h1>
+          <p className="text-brand-muted text-sm">{t('description')}</p>
         </div>
         {lastRefreshed && (
           <p className="text-xs text-brand-muted">
-            Last updated: {lastRefreshed.toLocaleTimeString()} · auto-refreshes every 60s
+            {t('lastUpdated', { time: lastRefreshed.toLocaleTimeString() })} · {t('autoRefresh')}
           </p>
         )}
       </div>
 
-      {/* Row 1: Capital Overview */}
-      <Section title="Capital Overview">
+      <Section title={t('sectionCapital')}>
         <StatCard
-          label="Total Value Locked"
+          label={t('tvl')}
           value={formatUSDC(stats.tvl)}
-          description="Sum of all deposited capital"
+          description={t('tvlDesc')}
           trend="primary"
         />
         <StatCard
-          label="Deployed Capital"
+          label={t('deployedCapital')}
           value={formatUSDC(stats.deployed)}
-          description="Currently in active funded invoices"
+          description={t('deployedCapitalDesc')}
         />
         <StatCard
-          label="Utilization Rate"
+          label={t('utilizationRate')}
           value={`${stats.utilization}%`}
-          description="Deployed ÷ deposited (target 70–90%)"
+          description={t('utilizationRateDesc')}
           trend={stats.utilization >= 70 && stats.utilization <= 90 ? 'success' : 'danger'}
         />
         <StatCard
-          label="Available Liquidity"
+          label={t('availableLiquidity')}
           value={formatUSDC(stats.available)}
-          description="Immediately withdrawable capital"
+          description={t('availableLiquidityDesc')}
         />
       </Section>
 
-      {/* Row 2: Invoice Health */}
-      <Section title="Invoice Health">
+      <Section title={t('sectionInvoiceHealth')}>
         <StatCard
-          label="Active Invoices"
+          label={t('activeInvoices')}
           value={stats.activeCount.toString()}
-          description="Currently funded and not yet repaid"
+          description={t('activeInvoicesDesc')}
         />
         <StatCard
-          label="Overdue Invoices"
+          label={t('overdueInvoices')}
           value={stats.overdueCount.toString()}
-          description="Past due date (within grace period)"
+          description={t('overdueInvoicesDesc')}
           trend={stats.overdueCount > 0 ? 'danger' : 'success'}
           badge={stats.overdueCount > 0 ? '⚠' : undefined}
         />
         <StatCard
-          label="Defaulted (30d)"
+          label={t('defaulted30d')}
           value={stats.defaulted30dCount.toString()}
-          description="Defaults in the last 30 days"
+          description={t('defaulted30dDesc')}
           trend={stats.defaulted30dCount > 0 ? 'danger' : undefined}
         />
         <StatCard
-          label="Default Rate"
+          label={t('defaultRate')}
           value={stats.defaultRate}
-          description="Rolling rate across all funded invoices"
+          description={t('defaultRateDesc')}
           trend={parseFloat(stats.defaultRate) > 5 ? 'danger' : 'success'}
         />
       </Section>
 
-      {/* Row 3: Investor Activity */}
-      <Section title="Investor Activity">
+      <Section title={t('sectionInvestorActivity')}>
         <StatCard
-          label="Active Investors"
+          label={t('activeInvestors')}
           value={stats.activeInvestors.toString()}
-          description="Addresses with non-zero positions"
+          description={t('activeInvestorsDesc')}
         />
         <StatCard
-          label="New Investors (7d)"
+          label={t('newInvestors7d')}
           value={stats.newInvestors7d.toString()}
-          description="First-time depositors this week"
+          description={t('newInvestors7dDesc')}
           trend="primary"
         />
         <StatCard
-          label="Pending Withdrawals"
+          label={t('pendingWithdrawals')}
           value={stats.pendingWithdrawals.toString()}
-          description="Queued withdrawal requests"
+          description={t('pendingWithdrawalsDesc')}
           trend={stats.pendingWithdrawals > 0 ? 'danger' : undefined}
         />
       </Section>
 
-      {/* Row 4: Quick Actions */}
       <section>
         <h2 className="text-xs font-bold mb-4 text-brand-muted uppercase tracking-widest">
-          Quick Actions
+          {t('quickActions')}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <ActionCard
             href="/admin/kyc"
-            label="KYC Approvals"
+            label={t('kycApprovals')}
             count={0}
-            description="Review pending KYC applications"
+            description={t('kycApprovalsDesc')}
           />
           <ActionCard
             href="/admin/invoices"
-            label="Disputed Invoices"
+            label={t('disputedInvoices')}
             count={0}
-            description="Resolve active disputes"
+            description={t('disputedInvoicesDesc')}
           />
           <ActionCard
             href="/admin/invoices"
-            label="Overdue Invoices"
+            label={t('overdueInvoicesAction')}
             count={stats.overdueCount}
-            description="Manage past-due invoices"
+            description={t('overdueInvoicesActionDesc')}
             alert={stats.overdueCount > 0}
           />
           <ActionCard
             href="/admin/monitoring"
-            label="Monitoring"
+            label={t('monitoringAction')}
             count={0}
-            description="View contract events and alerts"
+            description={t('monitoringActionDesc')}
           />
         </div>
 
@@ -306,11 +302,9 @@ export default function AdminDashboardPage() {
         >
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 className="font-semibold text-white">Protocol Pause</h3>
+              <h3 className="font-semibold text-white">{t('protocolPause')}</h3>
               <p className="text-sm text-brand-muted mt-1">
-                {protocolPaused
-                  ? 'The protocol is paused. State-changing operations are blocked.'
-                  : 'The protocol is active. Pause to halt all state-changing operations.'}
+                {protocolPaused ? t('protocolPausedDesc') : t('protocolActiveDesc')}
               </p>
               <p
                 data-testid="protocol-pause-status"
@@ -318,7 +312,7 @@ export default function AdminDashboardPage() {
                   protocolPaused ? 'text-red-400' : 'text-green-400'
                 }`}
               >
-                Status: {protocolPaused ? 'Paused' : 'Active'}
+                {t('status', { status: protocolPaused ? t('paused') : t('active') })}
               </p>
             </div>
             <button
@@ -332,25 +326,17 @@ export default function AdminDashboardPage() {
                   : 'bg-red-600 hover:bg-red-500 text-white'
               }`}
             >
-              {pauseSubmitting
-                ? 'Updating...'
-                : protocolPaused
-                  ? 'Unpause Protocol'
-                  : 'Pause Protocol'}
+              {pauseSubmitting ? t('updating') : protocolPaused ? t('unpause') : t('pause')}
             </button>
           </div>
         </div>
       </section>
 
       <ConfirmActionModal
-        title={protocolPaused ? 'Unpause protocol?' : 'Pause protocol?'}
-        description={
-          protocolPaused
-            ? 'This will resume all state-changing protocol operations.'
-            : 'This will halt all state-changing protocol operations until unpaused.'
-        }
-        confirmLabel={protocolPaused ? 'Unpause' : 'Pause'}
-        cancelLabel="Cancel"
+        title={protocolPaused ? t('unpauseModalTitle') : t('pauseModalTitle')}
+        description={protocolPaused ? t('unpauseModalDesc') : t('pauseModalDesc')}
+        confirmLabel={protocolPaused ? t('confirmUnpause') : t('confirmPause')}
+        cancelLabel={t('cancel')}
         variant={protocolPaused ? 'default' : 'destructive'}
         isOpen={pauseModalOpen}
         onConfirm={() => void handlePauseToggleConfirm()}

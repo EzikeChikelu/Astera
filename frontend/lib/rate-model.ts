@@ -47,34 +47,43 @@ export function sampleRateCurve(
 }
 
 /** Client-side mirror of the contract's `validate_rate_model_config`. */
-export function validateRateModelConfig(config: RateModelConfig): string | null {
+export function validateRateModelConfig(
+  config: RateModelConfig,
+  t?: (key: string, values?: Record<string, unknown>) => string,
+): string | null {
   const MAX_RATE_BPS_CAP = 5_000;
   if (
     !Number.isInteger(config.optimalUtilizationBps) ||
     config.optimalUtilizationBps <= 0 ||
     config.optimalUtilizationBps > BPS_DENOM
   ) {
-    return 'Optimal utilization must be between 1 and 10000 bps (0.01%–100%).';
+    return t
+      ? t('optUtilRange')
+      : 'Optimal utilization must be between 1 and 10000 bps (0.01%–100%).';
   }
   if (
     !Number.isInteger(config.maxRateBps) ||
     config.maxRateBps <= 0 ||
     config.maxRateBps > MAX_RATE_BPS_CAP
   ) {
-    return `Max rate must be between 1 and ${MAX_RATE_BPS_CAP} bps.`;
+    return t
+      ? t('maxRateRange', { max: MAX_RATE_BPS_CAP.toString() })
+      : `Max rate must be between 1 and ${MAX_RATE_BPS_CAP} bps.`;
   }
   if (!Number.isInteger(config.baseRateBps) || config.baseRateBps < 0) {
-    return 'Base rate must be a non-negative integer (bps).';
+    return t ? t('baseRateNonNegative') : 'Base rate must be a non-negative integer (bps).';
   }
   if (config.baseRateBps > config.maxRateBps) {
-    return 'Base rate cannot exceed the max rate.';
+    return t ? t('baseRateExceedsMax') : 'Base rate cannot exceed the max rate.';
   }
   for (const [name, slope] of [
     ['Slope 1', config.slope1Bps],
     ['Slope 2', config.slope2Bps],
   ] as const) {
     if (!Number.isInteger(slope) || slope < 0 || slope > MAX_RATE_BPS_CAP) {
-      return `${name} must be between 0 and ${MAX_RATE_BPS_CAP} bps.`;
+      return t
+        ? t('slopeRange', { name, max: MAX_RATE_BPS_CAP.toString() })
+        : `${name} must be between 0 and ${MAX_RATE_BPS_CAP} bps.`;
     }
   }
   return null;

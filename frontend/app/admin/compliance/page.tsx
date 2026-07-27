@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
@@ -19,6 +20,7 @@ import {
 } from '@/lib/contracts';
 
 export default function AdminCompliancePage() {
+  const t = useTranslations('Admin.compliance');
   const { wallet } = useStore();
   const [loading, setLoading] = useState(true);
   const [txLoading, setTxLoading] = useState(false);
@@ -80,14 +82,14 @@ export default function AdminCompliancePage() {
       setHistory(h);
       setDecisionAddress(addr);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Lookup failed');
+      toast.error(err instanceof Error ? err.message : t('lookupFailed'));
     }
   }
 
   async function handleDecision(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.address) {
-      toast.error('Connect an admin/screener wallet first.');
+      toast.error(t('screeningDecision'));
       return;
     }
     setTxLoading(true);
@@ -95,9 +97,7 @@ export default function AdminCompliancePage() {
       const screener = parseStellarAddress(wallet.address);
       const address = parseStellarAddress(decisionAddress.trim());
       const expiresAt =
-        decisionStatus === 'Cleared'
-          ? Math.floor(Date.now() / 1000) + 180 * 24 * 60 * 60
-          : 0;
+        decisionStatus === 'Cleared' ? Math.floor(Date.now() / 1000) + 180 * 24 * 60 * 60 : 0;
       const xdr = await buildSubmitScreeningResultTx({
         screener,
         address,
@@ -108,13 +108,16 @@ export default function AdminCompliancePage() {
         notesHash: decisionNotes.slice(0, 64) || 'admin-decision',
       });
       await signAndSubmit(xdr);
-      toast.success(`Screening submitted: ${decisionStatus}`);
+      toast.success(t('submitResult'));
       await loadQueues();
-      const [r, h] = await Promise.all([getComplianceRecord(address), getComplianceHistory(address)]);
+      const [r, h] = await Promise.all([
+        getComplianceRecord(address),
+        getComplianceHistory(address),
+      ]);
       setRecord(r);
       setHistory(h);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Transaction failed');
+      toast.error(err instanceof Error ? err.message : t('transactionFailed'));
     } finally {
       setTxLoading(false);
     }
@@ -123,27 +126,25 @@ export default function AdminCompliancePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold text-white">Compliance</h1>
-        <p className="text-sm text-brand-muted mt-1">
-          Sanctions screening queue, decisions, and monitoring alerts (#867).
-        </p>
+        <h1 className="text-2xl font-semibold text-white">{t('title')}</h1>
+        <p className="text-sm text-brand-muted mt-1">{t('description')}</p>
       </div>
 
       {loading ? (
         <Skeleton className="h-40 w-full" />
       ) : (
         <div className="grid md:grid-cols-2 gap-6">
-          <QueueCard title="Pending review" addresses={pending} onPick={setDecisionAddress} />
-          <QueueCard title="Flagged / blocked" addresses={flagged} onPick={setDecisionAddress} />
+          <QueueCard title={t('pendingReview')} addresses={pending} onPick={setDecisionAddress} />
+          <QueueCard title={t('flaggedBlocked')} addresses={flagged} onPick={setDecisionAddress} />
         </div>
       )}
 
       <section className="rounded-xl border border-brand-border bg-brand-card p-5 space-y-4">
-        <h2 className="text-lg font-medium text-white">Lookup address</h2>
+        <h2 className="text-lg font-medium text-white">{t('lookupAddress')}</h2>
         <form onSubmit={handleLookup} className="flex flex-col sm:flex-row gap-3">
           <input
             className="flex-1 rounded-lg bg-brand-bg border border-brand-border px-3 py-2 text-sm text-white"
-            placeholder="G..."
+            placeholder={t('addressPlaceholder')}
             value={lookupAddress}
             onChange={(e) => setLookupAddress(e.target.value)}
           />
@@ -151,19 +152,22 @@ export default function AdminCompliancePage() {
             type="submit"
             className="rounded-lg bg-brand-accent px-4 py-2 text-sm font-medium text-black"
           >
-            Lookup
+            {t('lookup')}
           </button>
         </form>
         {record && (
           <div className="text-sm text-brand-muted space-y-1">
             <p>
-              Status: <span className="text-white">{record.status}</span> · Risk:{' '}
-              <span className="text-white">{record.riskTier}</span> · Reason #{record.reasonCode}
+              {t('statusLabel', {
+                status: record.status,
+                risk: record.riskTier,
+                reason: record.reasonCode,
+              })}
             </p>
             <p>
-              Screened at {record.screenedAt || '—'} · Expires {record.expiresAt || '—'}
+              {t('screenedAt', { at: record.screenedAt || '—', expires: record.expiresAt || '—' })}
             </p>
-            <p className="truncate">By {record.screenedBy || '—'}</p>
+            <p className="truncate">{t('screenedBy', { screener: record.screenedBy || '—' })}</p>
           </div>
         )}
         {history.length > 0 && (
@@ -171,11 +175,11 @@ export default function AdminCompliancePage() {
             <table className="w-full text-left text-sm">
               <thead className="text-brand-muted">
                 <tr>
-                  <th className="py-1 pr-3">Status</th>
-                  <th className="py-1 pr-3">Reason</th>
-                  <th className="py-1 pr-3">Tier</th>
-                  <th className="py-1 pr-3">At</th>
-                  <th className="py-1">Notes</th>
+                  <th className="py-1 pr-3">{t('tableStatus')}</th>
+                  <th className="py-1 pr-3">{t('tableReason')}</th>
+                  <th className="py-1 pr-3">{t('tableTier')}</th>
+                  <th className="py-1 pr-3">{t('tableAt')}</th>
+                  <th className="py-1">{t('tableNotes')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -195,11 +199,11 @@ export default function AdminCompliancePage() {
       </section>
 
       <section className="rounded-xl border border-brand-border bg-brand-card p-5 space-y-4">
-        <h2 className="text-lg font-medium text-white">Screening decision</h2>
+        <h2 className="text-lg font-medium text-white">{t('screeningDecision')}</h2>
         <form onSubmit={handleDecision} className="grid sm:grid-cols-2 gap-3">
           <input
             className="sm:col-span-2 rounded-lg bg-brand-bg border border-brand-border px-3 py-2 text-sm text-white"
-            placeholder="Target address G..."
+            placeholder={t('targetAddress')}
             value={decisionAddress}
             onChange={(e) => setDecisionAddress(e.target.value)}
             required
@@ -209,29 +213,29 @@ export default function AdminCompliancePage() {
             value={decisionStatus}
             onChange={(e) => setDecisionStatus(e.target.value as ComplianceStatusUi)}
           >
-            <option value="Cleared">Cleared</option>
-            <option value="Flagged">Flagged</option>
-            <option value="Blocked">Blocked</option>
-            <option value="PendingReview">Pending review</option>
+            <option value="Cleared">{t('cleared')}</option>
+            <option value="Flagged">{t('flagged')}</option>
+            <option value="Blocked">{t('blocked')}</option>
+            <option value="PendingReview">{t('pendingReviewOption')}</option>
           </select>
           <select
             className="rounded-lg bg-brand-bg border border-brand-border px-3 py-2 text-sm text-white"
             value={decisionTier}
             onChange={(e) => setDecisionTier(e.target.value as RiskTierUi)}
           >
-            <option value="Low">Low</option>
-            <option value="Medium">Medium</option>
-            <option value="High">High</option>
+            <option value="Low">{t('low')}</option>
+            <option value="Medium">{t('medium')}</option>
+            <option value="High">{t('high')}</option>
           </select>
           <input
             className="rounded-lg bg-brand-bg border border-brand-border px-3 py-2 text-sm text-white"
-            placeholder="Reason code"
+            placeholder={t('reasonCode')}
             value={decisionReason}
             onChange={(e) => setDecisionReason(e.target.value)}
           />
           <input
             className="rounded-lg bg-brand-bg border border-brand-border px-3 py-2 text-sm text-white"
-            placeholder="Notes hash (off-chain ref)"
+            placeholder={t('notesHash')}
             value={decisionNotes}
             onChange={(e) => setDecisionNotes(e.target.value)}
           />
@@ -240,15 +244,15 @@ export default function AdminCompliancePage() {
             disabled={txLoading || !wallet.address}
             className="sm:col-span-2 rounded-lg bg-brand-accent px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
           >
-            {txLoading ? 'Submitting…' : 'Submit screening result'}
+            {txLoading ? t('submitting') : t('submitResult')}
           </button>
         </form>
       </section>
 
       <section className="rounded-xl border border-brand-border bg-brand-card p-5 space-y-3">
-        <h2 className="text-lg font-medium text-white">Monitoring alerts</h2>
+        <h2 className="text-lg font-medium text-white">{t('monitoringAlerts')}</h2>
         {alerts.length === 0 ? (
-          <p className="text-sm text-brand-muted">No alerts from compliance-service.</p>
+          <p className="text-sm text-brand-muted">{t('noAlerts')}</p>
         ) : (
           <ul className="space-y-2 text-sm">
             {alerts.map((a) => (
@@ -277,14 +281,14 @@ function QueueCard({
   addresses: string[];
   onPick: (a: string) => void;
 }) {
+  const t = useTranslations('Admin.compliance');
   return (
     <div className="rounded-xl border border-brand-border bg-brand-card p-5">
       <h2 className="text-lg font-medium text-white mb-3">
-        {title}{' '}
-        <span className="text-brand-muted text-sm font-normal">({addresses.length})</span>
+        {title} <span className="text-brand-muted text-sm font-normal">({addresses.length})</span>
       </h2>
       {addresses.length === 0 ? (
-        <p className="text-sm text-brand-muted">Empty</p>
+        <p className="text-sm text-brand-muted">{t('empty')}</p>
       ) : (
         <ul className="space-y-2">
           {addresses.map((a) => (
