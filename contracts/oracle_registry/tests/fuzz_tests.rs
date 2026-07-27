@@ -46,6 +46,10 @@ impl DummyInvoice {
             .get(&Symbol::new(&env, "calls"))
             .unwrap_or_else(|| Vec::new(&env))
     }
+
+    pub fn get_invoice_verification_state(_env: Env, _id: u64) -> (bool, i128) {
+        (true, 0)
+    }
 }
 
 const QUORUM_BPS: i128 = 6_600;
