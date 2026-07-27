@@ -12,9 +12,9 @@ import {
   buildCommitToInvoiceTx,
   buildWithdrawCoFundingCommitmentTx,
   buildTransferCoFundShareTx,
-  submitTx,
 } from '@/lib/contracts';
 import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
+import { useTrackTransaction } from '@/hooks/useTrackTransaction';
 
 const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -26,6 +26,7 @@ const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
 export default function CoFundingPage() {
   const { wallet } = useStore();
   const [txLoading, setTxLoading] = useState(false);
+  const trackedSubmit = useTrackTransaction('Co-Funding');
 
   const [commitAmounts, setCommitAmounts] = useState<Record<number, string>>({});
 
@@ -38,14 +39,15 @@ export default function CoFundingPage() {
   const [transferTo, setTransferTo] = useState('');
   const [transferBps, setTransferBps] = useState('10000');
 
-  async function signAndSubmit(xdr: string) {
+  async function signAndSubmit(xdr: string, label?: string) {
     const freighter = await import('@stellar/freighter-api');
     const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
       networkPassphrase: 'Test SDF Network ; September 2015',
       address: wallet.address!,
     });
     if (signError) throw new Error(signError.message || 'Signing rejected.');
-    await submitTx(signedTxXdr);
+    const submitter = label ? useTrackTransaction(label) : trackedSubmit;
+    await submitter(signedTxXdr);
   }
 
   async function handleCommit(round: CoFundingRound) {
@@ -64,7 +66,7 @@ export default function CoFundingPage() {
         invoiceId: round.invoiceId,
         amount: toStroops(amountNum),
       });
-      await signAndSubmit(xdr);
+      await signAndSubmit(xdr, `Commit to #${round.invoiceId}`);
       toast.success(`Committed to invoice #${round.invoiceId}.`);
       setCommitAmounts((prev) => ({ ...prev, [round.invoiceId]: '' }));
       mutate('co-funding-rounds');
@@ -82,7 +84,7 @@ export default function CoFundingPage() {
     try {
       const investor = parseStellarAddress(wallet.address);
       const xdr = await buildWithdrawCoFundingCommitmentTx({ investor, invoiceId });
-      await signAndSubmit(xdr);
+      await signAndSubmit(xdr, `Withdraw from #${invoiceId}`);
       toast.success(`Withdrew commitment from invoice #${invoiceId}.`);
       mutate('co-funding-rounds');
       if (wallet.address) mutate(['co-funding-positions', wallet.address]);
@@ -114,7 +116,7 @@ export default function CoFundingPage() {
         to,
         bps,
       });
-      await signAndSubmit(xdr);
+      await signAndSubmit(xdr, `Transfer #${transferTarget}`);
       toast.success(`Transferred ${(bps / 100).toFixed(2)}% of invoice #${transferTarget}.`);
       setTransferTarget(null);
       setTransferTo('');
