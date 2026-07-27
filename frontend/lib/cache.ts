@@ -10,6 +10,9 @@ import {
   getPoolTokenTotals,
   getInvestorPosition,
   getFundedInvoice,
+  listCoFundingRounds,
+  getCoFundingRound,
+  getInvestorCoFundPositions,
   buildDepositTx,
   buildWithdrawTx,
   buildCommitToInvoiceTx,
@@ -29,6 +32,7 @@ import type {
   FundedInvoice,
   InvoiceMetadata,
   ReferralStats,
+  CoFundingRound,
 } from './types';
 
 type SWRCacheEntry = {
@@ -95,6 +99,18 @@ export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
     dedupingInterval: CACHE_TTL.creditScore,
+  },
+  coFundingRounds: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  coFundingPositions: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
   },
 };
 
@@ -227,6 +243,35 @@ export function useReferralStats(referrer: string | null) {
     () => fetcher(() => getReferralStats(referrer!)),
     {
       ...CACHE_CONFIG.referral,
+    },
+  );
+}
+
+// ---- Co-Funding Rounds Cache ----
+
+export function useCoFundingRounds() {
+  return useSWR<CoFundingRound[], ContractError>(
+    'co-funding-rounds',
+    () =>
+      fetcher(async () => {
+        const ids = await listCoFundingRounds();
+        const rounds = await Promise.all(ids.map((id) => getCoFundingRound(id)));
+        return rounds.filter((r): r is CoFundingRound => r !== null);
+      }),
+    {
+      ...CACHE_CONFIG.coFundingRounds,
+    },
+  );
+}
+
+// ---- Co-Funding Positions Cache ----
+
+export function useCoFundingPositions(investor: string | null) {
+  return useSWR<Array<{ invoiceId: number; bps: number }>, ContractError>(
+    investor ? ['co-funding-positions', investor] : null,
+    () => fetcher(() => getInvestorCoFundPositions(investor!)),
+    {
+      ...CACHE_CONFIG.coFundingPositions,
     },
   );
 }

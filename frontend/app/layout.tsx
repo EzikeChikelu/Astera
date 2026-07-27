@@ -3,6 +3,7 @@ import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
 import SWRProvider from '@/components/SWRProvider';
+import { ClientShell } from '@/components/ClientShell';
 import { Toaster } from 'react-hot-toast';
 import { assertEnvValid } from '@/lib/env';
 
@@ -79,11 +80,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <NextIntlClientProvider messages={messages}>
           <SWRProvider>
             <ThemeProvider>
-              <Navbar />
-              <main id="main-content" role="main">
-                {children}
-              </main>
-              <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
+              <ClientShell>
+                <Navbar />
+                <main id="main-content" role="main">
+                  {children}
+                </main>
+                <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
+              </ClientShell>
             </ThemeProvider>
           </SWRProvider>
         </NextIntlClientProvider>
