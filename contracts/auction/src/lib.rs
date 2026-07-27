@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Map, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Vec};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_DISCOUNT_BPS: u32 = 5_000; // 50% max discount
@@ -113,7 +111,13 @@ pub fn clear_auction(
         let bid = bids.get(i).unwrap();
         let cs = credit_scores.get(bid.sme.clone()).unwrap_or(0);
         let score = composite_score(bid.max_discount_bps, cs);
-        scored.push_back((score, bid.max_discount_bps, bid.invoice_id, bid.principal, bid.sme));
+        scored.push_back((
+            score,
+            bid.max_discount_bps,
+            bid.invoice_id,
+            bid.principal,
+            bid.sme,
+        ));
     }
 
     // Sort descending by score, tie-break by invoice_id ascending
@@ -124,8 +128,7 @@ pub fn clear_auction(
         let mut best = scored.get(0).unwrap();
         for j in 1..scored.len() {
             let current = scored.get(j).unwrap();
-            let is_better = current.0 > best.0
-                || (current.0 == best.0 && current.2 < best.2);
+            let is_better = current.0 > best.0 || (current.0 == best.0 && current.2 < best.2);
             if is_better {
                 best_idx = j;
                 best = current;
@@ -305,7 +308,8 @@ mod tests {
         let result = clear_auction(bids, 2000, scores);
         assert_eq!(result.len(), 2);
         assert_eq!(
-            result.get(0).unwrap().invoice_id, 2,
+            result.get(0).unwrap().invoice_id,
+            2,
             "High-score SME should be ranked first"
         );
     }
@@ -327,7 +331,8 @@ mod tests {
         let result = clear_auction(bids, 2000, scores);
         assert_eq!(result.len(), 2);
         assert_eq!(
-            result.get(0).unwrap().invoice_id, 5,
+            result.get(0).unwrap().invoice_id,
+            5,
             "Lower invoice_id should win tie-break"
         );
     }

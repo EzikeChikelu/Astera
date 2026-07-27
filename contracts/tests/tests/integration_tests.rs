@@ -456,7 +456,10 @@ fn test_full_borrower_lifecycle() {
         pool_client.available_liquidity(&usdc_id),
         pool_available_before_funding - principal
     );
-    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, principal);
+    assert_eq!(
+        pool_client.get_token_totals(&usdc_id).total_deployed,
+        principal
+    );
 
     // Step 4: time passes but the due date hasn't arrived — still Funded.
     env.ledger().with_mut(|l| l.timestamp = due_date - 86_400);

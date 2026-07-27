@@ -1149,17 +1149,13 @@ fn record_rate_snapshot(env: &Env, token: &Address) {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), len), &snapshot);
-        env.storage()
-            .instance()
-            .set(&bounds_key, &(len + 1, start));
+        env.storage().instance().set(&bounds_key, &(len + 1, start));
     } else {
         env.storage()
             .persistent()
             .set(&DataKey::RateRecord(token.clone(), start), &snapshot);
         let new_start = (start + 1) % MAX_RATE_HISTORY;
-        env.storage()
-            .instance()
-            .set(&bounds_key, &(len, new_start));
+        env.storage().instance().set(&bounds_key, &(len, new_start));
     }
 
     // Indexed off-chain into a time-series table for the rate-history API.
@@ -1745,7 +1741,13 @@ fn fund_invoice_request(
     };
     // #869: resolve factoring fee at funding time; auction contract may
     // override this with a discount via fund_invoice_with_discount.
-    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone(), &request.token)?;
+    let factoring_fee = resolve_factoring_fee(
+        env,
+        config,
+        request.principal,
+        request.sme.clone(),
+        &request.token,
+    )?;
     let funded_key = DataKey::FundedInvoice(request.invoice_id);
     let is_partial = env.storage().persistent().has(&funded_key);
     if is_partial {
@@ -3552,7 +3554,13 @@ impl FundingPool {
             due_date,
             token,
         };
-        fund_invoice_request(&env, &discounted_config, &accepted_tokens, &mut stats, &request)?;
+        fund_invoice_request(
+            &env,
+            &discounted_config,
+            &accepted_tokens,
+            &mut stats,
+            &request,
+        )?;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         Self::non_reentrant_end(&env);
