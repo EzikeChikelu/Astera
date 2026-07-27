@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslations } from 'next-intl';
 import GlossaryTerm from '@/components/GlossaryTerm';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -94,6 +95,7 @@ function SuggestionBanner({
   onCleanup,
   loading,
 }: SuggestionBannerProps) {
+  const t = useTranslations('Admin.monitoring');
   if (cleanableCount === 0) return null;
 
   return (
@@ -101,11 +103,7 @@ function SuggestionBanner({
       <div className="flex items-center gap-3">
         <span className="text-lg">🧹</span>
         <p className="text-sm text-amber-300">
-          <span className="font-bold">
-            {cleanableCount} expired invoice{cleanableCount !== 1 ? 's' : ''}
-          </span>{' '}
-          can be cleaned up to save ~
-          <span className="font-bold font-mono">{estimatedSavingsXlm.toFixed(4)} XLM/month</span>
+          {t('cleanableBanner', { count: cleanableCount, xlm: estimatedSavingsXlm.toFixed(4) })}
         </p>
       </div>
       <button
@@ -113,7 +111,7 @@ function SuggestionBanner({
         disabled={loading}
         className="shrink-0 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
       >
-        {loading ? 'Cleaning…' : 'Run Cleanup'}
+        {loading ? t('cleaning') : t('runCleanup')}
       </button>
     </div>
   );
@@ -127,15 +125,18 @@ interface CleanupResult {
 }
 
 function CleanupResultToast({ result }: { result: CleanupResult | null }) {
+  const t = useTranslations('Admin.monitoring');
   if (!result) return null;
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-300">
       <span>✓</span>
       <span>
-        Cleanup complete — removed <span className="font-bold font-mono">{result.removed}</span>{' '}
-        entr
-        {result.removed !== 1 ? 'ies' : 'y'} at {result.timestamp.toLocaleTimeString()}
+        {t('cleanupResult', {
+          count: result.removed,
+          y: result.removed !== 1 ? t('entryPlural') : t('entrySingular'),
+          time: result.timestamp.toLocaleTimeString(),
+        })}
       </span>
     </div>
   );
@@ -149,6 +150,7 @@ interface ServiceHealthState {
 }
 
 export default function StorageMonitoringPage() {
+  const t = useTranslations('Admin.monitoring');
   const [health, setHealth] = useState<StorageHealth | null>(null);
   const [services, setServices] = useState<ServiceHealthState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -188,7 +190,7 @@ export default function StorageMonitoringPage() {
         last_fetched: new Date(),
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch storage stats');
+      setError(err instanceof Error ? err.message : t('fetchError'));
     } finally {
       setLoading(false);
     }
@@ -229,7 +231,7 @@ export default function StorageMonitoringPage() {
       // Refresh stats after cleanup
       await fetchHealth();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cleanup failed');
+      setError(err instanceof Error ? err.message : t('cleanupFailed'));
     } finally {
       setCleanupLoading(false);
     }
@@ -262,15 +264,15 @@ export default function StorageMonitoringPage() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">
-              Astera Admin
+              {t('asteraAdmin')}
             </p>
-            <h1 className="text-lg font-black tracking-tight text-slate-100">Storage Health</h1>
+            <h1 className="text-lg font-black tracking-tight text-slate-100">{t('title')}</h1>
           </div>
 
           <div className="flex items-center gap-3">
             {health && (
               <span className="text-[11px] text-slate-500 font-mono">
-                Updated {health.last_fetched.toLocaleTimeString()}
+                {t('updated', { time: health.last_fetched.toLocaleTimeString() })}
               </span>
             )}
             <button
@@ -278,7 +280,7 @@ export default function StorageMonitoringPage() {
               disabled={loading}
               className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-700 disabled:opacity-50 transition-all duration-200"
             >
-              {loading ? 'Refreshing…' : '↻ Refresh'}
+              {loading ? t('refreshing') : t('refresh')}
             </button>
           </div>
         </div>
@@ -309,7 +311,7 @@ export default function StorageMonitoringPage() {
         <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-[11px] font-black uppercase tracking-widest text-slate-400">
-              Off-Chain Services Health
+              {t('servicesHealth')}
             </h2>
             {services && (
               <span
@@ -321,16 +323,16 @@ export default function StorageMonitoringPage() {
                       : 'text-rose-400 border-rose-500/30 bg-rose-500/10'
                 }`}
               >
-                Overall: {services.status.toUpperCase()}
+                {t('overall', { status: services.status.toUpperCase() })}
               </span>
             )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <StatCard
-              label="Stellar RPC"
-              value={services?.checks?.stellar_rpc?.status.toUpperCase() ?? 'UNKNOWN'}
-              sub={services?.checks?.stellar_rpc?.detail ?? 'Checking...'}
+              label={t('stellarRpc')}
+              value={services?.checks?.stellar_rpc?.status.toUpperCase() ?? t('unknown')}
+              sub={services?.checks?.stellar_rpc?.detail ?? t('checking')}
               accent={
                 services?.checks?.stellar_rpc?.status === 'ok'
                   ? 'green'
@@ -340,9 +342,9 @@ export default function StorageMonitoringPage() {
               }
             />
             <StatCard
-              label="Oracle Service"
-              value={services?.checks?.oracle_service?.status.toUpperCase() ?? 'UNKNOWN'}
-              sub={services?.checks?.oracle_service?.detail ?? 'Checking...'}
+              label={t('oracleService')}
+              value={services?.checks?.oracle_service?.status.toUpperCase() ?? t('unknown')}
+              sub={services?.checks?.oracle_service?.detail ?? t('checking')}
               accent={
                 services?.checks?.oracle_service?.status === 'ok'
                   ? 'green'
@@ -352,9 +354,9 @@ export default function StorageMonitoringPage() {
               }
             />
             <StatCard
-              label="Compliance Service"
-              value={services?.checks?.compliance_service?.status.toUpperCase() ?? 'UNKNOWN'}
-              sub={services?.checks?.compliance_service?.detail ?? 'Checking...'}
+              label={t('complianceService')}
+              value={services?.checks?.compliance_service?.status.toUpperCase() ?? t('unknown')}
+              sub={services?.checks?.compliance_service?.detail ?? t('checking')}
               accent={
                 services?.checks?.compliance_service?.status === 'ok'
                   ? 'green'
@@ -379,26 +381,26 @@ export default function StorageMonitoringPage() {
         ) : health ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
-              label="Active Entries"
+              label={t('activeEntries')}
               value={health.stats.active_invoices.toLocaleString()}
-              sub={`${utilizationPct}% of total`}
+              sub={t('ofTotal', { pct: utilizationPct })}
               accent="blue"
             />
             <StatCard
-              label="Total Created"
+              label={t('totalCreated')}
               value={health.stats.total_invoices.toLocaleString()}
               accent="blue"
             />
             <StatCard
-              label="Cleaned Entries"
+              label={t('cleanedEntries')}
               value={health.stats.cleaned_invoices.toLocaleString()}
-              sub="cumulative"
+              sub={t('cumulative')}
               accent="green"
             />
             <StatCard
-              label="Cleanable Now"
+              label={t('cleanableNow')}
               value={health.cleanable_ids.length.toLocaleString()}
-              sub="terminal, not yet removed"
+              sub={t('terminalNotRemoved')}
               accent={health.cleanable_ids.length > 0 ? 'amber' : 'green'}
             />
           </div>
@@ -408,40 +410,40 @@ export default function StorageMonitoringPage() {
         {health && (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-6 space-y-4">
             <h2 className="text-[11px] font-black uppercase tracking-widest text-slate-400">
-              Estimated Monthly Storage Cost
+              {t('estimatedCost')}
             </h2>
 
             <div className="flex flex-wrap items-end gap-6">
               <div>
                 <p className="text-4xl font-black font-mono text-sky-400 tracking-tight">
                   {costXlm.toFixed(4)}
-                  <span className="text-lg text-slate-500 ml-2">XLM</span>
+                  <span className="text-lg text-slate-500 ml-2">{t('xlm')}</span>
                 </p>
                 <p className="text-sm text-slate-500 mt-1 font-mono">
-                  {costUsdc !== null ? `≈ $${costUsdc.toFixed(4)} USDC` : '≈ -- USDC'}
+                  {costUsdc !== null
+                    ? t('usdcEstimate', { cost: costUsdc.toFixed(4) })
+                    : t('usdcEstimateUnknown')}
                 </p>
               </div>
 
               <div className="text-xs text-slate-600 font-mono leading-relaxed">
-                <p>{health.stats.active_invoices.toLocaleString()} active entries</p>
                 <p>
-                  × 1 <GlossaryTerm id="stroops">stroop</GlossaryTerm> /{' '}
-                  <GlossaryTerm id="ledger" /> / entry
+                  {t('activeEntriesCount', {
+                    count: health.stats.active_invoices.toLocaleString(),
+                  })}
                 </p>
-                <p>
-                  × {LEDGERS_PER_MONTH.toLocaleString()}{' '}
-                  <GlossaryTerm id="ledger">ledgers</GlossaryTerm> / month
-                </p>
+                <p>{t('stroopPerLedger')}</p>
+                <p>{t('ledgersPerMonth', { count: LEDGERS_PER_MONTH.toLocaleString() })}</p>
                 <p className="text-slate-500 mt-1">
-                  ÷ {STROOPS_PER_XLM.toLocaleString()} <GlossaryTerm id="stroops" /> / XLM
+                  {t('stroopsPerXlm', { count: STROOPS_PER_XLM.toLocaleString() })}
                 </p>
               </div>
             </div>
 
             <p className="text-[11px] text-slate-600">
-              Approximation — actual costs vary with entry size,{' '}
-              <GlossaryTerm id="ttl">TTL</GlossaryTerm> settings, and network fee schedules.
-              XLM/USDC rate: ${XLM_USDC_RATE !== null ? `$${XLM_USDC_RATE.toFixed(2)}` : '--'}.
+              {t('costDisclaimer', {
+                rate: XLM_USDC_RATE !== null ? `$${XLM_USDC_RATE.toFixed(2)}` : '--',
+              })}
             </p>
           </div>
         )}
@@ -451,21 +453,16 @@ export default function StorageMonitoringPage() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-[11px] font-black uppercase tracking-widest text-slate-400">
-                Manual Cleanup
+                {t('manualCleanup')}
               </h2>
               {health.cleanable_ids.length > 0 && (
                 <span className="text-[11px] font-mono text-slate-500">
-                  {Math.ceil(health.cleanable_ids.length / 50)} batch
-                  {Math.ceil(health.cleanable_ids.length / 50) !== 1 ? 'es' : ''} of max 50
+                  {t('cleanupBatches', { count: Math.ceil(health.cleanable_ids.length / 50) })}
                 </span>
               )}
             </div>
 
-            <p className="text-sm text-slate-400 leading-relaxed">
-              Removes terminal invoice entries (Paid, Defaulted, Cancelled, Expired) from persistent
-              storage. Active invoices are never touched. Callable by anyone — no admin auth
-              required.
-            </p>
+            <p className="text-sm text-slate-400 leading-relaxed">{t('cleanupDescription')}</p>
 
             <div className="flex flex-wrap gap-3">
               <button
@@ -476,11 +473,11 @@ export default function StorageMonitoringPage() {
                 {cleanupLoading ? (
                   <>
                     <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Cleaning…
+                    {t('cleaning')}
                   </>
                 ) : (
                   <>
-                    🧹 Run Cleanup
+                    {t('runCleanup')}
                     {health.cleanable_ids.length > 0 && ` (${health.cleanable_ids.length})`}
                   </>
                 )}
@@ -488,7 +485,7 @@ export default function StorageMonitoringPage() {
 
               {health.cleanable_ids.length === 0 && (
                 <span className="self-center text-sm text-emerald-400 font-mono">
-                  ✓ Storage is clean
+                  {t('storageClean')}
                 </span>
               )}
             </div>

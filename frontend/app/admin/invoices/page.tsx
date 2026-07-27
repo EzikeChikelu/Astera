@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { TableRowSkeleton } from '@/components/Skeleton';
@@ -35,6 +36,7 @@ type BatchResult = {
 };
 
 export default function AdminInvoicesPage() {
+  const t = useTranslations('Admin.invoices');
   const { wallet } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,7 +94,7 @@ export default function AdminInvoicesPage() {
       setInvoices(pending);
       setScannedCount(Math.min(PAGE_SIZE, count));
     } catch (e) {
-      toast.error(`Failed to load ${currentStatusFilter.toLowerCase()} invoices.`);
+      toast.error(t('failedTitle', { status: currentStatusFilter.toLowerCase() }));
       console.error(e);
     } finally {
       setLoading(false);
@@ -156,7 +158,7 @@ export default function AdminInvoicesPage() {
 
   async function handleBatchFunding() {
     if (!wallet.address) {
-      toast.error('Admin wallet not connected.');
+      toast.error(t('adminNotConnected'));
       return;
     }
 
@@ -202,7 +204,7 @@ export default function AdminInvoicesPage() {
           await submitTx(signedTxXdr);
           results[invoice.id] = { status: 'success' };
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
+          const message = error instanceof Error ? error.message : t('unknownError');
           results[invoice.id] = { status: 'failed', message };
         }
 
@@ -248,10 +250,10 @@ export default function AdminInvoicesPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      toast.success(`Invoice #${invoice.id} has been approved for co-funding.`);
+      toast.success(t('approvedInvoice', { id: invoice.id }));
       await loadInvoices();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to approve invoice.';
+      const msg = e instanceof Error ? e.message : t('approveFailed');
       toast.error(msg);
       console.error(e);
     } finally {
@@ -285,26 +287,24 @@ export default function AdminInvoicesPage() {
     }
   > = {
     approve: {
-      title: (id: number) => `Approve Invoice #${id}`,
+      title: (id: number) => t('approveModalTitle', { id }),
       description: (inv: Invoice) =>
-        `Approve and fund Invoice #${inv.id} for ${formatUSDC(inv.amount)}. This will initiate co-funding from the liquidity pool.`,
+        t('approveModalDesc', { id: inv.id, amount: formatUSDC(inv.amount) }),
       variant: 'default',
-      confirmLabel: 'Approve & Fund',
+      confirmLabel: t('approveConfirm'),
     },
     dispute: {
-      title: (id: number) => `Mark Invoice #${id} as Disputed`,
-      description: (inv: Invoice) =>
-        `Mark Invoice #${inv.id} as disputed. This will pause all funding activities and flag the invoice for manual review.`,
+      title: (id: number) => t('disputeModalTitle', { id }),
+      description: (inv: Invoice) => t('disputeModalDesc', { id: inv.id }),
       variant: 'destructive',
       confirmPhrase: 'DISPUTE',
-      confirmLabel: 'Mark as Disputed',
+      confirmLabel: t('disputeConfirm'),
     },
     verify: {
-      title: (id: number) => `Verify Invoice #${id}`,
-      description: (inv: Invoice) =>
-        `Verify Invoice #${inv.id} as authentic. This confirms the invoice details and enables funding.`,
+      title: (id: number) => t('verifyModalTitle', { id }),
+      description: (inv: Invoice) => t('verifyModalDesc', { id: inv.id }),
       variant: 'default',
-      confirmLabel: 'Verify Invoice',
+      confirmLabel: t('verifyConfirm'),
     },
   };
 
@@ -315,12 +315,10 @@ export default function AdminInvoicesPage() {
       <div className="space-y-4">
         <div>
           <h1 className="text-3xl font-bold mb-2">
-            {activeTab === 'funding' ? 'Verified Invoices Queue' : 'Pending Invoices'}
+            {activeTab === 'funding' ? t('titleFunding') : t('titlePending')}
           </h1>
           <p className="text-brand-muted text-sm">
-            {activeTab === 'funding'
-              ? 'Select verified invoices ready for pool deployment and fund them in one flow.'
-              : 'Review and approve new invoice applications for co-funding.'}
+            {activeTab === 'funding' ? t('descFunding') : t('descPending')}
           </p>
         </div>
 
@@ -334,7 +332,7 @@ export default function AdminInvoicesPage() {
                 : 'bg-brand-card border border-brand-border text-brand-muted hover:text-white'
             }`}
           >
-            Funding Queue
+            {t('tabFunding')}
           </button>
           <button
             type="button"
@@ -345,7 +343,7 @@ export default function AdminInvoicesPage() {
                 : 'bg-brand-card border border-brand-border text-brand-muted hover:text-white'
             }`}
           >
-            Pending Invoices
+            {t('tabPending')}
           </button>
         </div>
       </div>
@@ -354,8 +352,10 @@ export default function AdminInvoicesPage() {
         <div className="flex flex-col gap-3 rounded-2xl border border-brand-border bg-brand-dark/40 p-4 text-sm text-white">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="font-medium">
-              Deploying {formatUSDC(selectedTotal)}{' '}
-              {process.env.NEXT_PUBLIC_USDC_TOKEN_ID ? 'USDC' : ''}
+              {t('deploying', {
+                amount: formatUSDC(selectedTotal),
+                token: process.env.NEXT_PUBLIC_USDC_TOKEN_ID ? 'USDC' : '',
+              })}
             </div>
             <div className="flex flex-wrap gap-2 items-center">
               <button
@@ -364,23 +364,23 @@ export default function AdminInvoicesPage() {
                 disabled={!canStartBatch || batchRunning}
                 className="px-4 py-2 bg-brand-gold text-brand-dark rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
               >
-                Fund Selected ({selectedInvoiceIds.length})
+                {t('fundSelected', { count: selectedInvoiceIds.length })}
               </button>
               <span className="text-brand-muted">
-                Pool has {availableLiquidity !== null ? formatUSDC(availableLiquidity) : 'unknown'}{' '}
-                available —{' '}
-                {availableLiquidity === null
-                  ? 'unable to verify'
-                  : poolHasLiquidity
-                    ? 'sufficient'
-                    : 'insufficient'}
+                {t('poolAvailable', {
+                  amount: availableLiquidity !== null ? formatUSDC(availableLiquidity) : 'unknown',
+                  status:
+                    availableLiquidity === null
+                      ? t('unableToVerify')
+                      : poolHasLiquidity
+                        ? t('sufficient')
+                        : t('insufficient'),
+                })}
               </span>
             </div>
           </div>
           {availableLiquidity !== null && !poolHasLiquidity && (
-            <div className="text-yellow-300">
-              Not enough pool liquidity for the selected invoices.
-            </div>
+            <div className="text-yellow-300">{t('notEnoughLiquidity')}</div>
           )}
         </div>
       )}
@@ -396,25 +396,25 @@ export default function AdminInvoicesPage() {
                       type="checkbox"
                       checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
                       onChange={toggleSelectAll}
-                      aria-label="Select all invoices"
+                      aria-label={t('selectAll')}
                       className="h-4 w-4 text-brand-gold accent-brand-gold"
                     />
                   </th>
                 )}
                 <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-                  ID
+                  {t('tableId')}
                 </th>
                 <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-                  Applicant
+                  {t('tableApplicant')}
                 </th>
                 <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-                  Amount
+                  {t('tableAmount')}
                 </th>
                 <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-                  Due Date
+                  {t('tableDueDate')}
                 </th>
                 <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-                  Action
+                  {t('tableAction')}
                 </th>
               </tr>
             </thead>
@@ -427,9 +427,7 @@ export default function AdminInvoicesPage() {
                     colSpan={activeTab === 'funding' ? 6 : 5}
                     className="px-6 py-12 text-center text-brand-muted italic"
                   >
-                    {activeTab === 'funding'
-                      ? 'No verified invoices are ready for funding.'
-                      : 'No pending invoice applications found.'}
+                    {activeTab === 'funding' ? t('noFundingInvoices') : t('noPendingInvoices')}
                   </td>
                 </tr>
               ) : (
@@ -442,7 +440,7 @@ export default function AdminInvoicesPage() {
                           checked={selectedInvoiceIds.includes(inv.id)}
                           onChange={() => toggleInvoiceSelection(inv.id)}
                           className="h-4 w-4 text-brand-gold accent-brand-gold"
-                          aria-label={`Select invoice ${inv.id}`}
+                          aria-label={t('selectInvoice', { id: inv.id })}
                         />
                       </td>
                     )}
@@ -459,7 +457,7 @@ export default function AdminInvoicesPage() {
                       {formatUSDC(inv.amount)}
                       {availableLiquidity !== null && availableLiquidity < inv.amount && (
                         <span className="ml-2 inline-flex items-center rounded-full bg-yellow-500/20 px-2 py-0.5 text-[10px] font-semibold text-yellow-300">
-                          Low Liquidity
+                          {t('lowLiquidity')}
                         </span>
                       )}
                     </td>
@@ -467,7 +465,9 @@ export default function AdminInvoicesPage() {
                       <div className="flex flex-col">
                         <span>{formatDate(inv.dueDate)}</span>
                         <span className="text-xs text-brand-muted">
-                          {Math.ceil((inv.dueDate * 1000 - Date.now()) / 86400000)} days remaining
+                          {t('daysRemaining', {
+                            days: Math.ceil((inv.dueDate * 1000 - Date.now()) / 86400000),
+                          })}
                         </span>
                       </div>
                     </td>
@@ -477,7 +477,7 @@ export default function AdminInvoicesPage() {
                         disabled={actionLoading !== null}
                         className="px-4 py-2 bg-brand-gold text-brand-dark text-xs font-bold rounded-lg hover:bg-brand-amber transition-colors disabled:opacity-50 whitespace-nowrap"
                       >
-                        {actionLoading === inv.id ? 'Processing...' : 'Approve & Fund'}
+                        {actionLoading === inv.id ? t('processing') : t('approve')}
                       </button>
                     </td>
                   </tr>
@@ -499,14 +499,14 @@ export default function AdminInvoicesPage() {
             {loadingMore ? (
               <span className="flex items-center justify-center gap-2">
                 <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
-                Loading more...
+                {t('loadingMore')}
               </span>
             ) : (
-              'Load more invoices'
+              t('loadMore')
             )}
           </button>
           <p className="text-xs text-brand-muted mt-2">
-            Scanned {scannedCount} of {totalCount} on-chain invoices
+            {t('scanned', { scanned: scannedCount, total: totalCount })}
           </p>
         </div>
       )}
@@ -515,11 +515,17 @@ export default function AdminInvoicesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 py-6">
           <div className="w-full max-w-3xl overflow-hidden rounded-3xl border border-brand-border bg-brand-card shadow-2xl">
             <div className="border-b border-brand-border px-6 py-5">
-              <h2 className="text-xl font-semibold text-white">Batch funding status</h2>
+              <h2 className="text-xl font-semibold text-white">{t('batchTitle')}</h2>
               <p className="mt-1 text-sm text-brand-muted">
                 {batchRunning
-                  ? `Funding invoice ${batchProgress.current} of ${batchProgress.total}...`
-                  : `Batch complete: ${batchSummary.success} funded, ${batchSummary.failed} failed.`}
+                  ? t('batchRunning', {
+                      current: batchProgress.current,
+                      total: batchProgress.total,
+                    })
+                  : t('batchComplete', {
+                      success: batchSummary.success,
+                      failed: batchSummary.failed,
+                    })}
               </p>
             </div>
 
@@ -534,18 +540,20 @@ export default function AdminInvoicesPage() {
                     >
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                          <p className="text-sm text-brand-muted">Invoice #{invoice.id}</p>
+                          <p className="text-sm text-brand-muted">
+                            {t('invoiceLabel', { id: invoice.id })}
+                          </p>
                           <p className="text-sm text-white">
-                            {formatUSDC(invoice.amount)} scheduled for funding
+                            {t('scheduledForFunding', { amount: formatUSDC(invoice.amount) })}
                           </p>
                         </div>
                         <div className="flex items-center gap-2 text-sm">
                           {result?.status === 'success' ? (
-                            <span className="text-green-300">Success ✓</span>
+                            <span className="text-green-300">{t('success')}</span>
                           ) : result?.status === 'failed' ? (
-                            <span className="text-red-300">Failed ✗</span>
+                            <span className="text-red-300">{t('failed')}</span>
                           ) : (
-                            <span className="text-brand-muted">Pending…</span>
+                            <span className="text-brand-muted">{t('pending')}</span>
                           )}
                         </div>
                       </div>
@@ -571,7 +579,7 @@ export default function AdminInvoicesPage() {
                 }}
                 className="rounded-xl bg-brand-dark px-4 py-2 text-sm text-white hover:bg-brand-border transition-colors disabled:opacity-50"
               >
-                Close
+                {t('close')}
               </button>
             </div>
           </div>
@@ -594,8 +602,8 @@ export default function AdminInvoicesPage() {
 
       {batchConfirmOpen && (
         <ConfirmActionModal
-          title={`Fund ${selectedInvoiceIds.length} selected invoices`}
-          description={`This will initiate funding for ${selectedInvoiceIds.length} verified invoice(s). Freighter will prompt once for each invoice in the batch.`}
+          title={t('batchConfirmTitle', { count: selectedInvoiceIds.length })}
+          description={t('batchConfirmDesc', { count: selectedInvoiceIds.length })}
           onConfirm={() => {
             setBatchConfirmOpen(false);
             handleBatchFunding();
@@ -603,7 +611,7 @@ export default function AdminInvoicesPage() {
           onCancel={() => setBatchConfirmOpen(false)}
           variant="default"
           isOpen={batchConfirmOpen}
-          confirmLabel="Fund selected"
+          confirmLabel={t('batchConfirmLabel')}
         />
       )}
     </div>
