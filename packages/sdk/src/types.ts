@@ -186,6 +186,16 @@ export interface OracleInfo {
   deregisterRequestedAt?: number;
 }
 
+export interface RegistryConfig {
+  minStake: bigint;
+  stakeToken: string;
+  requiredVotes: number;
+  quorumBps: number;
+  roundDurationSecs: number;
+  deregisterCooldownSecs: number;
+  treasury?: string;
+}
+
 export interface VerificationRound {
   invoiceId: bigint;
   requiredVotes: number;

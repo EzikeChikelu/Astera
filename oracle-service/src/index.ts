@@ -5,7 +5,7 @@ import { AsteraClient } from 'astera-sdk';
 import { Listener } from './listener';
 import { Verifier } from './verifier';
 import { ConsensusTracker } from './consensus';
-import { checkStakeOnStartup, registerIfRequested } from './staking';
+import { checkStakeOnStartup, registerIfRequested, getStakingMetrics, StakingMetricsTracker } from './staking';
 import { OracleConfig } from './types';
 
 dotenv.config();
@@ -24,6 +24,7 @@ const config: OracleConfig = {
   registerStakeAmount: process.env.REGISTER_STAKE_AMOUNT
     ? BigInt(process.env.REGISTER_STAKE_AMOUNT)
     : undefined,
+  listenerCursorPath: process.env.LISTENER_CURSOR_PATH || '.oracle-listener-cursor',
 };
 
 async function main() {
@@ -64,9 +65,10 @@ async function main() {
     process.exit(0);
   }
 
+  let registryClient: AsteraClient | undefined;
   if (config.oracleRegistryContractId) {
     console.log(`Running as a consensus-network oracle node (registry: ${config.oracleRegistryContractId})`);
-    const registryClient = new AsteraClient({
+    registryClient = new AsteraClient({
       rpcUrl: config.rpcUrl,
       network: config.networkPassphrase,
       invoiceContractId: config.invoiceContractId,
@@ -81,8 +83,13 @@ async function main() {
   const consensusTracker = config.oracleRegistryContractId
     ? new ConsensusTracker(oracleKeypair.publicKey())
     : undefined;
-  const verifier = new Verifier(config);
-  const listener = new Listener(config, verifier, consensusTracker);
+  // #979: tracks this node's own slash events so `/metrics` can report them
+  // without querying the chain directly.
+  const stakingTracker = config.oracleRegistryContractId
+    ? new StakingMetricsTracker(oracleKeypair.publicKey())
+    : undefined;
+  const verifier = new Verifier(config, consensusTracker);
+  const listener = new Listener(config, verifier, consensusTracker, stakingTracker);
   const healthPort = parseInt(process.env.HEALTH_PORT || '8080', 10);
   const server = http.createServer((req, res) => {
     if (req.url === '/health') {
@@ -95,6 +102,26 @@ async function main() {
           rounds: consensusTracker?.list() ?? undefined,
         }),
       );
+      return;
+    }
+
+    // #979: on-demand stake/cooldown/slash status for this operator, so they
+    // don't have to query the chain directly to check on their own node.
+    if (req.url === '/metrics') {
+      if (!registryClient || !stakingTracker) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'not_found', reason: 'ORACLE_REGISTRY_CONTRACT_ID not set' }));
+        return;
+      }
+      getStakingMetrics(registryClient, oracleKeypair.publicKey(), stakingTracker)
+        .then((metrics) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(metrics));
+        })
+        .catch((error) => {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', error: String(error) }));
+        });
       return;
     }
 
