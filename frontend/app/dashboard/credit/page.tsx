@@ -143,8 +143,8 @@ export default function CreditProfilePage() {
       <div>
         <h1 className="text-3xl font-bold mb-2">Credit Profile</h1>
         <p className="text-brand-muted text-sm">
-          Your on-chain credit score, blended with any verified external attestations —
-          business registry checks, credit bureau data, or other on-chain protocol history.
+          Your on-chain credit score, blended with any verified external attestations — business
+          registry checks, credit bureau data, or other on-chain protocol history.
         </p>
       </div>
 
@@ -239,7 +239,7 @@ export default function CreditProfilePage() {
             <h3 className="font-semibold">Dispute attestation #{disputeTarget}</h3>
             <button
               onClick={() => setDisputeTarget(null)}
-              className="text-brand-muted hover:text-white text-sm"
+              className="text-brand-muted hover:text-brand-text text-sm"
             >
               Cancel
             </button>
@@ -253,7 +253,7 @@ export default function CreditProfilePage() {
                 placeholder="Why is this attestation incorrect?"
                 required
                 rows={3}
-                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-sm"
+                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-brand-text placeholder-brand-muted focus:outline-none focus:border-brand-gold text-sm"
               />
             </div>
             <button
@@ -264,8 +264,8 @@ export default function CreditProfilePage() {
               {txLoading ? 'Processing…' : 'File Dispute'}
             </button>
             <p className="text-xs text-brand-muted">
-              Filing a dispute immediately excludes this attestation from your blended score
-              until an admin reviews it.
+              Filing a dispute immediately excludes this attestation from your blended score until
+              an admin reviews it.
             </p>
           </form>
         </div>
@@ -288,7 +288,7 @@ export default function CreditProfilePage() {
                 max={10000}
                 value={simWeightBps}
                 onChange={(e) => setSimWeightBps(e.target.value)}
-                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-brand-gold text-sm"
+                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-brand-text focus:outline-none focus:border-brand-gold text-sm"
               />
             </div>
             <div>
@@ -299,7 +299,7 @@ export default function CreditProfilePage() {
                 max={1000}
                 value={simScoreContribution}
                 onChange={(e) => setSimScoreContribution(e.target.value)}
-                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-brand-gold text-sm"
+                className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-brand-text focus:outline-none focus:border-brand-gold text-sm"
               />
             </div>
             <button
@@ -312,7 +312,8 @@ export default function CreditProfilePage() {
           </form>
           {simResult !== null && (
             <p className="text-sm">
-              Your blended score would be <span className="font-bold gradient-text">{simResult}</span>
+              Your blended score would be{' '}
+              <span className="font-bold gradient-text">{simResult}</span>
               {score && (
                 <span className="text-brand-muted">
                   {' '}
