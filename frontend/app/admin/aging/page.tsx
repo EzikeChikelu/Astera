@@ -53,6 +53,59 @@ interface AgingGroup {
   totalAmount: bigint;
 }
 
+function exportAgingCSV(
+  overdueBuckets: AgingGroup[],
+  atRiskInvoices: Invoice[],
+) {
+  const header = ['ID', 'Debtor', 'Owner', 'Amount (USD)', 'Due Date', 'Days Overdue', 'Aging Bucket', 'Status'];
+
+  const rows: (string | number)[][] = [];
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const oneDaySecs = 86400;
+
+  for (const bucket of overdueBuckets) {
+    for (const inv of bucket.invoices) {
+      const daysOverdue = Math.floor((nowSecs - inv.dueDate) / oneDaySecs);
+      rows.push([
+        inv.id,
+        inv.debtor,
+        inv.owner,
+        formatUSDC(inv.amount),
+        new Date(inv.dueDate * 1000).toISOString().slice(0, 10),
+        daysOverdue,
+        bucket.label,
+        inv.status,
+      ]);
+    }
+  }
+
+  for (const inv of atRiskInvoices) {
+    const daysOverdue = Math.floor((nowSecs - inv.dueDate) / oneDaySecs);
+    rows.push([
+      inv.id,
+      inv.debtor,
+      inv.owner,
+      formatUSDC(inv.amount),
+      new Date(inv.dueDate * 1000).toISOString().slice(0, 10),
+      daysOverdue,
+      'At Risk',
+      inv.status,
+    ]);
+  }
+
+  const csv = [header, ...rows]
+    .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `astera-aging-report-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function AdminAgingPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -152,11 +205,21 @@ export default function AdminAgingPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold mb-2">Invoice Aging Report</h1>
-        <p className="text-brand-muted text-sm">
-          Overdue and at-risk invoices grouped by aging period.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold mb-2">Invoice Aging Report</h1>
+          <p className="text-brand-muted text-sm">
+            Overdue and at-risk invoices grouped by aging period.
+          </p>
+        </div>
+        {(totalOverdueCount > 0 || atRiskInvoices.length > 0) && (
+          <button
+            onClick={() => exportAgingCSV(overdueBuckets, atRiskInvoices)}
+            className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
+          >
+            Export CSV
+          </button>
+        )}
       </div>
 
       {/* Summary Cards */}
