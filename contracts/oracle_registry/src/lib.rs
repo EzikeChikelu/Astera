@@ -662,6 +662,12 @@ impl OracleRegistryContract {
         if !info.is_active {
             return Err(OracleRegistryError::NotRegistered);
         }
+        // #950 — an oracle that has initiated deregistration retains is_active=true
+        // during the cooldown window but should no longer contribute voting weight;
+        // it has committed to leaving and its stake may be returned at any time.
+        if info.deregister_requested_at.is_some() {
+            return Err(OracleRegistryError::DeregisterCooldownActive);
+        }
 
         let round_key = DataKey::Round(invoice_id);
         let mut round: VerificationRound = env
