@@ -2558,6 +2558,17 @@ impl InvoiceContract {
         load_invoice(&env, id)
     }
 
+    /// Cross-contract check for the oracle registry (#953): confirms `id` is
+    /// actually awaiting oracle verification before a `VerificationRound` is
+    /// opened for it, and returns the invoice's principal so the registry can
+    /// apply a value-based quorum tier (#957). Returns primitives rather than
+    /// `Invoice`/`InvoiceStatus` directly so the two contracts' deployed
+    /// interfaces don't need to share Rust types.
+    pub fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128) {
+        let invoice = load_invoice(&env, id);
+        (invoice.status == InvoiceStatus::AwaitingVerification, invoice.amount)
+    }
+
     pub fn get_funded_amount(env: Env, id: u64) -> i128 {
         env.storage()
             .persistent()
