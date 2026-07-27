@@ -1,5 +1,6 @@
 import { Contract, TransactionBuilder, BASE_FEE, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { BaseClient, nativeToScVal, scValToNative, Address, xdr } from './base';
+import { Errors as InvoiceErrors } from '../generated/invoice';
 import type { ClientConfig, Invoice, InvoiceMetadata, TransactionProgress } from '../types';
 import type { Signer } from '../types';
 
@@ -25,6 +26,8 @@ export interface VerifyInvoiceParams {
 }
 
 export class InvoiceClient extends BaseClient {
+  protected override readonly errors = InvoiceErrors;
+
   constructor(config: ClientConfig) {
     super(config);
   }

@@ -1,5 +1,6 @@
 import { rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { BaseClient, nativeToScVal, scValToNative, Address } from './base';
+import { Errors as OracleRegistryErrors } from '../generated/oracle_registry';
 import type {
   ClientConfig,
   VerificationRound,
@@ -9,6 +10,8 @@ import type {
 import type { Signer } from '../types';
 
 export class OracleRegistryClient extends BaseClient {
+  protected override readonly errors = OracleRegistryErrors;
+
   constructor(config: ClientConfig) {
     super(config);
   }

@@ -6,6 +6,7 @@ export { ComplianceClient } from './clients/compliance';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';
+export { ContractError, parseContractError } from './errors';
 export { Errors as InvoiceErrors } from './generated/invoice';
 export { Errors as PoolErrors } from './generated/pool';
 export { Errors as CreditScoreErrors } from './generated/credit_score';
