@@ -69,6 +69,8 @@ pub enum InsuranceError {
     AmountOverflow = 14,
     FundedInvoiceNotFound = 15,
     PoolCallFailed = 16,
+    /// #936: reserve has insufficient funds to cover the full nominal payout.
+    InsufficientReserves = 17,
 }
 
 type InsuranceResult<T> = Result<T, InsuranceError>;
@@ -146,6 +148,29 @@ pub struct CoverageRecord {
     pub claimed: bool,
 }
 
+/// #937: A single historical claim entry recording the payout details.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaimHistoryItem {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub payout: i128,
+    pub shortfalls: i128,
+    pub timestamp: u64,
+}
+
+/// #938: Health status of a token's reserve, returned by `check_reserve_health`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReserveHealth {
+    pub token: Address,
+    pub total_reserves: i128,
+    pub coverage_ratio_bps: u32,
+    pub min_reserve_amount: i128,
+    pub is_healthy: bool,
+    pub needs_top_up: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Config {
@@ -164,6 +189,12 @@ enum DataKey {
     CoverageRecord(u64),
     Paused,
     ReentrancyGuard,
+    /// #937: number of claim history entries for a given invoice.
+    ClaimHistoryCount(u64),
+    /// #937: individual claim history entry keyed by (invoice_id, index).
+    ClaimHistoryEntry(u64, u32),
+    /// #938: minimum reserve amount below which top-up is flagged.
+    MinReserveAmount(Address),
 }
 
 // ---- Cross-contract client mirrors ----
@@ -193,6 +224,10 @@ pub struct CreditScoreData {
     pub score_version: u32,
     pub config_version: u32,
     pub is_stale: bool,
+    /// #935: Blended score incorporating external attestations. Used for
+    /// premium pricing when available; falls back to `score` (internal-only)
+    /// when the credit_score contract doesn't return this field (pre-v2).
+    pub blended_score: u32,
 }
 
 #[contractclient(name = "InvoiceContractClient")]
@@ -645,6 +680,14 @@ impl InsuranceReserve {
             .ok_or(InsuranceError::AmountOverflow)?;
 
         let mut reserve = Self::load_reserve(&env, &record.token);
+
+        // #936: reject the claim upfront when the reserve is depleted — a
+        // partial payout on a zero-balance reserve would transfer nothing and
+        // still mark the coverage as claimed, wasting the claim slot.
+        if reserve.total_reserves <= 0 {
+            return Err(InsuranceError::InsufficientReserves);
+        }
+
         // Never pay out more than: what's nominally covered, the actual
         // shortfall (don't double-pay past collateral recovery), or what the
         // reserve actually holds (insolvency degrades to a partial payout
@@ -690,6 +733,28 @@ impl InsuranceReserve {
                 .instance()
                 .set(&DataKey::CoverageRecord(invoice_id), &record);
 
+            // #937: persist claim history entry so callers can audit past claims.
+            let hist_count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ClaimHistoryCount(invoice_id))
+                .unwrap_or(0);
+            let item = ClaimHistoryItem {
+                invoice_id,
+                token: record.token.clone(),
+                payout,
+                shortfalls: shortfall,
+                timestamp: env.ledger().timestamp(),
+            };
+            env.storage().instance().set(
+                &DataKey::ClaimHistoryEntry(invoice_id, hist_count),
+                &item,
+            );
+            env.storage().instance().set(
+                &DataKey::ClaimHistoryCount(invoice_id),
+                &(hist_count + 1),
+            );
+
             env.events()
                 .publish((EVT, symbol_short!("claimed")), (invoice_id, payout));
             Ok(payout)
@@ -706,6 +771,81 @@ impl InsuranceReserve {
         env.storage()
             .instance()
             .get(&DataKey::CoverageRecord(invoice_id))
+    }
+
+    /// #937: Return the full claim history for an invoice.
+    pub fn get_claim_history(env: Env, invoice_id: u64) -> Vec<ClaimHistoryItem> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClaimHistoryCount(invoice_id))
+            .unwrap_or(0);
+        let mut items = Vec::new(&env);
+        let mut i: u32 = 0;
+        while i < count {
+            if let Some(item) = env
+                .storage()
+                .instance()
+                .get(&DataKey::ClaimHistoryEntry(invoice_id, i))
+            {
+                items.push_back(item);
+            }
+            i += 1;
+        }
+        items
+    }
+
+    /// #938: Check reserve health against the configured minimum. Returns a
+    /// `ReserveHealth` struct indicating whether the reserve needs topping up.
+    pub fn check_reserve_health(env: Env, token: Address) -> ReserveHealth {
+        let reserve = Self::load_reserve(&env, &token);
+        let min_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinReserveAmount(token.clone()))
+            .unwrap_or(0);
+        let is_healthy = reserve.total_reserves >= min_amount && min_amount > 0;
+        ReserveHealth {
+            token,
+            total_reserves: reserve.total_reserves,
+            coverage_ratio_bps: reserve.coverage_ratio_bps,
+            min_reserve_amount: min_amount,
+            is_healthy,
+            needs_top_up: min_amount > 0 && reserve.total_reserves < min_amount,
+        }
+    }
+
+    // ---- Admin: #938 min reserve config ----
+
+    /// Set the minimum reserve amount for a token. When reserves drop below
+    /// this threshold, `check_reserve_health` signals that a top-up is needed.
+    pub fn set_min_reserve_amount(
+        env: Env,
+        admin: Address,
+        token: Address,
+        min_amount: i128,
+    ) -> Result<(), InsuranceError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if min_amount < 0 {
+            return Err(InsuranceError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinReserveAmount(token.clone()), &min_amount);
+        env.events().publish(
+            (EVT, symbol_short!("min_rsv")),
+            (admin, token, min_amount),
+        );
+        Ok(())
+    }
+
+    pub fn get_min_reserve_amount(env: Env, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinReserveAmount(token))
+            .unwrap_or(0)
     }
 
     /// Read-only quote — no storage writes, no auth. `tenor_days` is supplied
@@ -741,7 +881,17 @@ impl InsuranceReserve {
             Some(addr) => {
                 let client = CreditScoreClient::new(env, &addr);
                 match client.try_get_credit_score(sme) {
-                    Ok(Ok(data)) => data.score,
+                    // #935: prefer blended_score (includes external attestations)
+                    // over the raw internal score for more accurate risk pricing.
+                    Ok(Ok(data)) => {
+                        if data.blended_score > 0 {
+                            data.blended_score
+                        } else {
+                            // Pre-v2 credit_score contracts don't return blended_score;
+                            // fall back to the internal score.
+                            data.score
+                        }
+                    }
                     _ => DEFAULT_SCORE_WHEN_UNAVAILABLE,
                 }
             }
