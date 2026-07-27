@@ -12,6 +12,7 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
+access_control = { path = "../access_control" }
 
 [[test]]
 name = "fuzz_tests"
@@ -24,3 +25,7 @@ path = "tests/timeout_tests.rs"
 [[test]]
 name = "multi_oracle_tests"
 path = "tests/multi_oracle_tests.rs"
+
+[[test]]
+name = "access_control_tests"
+path = "tests/access_control_tests.rs"

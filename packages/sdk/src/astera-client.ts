@@ -3,6 +3,7 @@ import { PoolClient } from './clients/pool';
 import { CreditScoreClient } from './clients/credit_score';
 import { OracleRegistryClient } from './clients/oracle_registry';
 import { ComplianceClient } from './clients/compliance';
+import { AccessControlClient } from './clients/access_control';
 import type {
   AsteraConfig,
   Invoice,
@@ -24,6 +25,10 @@ import type {
   RiskTier,
   ComplianceRecord,
   ScreeningHistoryEntry,
+  Role,
+  MultiSigConfig,
+  Proposal,
+  ActionPayload,
 } from './types';
 
 export class AsteraClient {
@@ -32,6 +37,7 @@ export class AsteraClient {
   private creditScoreClient: CreditScoreClient;
   private oracleRegistryClient: OracleRegistryClient;
   private complianceClient: ComplianceClient;
+  private accessControlClient: AccessControlClient;
 
   constructor(config: AsteraConfig) {
     this.invoiceClient = new InvoiceClient({
@@ -58,6 +64,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.complianceContractId ?? '',
+    });
+    this.accessControlClient = new AccessControlClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.accessControlContractId ?? '',
     });
   }
 
@@ -331,5 +342,62 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.complianceClient.requestReview(params),
+  };
+
+  /** #864: role-based multisig access control. */
+  public readonly accessControl = {
+    getRoleConfig: (role: Role): Promise<MultiSigConfig | null> =>
+      this.accessControlClient.getRoleConfig(role),
+
+    isSigner: (role: Role, address: string): Promise<boolean> =>
+      this.accessControlClient.isSigner(role, address),
+
+    getProposal: (proposalId: bigint | number): Promise<Proposal | null> =>
+      this.accessControlClient.getProposal(proposalId),
+
+    listProposals: (): Promise<Array<{ id: bigint; proposal: Proposal }>> =>
+      this.accessControlClient.listProposals(),
+
+    proposeAction: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      role: Role;
+      proposer: string;
+      target: string;
+      action: ActionPayload;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.accessControlClient.proposeAction(params),
+
+    approveAction: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      signerAddress: string;
+      proposalId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.accessControlClient.approveAction(params),
+
+    revokeApproval: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      signerAddress: string;
+      proposalId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.accessControlClient.revokeApproval(params),
+
+    rejectAction: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      signerAddress: string;
+      proposalId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.accessControlClient.rejectAction(params),
+
+    executeAction: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      proposalId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.accessControlClient.executeAction(params),
   };
 }
