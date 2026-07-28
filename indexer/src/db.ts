@@ -32,6 +32,23 @@ const MIGRATIONS = [
         ON events(contract_type);
     `;
   },
+  // #862: derived table for historical realized APY per tranche per token.
+  // Recomputed from indexed tranche fund/repay/default events (see
+  // recomputeTrancheApy). One row per (token, tranche_class).
+  () => {
+    return `
+      CREATE TABLE IF NOT EXISTS tranche_apy (
+        token TEXT NOT NULL,
+        tranche_class TEXT NOT NULL,
+        realized_principal TEXT NOT NULL DEFAULT '0',
+        realized_return TEXT NOT NULL DEFAULT '0',
+        closed_positions INTEGER NOT NULL DEFAULT 0,
+        realized_apy_bps INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (token, tranche_class)
+      );
+    `;
+  },
 ];
 
 function runMigrationsFrom(db: Database.Database, fromVersion: number): void {
@@ -152,4 +169,188 @@ export function getLatestLedger(db: Database.Database): string | null {
     | undefined;
 
   return row ? row.ledger_sequence.toString() : null;
+}
+
+// #862: historical realized APY per tranche per token.
+//
+// Each closed invoice contributes to the trailing realized yield of both
+// tranches. From the indexed tranche events we reconstruct, per invoice:
+//   fund   -> (invoice_id, token, senior_deployed, junior_deployed)
+//   repay  -> (invoice_id, token, senior_payout,   junior_payout)
+//   default-> (invoice_id, token, junior_loss,     senior_loss)
+// Realized return for a tranche on an invoice is payout - deployed (a repaid
+// invoice), or -loss (a defaulted invoice). Aggregated across every closed
+// invoice for a token, realized_return / realized_principal is the trailing
+// realized yield; we annualize crudely to basis points assuming the sampled
+// invoices represent roughly one turnover. Callers wanting a time-weighted
+// figure can derive it from the raw fields, which are exposed as strings to
+// preserve i128 precision.
+export interface TrancheApyRow {
+  token: string;
+  trancheClass: 'Senior' | 'Junior';
+  realizedPrincipal: bigint;
+  realizedReturn: bigint;
+  closedPositions: number;
+  realizedApyBps: number;
+  updatedAt: string;
+}
+
+const TRANCHE_CLASS_LABEL: Record<number, 'Senior' | 'Junior'> = {
+  0: 'Senior',
+  1: 'Junior',
+};
+
+function trancheClassLabel(raw: unknown): 'Senior' | 'Junior' | null {
+  if (raw === 'Senior' || raw === 'Junior') return raw;
+  if (typeof raw === 'number' && raw in TRANCHE_CLASS_LABEL) return TRANCHE_CLASS_LABEL[raw];
+  // soroban enum unit variants serialize as { Senior: [] } / ["Senior"]
+  if (Array.isArray(raw) && (raw[0] === 'Senior' || raw[0] === 'Junior')) return raw[0];
+  if (raw && typeof raw === 'object') {
+    if ('Senior' in (raw as object)) return 'Senior';
+    if ('Junior' in (raw as object)) return 'Junior';
+  }
+  return null;
+}
+
+function toBigInt(v: unknown): bigint {
+  try {
+    return BigInt(String(v ?? 0));
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * Recompute the tranche_apy table from scratch off the indexed tranche event
+ * stream. Idempotent: safe to call after every ingest batch.
+ */
+export function recomputeTrancheApy(db: Database.Database, updatedAt: string): void {
+  const rows = getEvents(db, { contractType: 'tranche', limit: 100_000, offset: 0 });
+
+  // token -> tranche -> accumulator
+  type Acc = { principal: bigint; ret: bigint; closed: number };
+  const agg = new Map<string, { Senior: Acc; Junior: Acc }>();
+  const bucket = (token: string) => {
+    let b = agg.get(token);
+    if (!b) {
+      b = {
+        Senior: { principal: 0n, ret: 0n, closed: 0 },
+        Junior: { principal: 0n, ret: 0n, closed: 0 },
+      };
+      agg.set(token, b);
+    }
+    return b;
+  };
+
+  // Deployed principal per invoice, from `fund` events, so repay/default can
+  // net against it.
+  const deployed = new Map<string, { token: string; senior: bigint; junior: bigint }>();
+
+  // Process in chronological order so fund precedes its repay/default.
+  const ordered = [...rows].sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+
+  for (const evt of ordered) {
+    const v = evt.value;
+    if (!Array.isArray(v) || v.length < 4) continue;
+    const invoiceId = String(v[0]);
+    const token = typeof v[1] === 'string' ? v[1] : String(v[1]);
+
+    switch (evt.eventType) {
+      case 'fund': {
+        deployed.set(invoiceId, {
+          token,
+          senior: toBigInt(v[2]),
+          junior: toBigInt(v[3]),
+        });
+        break;
+      }
+      case 'repay': {
+        const dep = deployed.get(invoiceId);
+        if (!dep) break;
+        const b = bucket(token);
+        b.Senior.principal += dep.senior;
+        b.Senior.ret += toBigInt(v[2]) - dep.senior;
+        b.Senior.closed += 1;
+        b.Junior.principal += dep.junior;
+        b.Junior.ret += toBigInt(v[3]) - dep.junior;
+        b.Junior.closed += 1;
+        deployed.delete(invoiceId);
+        break;
+      }
+      case 'default': {
+        const dep = deployed.get(invoiceId);
+        const b = bucket(token);
+        // default value tuple is (invoice_id, token, junior_loss, senior_loss)
+        const juniorLoss = toBigInt(v[2]);
+        const seniorLoss = toBigInt(v[3]);
+        b.Junior.principal += dep ? dep.junior : juniorLoss;
+        b.Junior.ret += -juniorLoss;
+        b.Junior.closed += 1;
+        b.Senior.principal += dep ? dep.senior : seniorLoss;
+        b.Senior.ret += -seniorLoss;
+        b.Senior.closed += 1;
+        deployed.delete(invoiceId);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  const upsert = db.prepare(`
+    INSERT INTO tranche_apy
+      (token, tranche_class, realized_principal, realized_return, closed_positions, realized_apy_bps, updated_at)
+    VALUES (@token, @trancheClass, @principal, @ret, @closed, @apyBps, @updatedAt)
+    ON CONFLICT(token, tranche_class) DO UPDATE SET
+      realized_principal = @principal,
+      realized_return = @ret,
+      closed_positions = @closed,
+      realized_apy_bps = @apyBps,
+      updated_at = @updatedAt
+  `);
+
+  const writeAll = db.transaction(() => {
+    for (const [token, b] of agg) {
+      for (const cls of ['Senior', 'Junior'] as const) {
+        const acc = b[cls];
+        const apyBps =
+          acc.principal > 0n
+            ? Number((acc.ret * 10_000n) / acc.principal)
+            : 0;
+        upsert.run({
+          token,
+          trancheClass: cls,
+          principal: acc.principal.toString(),
+          ret: acc.ret.toString(),
+          closed: acc.closed,
+          apyBps,
+          updatedAt,
+        });
+      }
+    }
+  });
+  writeAll();
+}
+
+export function getTrancheApy(
+  db: Database.Database,
+  token?: string,
+): TrancheApyRow[] {
+  let query = 'SELECT * FROM tranche_apy';
+  const params: any[] = [];
+  if (token) {
+    query += ' WHERE token = ?';
+    params.push(token);
+  }
+  query += ' ORDER BY token, tranche_class';
+  const rows = db.prepare(query).all(...params) as any[];
+  return rows.map((r) => ({
+    token: r.token,
+    trancheClass: r.tranche_class,
+    realizedPrincipal: toBigInt(r.realized_principal),
+    realizedReturn: toBigInt(r.realized_return),
+    closedPositions: r.closed_positions,
+    realizedApyBps: r.realized_apy_bps,
+    updatedAt: r.updated_at,
+  }));
 }

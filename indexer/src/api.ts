@@ -4,7 +4,7 @@
 
 import express from 'express';
 import Database from 'better-sqlite3';
-import { getEvents } from './db';
+import { getEvents, getTrancheApy } from './db';
 
 export function startApiServer(db: Database.Database, port: number): void {
   const app = express();
@@ -540,6 +540,55 @@ export function startApiServer(db: Database.Database, port: number): void {
       res.json({ address, history });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #862: trailing realized APY per tranche per token, from the derived
+  // tranche_apy table (recomputed after each ingest batch). Serializes the
+  // i128 principal/return fields as strings to preserve precision.
+  app.get('/tranches/apy', (req, res) => {
+    try {
+      const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+      const rows = getTrancheApy(db, token).map((r) => ({
+        token: r.token,
+        trancheClass: r.trancheClass,
+        realizedPrincipal: r.realizedPrincipal.toString(),
+        realizedReturn: r.realizedReturn.toString(),
+        closedPositions: r.closedPositions,
+        realizedApyBps: r.realizedApyBps,
+        realizedApyPct: r.realizedApyBps / 100,
+        updatedAt: r.updatedAt,
+      }));
+      res.json({ tranches: rows, count: rows.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #862: trailing realized APY for a single token, split into senior/junior.
+  app.get('/tranches/:token/apy', (req, res) => {
+    try {
+      const { token } = req.params;
+      if (!token) {
+        return res.status(400).json({ error: 'token path param is required' });
+      }
+      const rows = getTrancheApy(db, token);
+      const find = (cls: 'Senior' | 'Junior') => {
+        const r = rows.find((x) => x.trancheClass === cls);
+        return r
+          ? {
+              realizedPrincipal: r.realizedPrincipal.toString(),
+              realizedReturn: r.realizedReturn.toString(),
+              closedPositions: r.closedPositions,
+              realizedApyBps: r.realizedApyBps,
+              realizedApyPct: r.realizedApyBps / 100,
+              updatedAt: r.updatedAt,
+            }
+          : { realizedPrincipal: '0', realizedReturn: '0', closedPositions: 0, realizedApyBps: 0, realizedApyPct: 0, updatedAt: null };
+      };
+      return res.json({ token, senior: find('Senior'), junior: find('Junior') });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

@@ -8,7 +8,7 @@
 
 import { Horizon } from 'stellar-sdk';
 import { parseEvents } from './parser';
-import { initDb, storeEvents, getEvents, getLatestLedger } from './db';
+import { initDb, storeEvents, getEvents, getLatestLedger, recomputeTrancheApy } from './db';
 import { startApiServer } from './api';
 
 const HORIZON_URL = process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org';
@@ -100,6 +100,17 @@ async function pollLoop(db: any) {
         console.log(`[Astera Indexer] Stored ${events.length} events`);
         const lastEvent = events[events.length - 1];
         cursor = lastEvent.ledgerSequence?.toString() || cursor;
+
+        // #862: refresh the derived per-tranche realized-APY table whenever a
+        // tranche event lands in the batch, so the /tranches/apy endpoint stays
+        // current for the frontend invest page.
+        if (events.some((e) => e.contractType === 'tranche')) {
+          try {
+            recomputeTrancheApy(db, new Date().toISOString());
+          } catch (apyErr) {
+            console.error('[Astera Indexer] Failed to recompute tranche APY:', apyErr);
+          }
+        }
       }
 
       // Check if there are more pages

@@ -141,6 +141,7 @@ export interface AsteraConfig {
   creditScoreContractId?: string;
   oracleRegistryContractId?: string;
   complianceContractId?: string;
+  trancheContractId?: string;
 }
 
 export type ComplianceStatus =

@@ -41,6 +41,10 @@ export const ORACLE_REGISTRY_CONTRACT_ID =
 // #867: on-chain compliance / sanctions screening registry
 export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID ?? '';
 
+// #862: invoice tranching (senior/junior) with waterfall repayment — optional,
+// unset until deployed.
+export const TRANCHE_CONTRACT_ID = process.env.NEXT_PUBLIC_TRANCHE_CONTRACT_ID ?? '';
+
 // #799: on-chain referral program — optional, unset until deployed.
 export const REFERRAL_CONTRACT_ID = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID ?? '';
 

@@ -1,7 +1,29 @@
 'use client';
 
-import { useState } from 'react';
-import { TrancheClass, TranchePool, TrancheConfig } from '@/../sdk/src/generated/tranche';
+import { useState, useEffect, useCallback } from 'react';
+import { TrancheClass, TranchePool } from '@/../sdk/src/generated/tranche';
+import { getTranchePool, buildTrancheDepositTx } from '@/lib/contracts';
+import { submitTx, toStroops } from '@/lib/stellar';
+import { useStore } from '@/lib/store';
+import toast from 'react-hot-toast';
+
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+const TOKENS = ['USDC', 'USDT', 'EURC'];
+
+interface TrancheApyData {
+  senior: number; // realizedApyPct
+  junior: number;
+}
+
+async function fetchTrailingApy(token: string): Promise<TrancheApyData> {
+  const res = await fetch(`${INDEXER_URL}/tranches/${encodeURIComponent(token)}/apy`);
+  if (!res.ok) throw new Error('indexer unavailable');
+  const data = await res.json();
+  return {
+    senior: data.senior?.realizedApyPct ?? 0,
+    junior: data.junior?.realizedApyPct ?? 0,
+  };
+}
 
 interface TrancheCardProps {
   token: string;
@@ -9,7 +31,7 @@ interface TrancheCardProps {
   pool: TranchePool;
   targetApy: number;
   trailingApy: number;
-  onDeposit: (amount: number) => void;
+  onDeposit: () => void;
 }
 
 function TrancheCard({
@@ -22,9 +44,8 @@ function TrancheCard({
 }: TrancheCardProps) {
   const isSenior = trancheClass === TrancheClass.Senior;
   const config = pool.config;
-
   const accounting = isSenior ? pool.senior : pool.junior;
-  const deposited = Number(accounting.deposited) / 1e7; // Assuming 7 decimals
+  const deposited = Number(accounting.deposited) / 1e7;
   const available = Number(accounting.available) / 1e7;
   const deployed = Number(accounting.deployed) / 1e7;
   const earned = Number(accounting.earned) / 1e7;
@@ -40,33 +61,29 @@ function TrancheCard({
           <p className="text-sm text-gray-500">{token}</p>
         </div>
         <span
-          className={`px-3 py-1 rounded-full text-xs font-medium ${
-            isSenior ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
-          }`}
+          className={`px-3 py-1 rounded-full text-xs font-medium ${isSenior ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}
         >
           {isSenior ? 'Lower Risk' : 'Higher Risk'}
         </span>
       </div>
 
-      {/* APY Comparison */}
       <div className="grid grid-cols-2 gap-4 mb-6">
         <div>
           <p className="text-sm text-gray-500">Target APY</p>
-          <p className="text-2xl font-semibold text-gray-900">{targetApy.toFixed(1)}%</p>
+          <p className="text-2xl font-semibold text-gray-900">
+            {isSenior ? `${targetApy.toFixed(1)}%` : 'Residual'}
+          </p>
         </div>
         <div>
-          <p className="text-sm text-gray-500">Trailing APY</p>
+          <p className="text-sm text-gray-500">Trailing Realized APY</p>
           <p
-            className={`text-2xl font-semibold ${
-              trailingApy >= targetApy ? 'text-green-600' : 'text-orange-600'
-            }`}
+            className={`text-2xl font-semibold ${trailingApy >= targetApy ? 'text-green-600' : 'text-orange-600'}`}
           >
             {trailingApy.toFixed(1)}%
           </p>
         </div>
       </div>
 
-      {/* Pool Statistics */}
       <div className="space-y-3 mb-6">
         <div className="flex justify-between text-sm">
           <span className="text-gray-500">Total Deposited</span>
@@ -92,7 +109,6 @@ function TrancheCard({
         )}
       </div>
 
-      {/* Risk Metrics */}
       <div className="bg-gray-50 rounded-lg p-4 mb-6">
         <h3 className="text-sm font-medium text-gray-900 mb-2">Risk Metrics</h3>
         {isSenior ? (
@@ -120,13 +136,12 @@ function TrancheCard({
         )}
       </div>
 
-      {/* Deposit Button */}
       <button
-        onClick={() => onDeposit(0)}
+        onClick={onDeposit}
         disabled={available === 0}
         className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
       >
-        {available === 0 ? 'No Capacity' : 'Deposit to ' + (isSenior ? 'Senior' : 'Junior')}
+        {available === 0 ? 'No Capacity' : `Deposit to ${isSenior ? 'Senior' : 'Junior'}`}
       </button>
     </div>
   );
@@ -167,52 +182,76 @@ function RiskExplainer() {
 }
 
 export default function TranchesPage() {
+  const { wallet } = useStore();
   const [selectedToken, setSelectedToken] = useState('USDC');
   const [depositAmount, setDepositAmount] = useState<number>(0);
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [selectedTranche, setSelectedTranche] = useState<TrancheClass | null>(null);
+  const [pool, setPool] = useState<TranchePool | null>(null);
+  const [apy, setApy] = useState<TrancheApyData>({ senior: 0, junior: 0 });
+  const [loading, setLoading] = useState(true);
+  const [depositing, setDepositing] = useState(false);
 
-  // Mock data - in production, this would come from the indexer/contract
-  const mockPool: TranchePool = {
-    senior: {
-      deposited: 8000000000n, // $8,000
-      available: 2400000000n, // $2,400
-      deployed: 5600000000n, // $5,600
-      earned: 450000000n, // $450
-      losses: 0n,
-    },
-    junior: {
-      deposited: 2000000000n, // $2,000
-      available: 600000000n, // $600
-      deployed: 1400000000n, // $1,400
-      earned: 280000000n, // $280
-      losses: 150000000n, // $150
-    },
-    config: {
-      senior_target_yield_bps: 1000, // 10%
-      senior_advance_rate_bps: 8000, // 80%
-      junior_first_loss_bps: 10000, // 100%
-    },
-  };
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [poolData, apyData] = await Promise.all([
+        getTranchePool(selectedToken).catch(() => null),
+        fetchTrailingApy(selectedToken).catch(() => ({ senior: 0, junior: 0 })),
+      ]);
+      if (poolData) setPool(poolData);
+      setApy(apyData);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedToken]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const handleDeposit = (tranche: TrancheClass) => {
     setSelectedTranche(tranche);
     setShowDepositModal(true);
   };
 
-  const confirmDeposit = () => {
-    // In production, this would call the SDK to execute the deposit
-    console.log(
-      `Depositing ${depositAmount} to ${selectedTranche === TrancheClass.Senior ? 'Senior' : 'Junior'}`,
-    );
-    setShowDepositModal(false);
-    setDepositAmount(0);
+  const confirmDeposit = async () => {
+    if (!wallet.connected || !wallet.address || selectedTranche === null || depositAmount <= 0)
+      return;
+    setDepositing(true);
+    try {
+      const amount = toStroops(depositAmount);
+      const xdr = await buildTrancheDepositTx(
+        wallet.address,
+        selectedToken,
+        selectedTranche,
+        amount,
+      );
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+      if (signError) throw new Error(signError.message);
+      await submitTx(signedTxXdr);
+      toast.success(
+        `Deposited ${depositAmount} ${selectedToken} to ${selectedTranche === TrancheClass.Senior ? 'Senior' : 'Junior'} tranche`,
+      );
+      setShowDepositModal(false);
+      setDepositAmount(0);
+      await load();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Deposit failed');
+    } finally {
+      setDepositing(false);
+    }
   };
+
+  const seniorTargetApy = pool ? pool.config.senior_target_yield_bps / 100 : 10;
 
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900">Tranche Investments</h1>
           <p className="mt-2 text-gray-600">
@@ -220,7 +259,6 @@ export default function TranchesPage() {
           </p>
         </div>
 
-        {/* Token Selector */}
         <div className="mb-6">
           <label className="block text-sm font-medium text-gray-700 mb-2">Select Token</label>
           <select
@@ -228,44 +266,63 @@ export default function TranchesPage() {
             onChange={(e) => setSelectedToken(e.target.value)}
             className="block w-full max-w-xs rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
           >
-            <option value="USDC">USDC</option>
-            <option value="USDT">USDT</option>
-            <option value="EURC">EURC</option>
+            {TOKENS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
           </select>
         </div>
 
-        {/* Risk Explainer */}
         <div className="mb-8">
           <RiskExplainer />
         </div>
 
-        {/* Tranche Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-          <TrancheCard
-            token={selectedToken}
-            trancheClass={TrancheClass.Senior}
-            pool={mockPool}
-            targetApy={10.0}
-            trailingApy={9.8}
-            onDeposit={() => handleDeposit(TrancheClass.Senior)}
-          />
-          <TrancheCard
-            token={selectedToken}
-            trancheClass={TrancheClass.Junior}
-            pool={mockPool}
-            targetApy={0} // Junior has no target, earns residual
-            trailingApy={14.2}
-            onDeposit={() => handleDeposit(TrancheClass.Junior)}
-          />
-        </div>
+        {loading && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            {[0, 1].map((i) => (
+              <div
+                key={i}
+                className="bg-white rounded-lg shadow-md p-6 border border-gray-200 animate-pulse"
+              >
+                <div className="h-8 bg-gray-200 rounded w-1/2 mb-4" />
+                <div className="h-16 bg-gray-100 rounded mb-4" />
+                <div className="h-32 bg-gray-100 rounded" />
+              </div>
+            ))}
+          </div>
+        )}
 
-        {/* Deposit Modal */}
+        {!loading && pool && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <TrancheCard
+              token={selectedToken}
+              trancheClass={TrancheClass.Senior}
+              pool={pool}
+              targetApy={seniorTargetApy}
+              trailingApy={apy.senior}
+              onDeposit={() => handleDeposit(TrancheClass.Senior)}
+            />
+            <TrancheCard
+              token={selectedToken}
+              trancheClass={TrancheClass.Junior}
+              pool={pool}
+              targetApy={0}
+              trailingApy={apy.junior}
+              onDeposit={() => handleDeposit(TrancheClass.Junior)}
+            />
+          </div>
+        )}
+
         {showDepositModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
               <h2 className="text-xl font-bold mb-4">
                 Deposit to {selectedTranche === TrancheClass.Senior ? 'Senior' : 'Junior'} Tranche
               </h2>
+              {!wallet.connected && (
+                <p className="text-sm text-red-600 mb-4">Connect your wallet to deposit.</p>
+              )}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Amount ({selectedToken})
@@ -281,10 +338,10 @@ export default function TranchesPage() {
               <div className="flex space-x-3">
                 <button
                   onClick={confirmDeposit}
-                  disabled={depositAmount <= 0}
+                  disabled={depositing || depositAmount <= 0 || !wallet.connected}
                   className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
                 >
-                  Confirm Deposit
+                  {depositing ? 'Submitting…' : 'Confirm Deposit'}
                 </button>
                 <button
                   onClick={() => setShowDepositModal(false)}

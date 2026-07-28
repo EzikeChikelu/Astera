@@ -9,6 +9,7 @@ import {
   ORACLE_REGISTRY_CONTRACT_ID,
   COMPLIANCE_CONTRACT_ID,
   REFERRAL_CONTRACT_ID,
+  TRANCHE_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -2608,6 +2609,124 @@ export async function buildRegisterReferralTx(referee: string, referrer: string)
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ── #862: Tranche helpers ─────────────────────────────────────────────────────
+
+import { TrancheClass } from '@/../sdk/src/generated/tranche';
+import type { TranchePool, TrancheConfig } from '@/../sdk/src/generated/tranche';
+
+export type { TranchePool, TrancheConfig };
+export { TrancheClass };
+
+const DUMMY_CALLER = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+
+function trancheClassToScVal(tc: TrancheClass): xdr.ScVal {
+  const name = tc === TrancheClass.Senior ? 'Senior' : 'Junior';
+  return xdr.ScVal.scvVec([nativeToScVal(name, { type: 'symbol' })]);
+}
+
+function accountingFromRaw(r: Record<string, unknown>) {
+  return {
+    deposited: BigInt(String(r.deposited ?? 0)),
+    available: BigInt(String(r.available ?? 0)),
+    deployed: BigInt(String(r.deployed ?? 0)),
+    earned: BigInt(String(r.earned ?? 0)),
+    losses: BigInt(String(r.losses ?? 0)),
+  };
+}
+
+export async function getTranchePool(token: string): Promise<TranchePool> {
+  const sim = await simulateTx(
+    TRANCHE_CONTRACT_ID,
+    'get_pool',
+    [new Address(token).toScVal()],
+    DUMMY_CALLER,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    senior: accountingFromRaw(raw.senior as Record<string, unknown>),
+    junior: accountingFromRaw(raw.junior as Record<string, unknown>),
+    config: raw.config as TrancheConfig,
+  };
+}
+
+export async function getTrancheInvestorPosition(
+  investor: string,
+  token: string,
+  trancheClass: TrancheClass,
+): Promise<{ deposited: bigint; shares: bigint; earned: bigint; losses: bigint }> {
+  const sim = await simulateTx(
+    TRANCHE_CONTRACT_ID,
+    'get_position',
+    [
+      new Address(investor).toScVal(),
+      new Address(token).toScVal(),
+      trancheClassToScVal(trancheClass),
+    ],
+    DUMMY_CALLER,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    deposited: BigInt(String(raw.deposited ?? 0)),
+    shares: BigInt(String(raw.shares ?? 0)),
+    earned: BigInt(String(raw.earned ?? 0)),
+    losses: BigInt(String(raw.losses ?? 0)),
+  };
+}
+
+export async function buildTrancheDepositTx(
+  investor: string,
+  token: string,
+  trancheClass: TrancheClass,
+  amount: bigint,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(TRANCHE_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'deposit_tranche',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+        trancheClassToScVal(trancheClass),
+        nativeToScVal(amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildSetTrancheConfigTx(
+  admin: string,
+  token: string,
+  seniorTargetYieldBps: number,
+  seniorAdvanceRateBps: number,
+  juniorFirstLossBps: number,
+): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(TRANCHE_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'set_tranche_config',
+        new Address(admin).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(seniorTargetYieldBps, { type: 'u32' }),
+        nativeToScVal(seniorAdvanceRateBps, { type: 'u32' }),
+        nativeToScVal(juniorFirstLossBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 

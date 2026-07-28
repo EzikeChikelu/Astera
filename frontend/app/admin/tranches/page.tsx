@@ -1,7 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { TrancheClass, TrancheConfig } from '@/../sdk/src/generated/tranche';
+import toast from 'react-hot-toast';
+import { TrancheConfig } from '@/../sdk/src/generated/tranche';
+import { buildSetTrancheConfigTx } from '@/lib/contracts';
+import { submitTx } from '@/lib/stellar';
+import { useStore } from '@/lib/store';
 
 interface TokenTrancheConfig {
   token: string;
@@ -12,7 +16,9 @@ interface TokenTrancheConfig {
 }
 
 export default function TrancheConfigPage() {
+  const { wallet } = useStore();
   const [selectedToken, setSelectedToken] = useState('USDC');
+  const [saving, setSaving] = useState(false);
   const [configs, setConfigs] = useState<TokenTrancheConfig[]>([
     {
       token: 'USDC',
@@ -57,8 +63,30 @@ export default function TrancheConfigPage() {
     }
   };
 
-  const handleSaveConfig = () => {
-    if (editingConfig) {
+  const handleSaveConfig = async () => {
+    if (!editingConfig) return;
+    if (!wallet.connected || !wallet.address) {
+      toast.error('Connect your admin wallet to save on-chain.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const xdr = await buildSetTrancheConfigTx(
+        wallet.address,
+        selectedToken,
+        editingConfig.senior_target_yield_bps,
+        editingConfig.senior_advance_rate_bps,
+        editingConfig.junior_first_loss_bps,
+      );
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+      if (signError) throw new Error(signError.message);
+      await submitTx(signedTxXdr);
+
+      // Reflect the persisted config in local state after the on-chain write.
       setConfigs(
         configs.map((c) =>
           c.token === selectedToken ? { ...c, config: { ...editingConfig } } : c,
@@ -66,6 +94,11 @@ export default function TrancheConfigPage() {
       );
       setEditingConfig(null);
       setShowSaveModal(false);
+      toast.success(`${selectedToken} tranche configuration saved on-chain.`);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save configuration.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -226,9 +259,10 @@ export default function TrancheConfigPage() {
                     <>
                       <button
                         onClick={handleSaveConfig}
-                        className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700"
+                        disabled={saving}
+                        className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
                       >
-                        Save Changes
+                        {saving ? 'Saving…' : 'Save Changes'}
                       </button>
                       <button
                         onClick={() => setEditingConfig(null)}
