@@ -1,12 +1,11 @@
 'use client';
 
+import { useTranslations } from 'next-intl';
 import { useAdminGuard } from '@/hooks/useAdminGuard';
 import AdminNav from '@/components/AdminNav';
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  // Central client-side guard for every /admin page (#393). Reads the admin
-  // role from the contract and redirects non-admins to /dashboard before any
-  // admin UI renders.
+  const t = useTranslations('Admin.layout');
   const { status } = useAdminGuard();
 
   if (status === 'loading') {
@@ -21,14 +20,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-brand-dark pt-16 text-center px-6">
         <div className="text-4xl mb-6">◈</div>
-        <h1 className="text-2xl font-bold mb-2">Admin Identification Required</h1>
-        <p className="text-brand-muted max-w-sm mb-8">
-          Please connect your wallet to verify administrative access to the Astera pool.
-        </p>
+        <h1 className="text-2xl font-bold mb-2">{t('accessDeniedTitle')}</h1>
+        <p className="text-brand-muted max-w-sm mb-8">{t('accessDeniedDesc')}</p>
         <div className="bg-brand-card border border-brand-border p-6 rounded-2xl max-w-md w-full">
-          <p className="text-sm text-brand-muted mb-4">
-            Access to /admin is restricted to the pool administrator address.
-          </p>
+          <p className="text-sm text-brand-muted mb-4">{t('accessDeniedNote')}</p>
         </div>
       </div>
     );

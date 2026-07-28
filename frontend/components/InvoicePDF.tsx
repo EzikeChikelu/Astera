@@ -1,7 +1,7 @@
 import { Document, Page, Text, View, Image, StyleSheet, pdf } from '@react-pdf/renderer';
 import QRCode from 'qrcode';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
-import { formatUSDC, formatDate, truncateAddress } from '@/lib/stellar';
+import { formatAmount, formatDate, truncateAddress } from '@/lib/stellar';
 
 const styles = StyleSheet.create({
   page: {
@@ -147,7 +147,7 @@ export function InvoicePDFDocument({
 
         <View style={styles.amountBox}>
           <Text style={styles.amountLabel}>Amount Due</Text>
-          <Text style={styles.amount}>{formatUSDC(metadata.amount)}</Text>
+          <Text style={styles.amount}>{formatAmount(metadata.amount, metadata.decimals)}</Text>
         </View>
 
         {metadata.description ? (
@@ -160,7 +160,7 @@ export function InvoicePDFDocument({
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Payment Terms</Text>
           <Text>
-            Payment of {formatUSDC(metadata.amount)} is due in full by{' '}
+            Payment of {formatAmount(metadata.amount, metadata.decimals)} is due in full by{' '}
             {formatDate(metadata.dueDate)}. This invoice is tokenized on the Stellar network and
             factored through the Astera lending pool — repayment is made in the invoice&apos;s
             accepted token directly on-chain to contract {truncateAddress(invoice.poolContract)}.

@@ -12,6 +12,10 @@ const DEFAULT_VOTING_PERIOD_SECS: u64 = 7 * 86_400;
 const DEFAULT_EXECUTION_DELAY_SECS: u64 = 48 * 3_600;
 const DEFAULT_QUORUM_BPS: u32 = 1_000;
 const DEFAULT_PASS_BPS: u32 = 6_000;
+/// A passed proposal not executed within this window of passing expires and
+/// can no longer be executed, so a stale approval can't be enacted long after
+/// the conditions that justified it have changed.
+const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -21,6 +25,7 @@ pub enum ProposalStatus {
     Rejected,
     Executed,
     Cancelled,
+    Expired,
 }
 
 #[contracttype]
@@ -42,6 +47,9 @@ pub struct Proposal {
     /// calculations always use this value so that post-creation minting cannot
     /// retroactively suppress a proposal that had already reached quorum.
     pub snapshot_supply: i128,
+    /// Ledger timestamp at which the proposal transitioned to `Passed`, or 0 if
+    /// it has not (yet) passed. Used to enforce `EXECUTION_EXPIRY_SECS`.
+    pub passed_at: u64,
 }
 
 #[contracttype]
@@ -79,6 +87,8 @@ pub enum GovernanceError {
     QuorumNotMet = 8,
     InvalidProposalState = 9,
     Unauthorized = 10,
+    ProposalExpired = 11,
+    InvalidConfig = 12,
 }
 
 type GovernanceResult<T> = Result<T, GovernanceError>;
@@ -87,6 +97,7 @@ type GovernanceResult<T> = Result<T, GovernanceError>;
 pub trait ShareTokenContract {
     fn balance(env: Env, id: Address) -> i128;
     fn total_supply(env: Env) -> i128;
+    fn balance_at(env: Env, id: Address, timestamp: u64) -> i128;
 }
 
 fn load_config(env: &Env) -> GovernanceResult<GovernanceConfig> {
@@ -96,8 +107,12 @@ fn load_config(env: &Env) -> GovernanceResult<GovernanceConfig> {
         .ok_or(GovernanceError::NotInitialized)
 }
 
-fn proposal_weight(env: &Env, share_token: &Address, voter: &Address) -> i128 {
-    ShareTokenClient::new(env, share_token).balance(voter)
+/// Voting weight is the holder's share balance at the moment the proposal was
+/// created (`snapshot_at`), not their balance at vote time — otherwise shares
+/// acquired mid-vote (or borrowed just long enough to vote) would inflate
+/// voting power beyond what backed the proposal when it was created.
+fn proposal_weight(env: &Env, share_token: &Address, voter: &Address, snapshot_at: u64) -> i128 {
+    ShareTokenClient::new(env, share_token).balance_at(voter, &snapshot_at)
 }
 
 fn finalize_proposal(env: &Env, proposal: &mut Proposal) -> GovernanceResult<()> {
@@ -121,11 +136,29 @@ fn finalize_proposal(env: &Env, proposal: &mut Proposal) -> GovernanceResult<()>
 
     if proposal.votes_for * 10_000i128 >= total_votes * config.pass_bps as i128 {
         proposal.status = ProposalStatus::Passed;
+        // Anchored to voting_ends_at (not "now") so a delayed finalization
+        // call can't push back the execution-expiry window.
+        proposal.passed_at = proposal.voting_ends_at;
+        env.events()
+            .publish((EVT, symbol_short!("passed")), proposal.id);
     } else {
         proposal.status = ProposalStatus::Rejected;
     }
 
     Ok(())
+}
+
+/// Transitions a `Passed` proposal to `Expired` once `EXECUTION_EXPIRY_SECS`
+/// has elapsed since it passed. Returns true if the proposal is (now) expired.
+fn mark_expired_if_due(env: &Env, proposal: &mut Proposal) -> bool {
+    if proposal.status == ProposalStatus::Passed
+        && env.ledger().timestamp() > proposal.passed_at.saturating_add(EXECUTION_EXPIRY_SECS)
+    {
+        proposal.status = ProposalStatus::Expired;
+        true
+    } else {
+        proposal.status == ProposalStatus::Expired
+    }
 }
 
 #[contract]
@@ -198,7 +231,8 @@ impl Governance {
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
         let config = load_config(&env)?;
-        let balance = proposal_weight(&env, &config.share_token, &proposer);
+        let now = env.ledger().timestamp();
+        let balance = proposal_weight(&env, &config.share_token, &proposer, now);
         if balance < config.min_share_balance {
             return Err(GovernanceError::InsufficientShareBalance);
         }
@@ -209,7 +243,6 @@ impl Governance {
             .get(&DataKey::ProposalCount)
             .unwrap_or(0);
         let id = count + 1;
-        let now = env.ledger().timestamp();
         let snapshot_supply = ShareTokenClient::new(&env, &config.share_token).total_supply();
         let proposal = Proposal {
             id,
@@ -225,6 +258,7 @@ impl Governance {
             voting_ends_at: now.saturating_add(config.voting_period_secs),
             execution_delay: config.execution_delay_secs,
             snapshot_supply,
+            passed_at: 0,
         };
 
         env.storage()
@@ -267,7 +301,7 @@ impl Governance {
             return Err(GovernanceError::VotingPeriodActive);
         }
 
-        let weight = proposal_weight(&env, &config.share_token, &voter);
+        let weight = proposal_weight(&env, &config.share_token, &voter, proposal.created_at);
         if weight <= 0 {
             return Err(GovernanceError::InsufficientShareBalance);
         }
@@ -302,6 +336,7 @@ impl Governance {
 
         if proposal.status == ProposalStatus::Cancelled
             || proposal.status == ProposalStatus::Executed
+            || proposal.status == ProposalStatus::Expired
         {
             return Err(GovernanceError::ProposalInactive);
         }
@@ -323,6 +358,13 @@ impl Governance {
         finalization?;
         if proposal.status != ProposalStatus::Passed {
             return Err(GovernanceError::InvalidProposalState);
+        }
+
+        if mark_expired_if_due(&env, &mut proposal) {
+            env.storage()
+                .instance()
+                .set(&DataKey::Proposal(proposal_id), &proposal);
+            return Err(GovernanceError::ProposalExpired);
         }
 
         env.events().publish(
@@ -357,10 +399,16 @@ impl Governance {
         if caller != proposal.proposer && caller != config.admin {
             return Err(GovernanceError::Unauthorized);
         }
-        if proposal.status == ProposalStatus::Cancelled
-            || proposal.status == ProposalStatus::Executed
-        {
-            return Err(GovernanceError::ProposalInactive);
+        // #929: also reject Expired and Rejected — only Active/Passed proposals
+        // can be cancelled; everything else is already in a terminal state.
+        match proposal.status {
+            ProposalStatus::Cancelled
+            | ProposalStatus::Executed
+            | ProposalStatus::Expired
+            | ProposalStatus::Rejected => {
+                return Err(GovernanceError::InvalidProposalState);
+            }
+            ProposalStatus::Active | ProposalStatus::Passed => {}
         }
 
         proposal.status = ProposalStatus::Cancelled;
@@ -391,10 +439,17 @@ impl Governance {
                 .instance()
                 .get::<DataKey, Proposal>(&DataKey::Proposal(id))
             {
+                let mut changed = false;
                 if proposal.status == ProposalStatus::Active
                     && env.ledger().timestamp() > proposal.voting_ends_at
                 {
                     let _ = finalize_proposal(&env, &mut proposal);
+                    changed = true;
+                }
+                if mark_expired_if_due(&env, &mut proposal) {
+                    changed = true;
+                }
+                if changed {
                     env.storage()
                         .instance()
                         .set(&DataKey::Proposal(id), &proposal);
@@ -407,5 +462,57 @@ impl Governance {
 
     pub fn get_config(env: Env) -> Result<GovernanceConfig, GovernanceError> {
         load_config(&env)
+    }
+
+    /// #930: Read-only preview of a voter's current voting weight for a given
+    /// proposal. Uses the same snapshot-based weight as `vote()` so callers see
+    /// exactly how much their vote will count before submitting a transaction.
+    /// Returns 0 when the proposal does not exist or the voter held no shares
+    /// at the snapshot timestamp.
+    pub fn get_voting_power(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<i128, GovernanceError> {
+        let config = load_config(&env)?;
+        let proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        let weight = proposal_weight(&env, &config.share_token, &voter, proposal.created_at);
+        Ok(weight)
+    }
+
+    /// Updates the quorum and pass-threshold, gated to the address holding
+    /// governance authority (`config.admin`) so quorum/threshold stay
+    /// configurable by current governance rather than fixed at deploy time.
+    /// Does not affect proposals already created — their `snapshot_supply`
+    /// and finalization use the config values in effect when `execute_proposal`
+    /// runs, consistent with how quorum/threshold already work today.
+    pub fn update_config(
+        env: Env,
+        caller: Address,
+        quorum_bps: u32,
+        pass_bps: u32,
+    ) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        let mut config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        if quorum_bps == 0 || quorum_bps > 10_000 {
+            return Err(GovernanceError::InvalidConfig);
+        }
+        if pass_bps <= 5_000 || pass_bps > 10_000 {
+            return Err(GovernanceError::InvalidConfig);
+        }
+
+        config.quorum_bps = quorum_bps;
+        config.pass_bps = pass_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("cfg")), (caller, quorum_bps, pass_bps));
+        Ok(())
     }
 }

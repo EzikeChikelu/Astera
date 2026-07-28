@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec,
 };
 
 const EVT: Symbol = symbol_short!("share");
@@ -14,6 +14,34 @@ pub enum DataKey {
     Balance(Address),
     Allowance(Address, Address),
     TotalSupply,
+    /// Historical (timestamp, balance) checkpoints per holder, append-only and
+    /// ordered by timestamp. Lets callers (e.g. governance) read a holder's
+    /// balance as of a past point in time instead of their current balance,
+    /// so voting power reflects the snapshot at proposal creation rather than
+    /// whatever the holder's balance happens to be when they cast their vote.
+    Checkpoints(Address),
+}
+
+/// Records a checkpoint of `who`'s new balance at the current ledger timestamp.
+/// Multiple writes within the same timestamp overwrite the last checkpoint for
+/// that timestamp rather than appending, keeping the list free of duplicates.
+fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
+    let key = DataKey::Checkpoints(who.clone());
+    let mut checkpoints: Vec<(u64, i128)> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+    let now = env.ledger().timestamp();
+    if let Some(last) = checkpoints.last() {
+        if last.0 == now {
+            checkpoints.set(checkpoints.len() - 1, (now, new_balance));
+            env.storage().persistent().set(&key, &checkpoints);
+            return;
+        }
+    }
+    checkpoints.push_back((now, new_balance));
+    env.storage().persistent().set(&key, &checkpoints);
 }
 
 #[contract]
@@ -41,9 +69,11 @@ impl ShareToken {
             panic!("amount must be positive");
         }
         let balance = Self::balance(env.clone(), to.clone());
+        let new_balance = balance + amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &(balance + amount));
+            .set(&DataKey::Balance(to.clone()), &new_balance);
+        write_checkpoint(&env, &to, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
         let new_total = total + amount;
@@ -64,9 +94,11 @@ impl ShareToken {
         if balance < amount {
             panic!("insufficient balance");
         }
+        let new_balance = balance - amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &(balance - amount));
+            .set(&DataKey::Balance(from.clone()), &new_balance);
+        write_checkpoint(&env, &from, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
         let new_total = total - amount;
@@ -86,14 +118,18 @@ impl ShareToken {
         if balance_from < amount {
             panic!("insufficient balance");
         }
+        let new_balance_from = balance_from - amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &(balance_from - amount));
+            .set(&DataKey::Balance(from.clone()), &new_balance_from);
+        write_checkpoint(&env, &from, new_balance_from);
 
         let balance_to = Self::balance(env.clone(), to.clone());
+        let new_balance_to = balance_to + amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
+            .set(&DataKey::Balance(to.clone()), &new_balance_to);
+        write_checkpoint(&env, &to, new_balance_to);
         env.events()
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
     }
@@ -131,13 +167,17 @@ impl ShareToken {
             panic!("insufficient balance");
         }
 
+        let new_balance_from = balance_from - amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &(balance_from - amount));
+            .set(&DataKey::Balance(from.clone()), &new_balance_from);
+        write_checkpoint(&env, &from, new_balance_from);
         let balance_to = Self::balance(env.clone(), to.clone());
+        let new_balance_to = balance_to + amount;
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &(balance_to + amount));
+            .set(&DataKey::Balance(to.clone()), &new_balance_to);
+        write_checkpoint(&env, &to, new_balance_to);
         env.storage().persistent().set(
             &DataKey::Allowance(from.clone(), spender.clone()),
             &(allowed - amount),
@@ -153,6 +193,41 @@ impl ShareToken {
             .persistent()
             .get(&DataKey::Balance(id))
             .unwrap_or(0)
+    }
+
+    /// Returns `id`'s balance as of `timestamp` (inclusive), based on recorded
+    /// checkpoints. Governance uses this to weight votes by the balance a
+    /// holder had at proposal creation, rather than their balance at vote
+    /// time — otherwise a holder could acquire shares mid-vote (or borrow them
+    /// just long enough to vote) to inflate their voting power.
+    pub fn balance_at(env: Env, id: Address, timestamp: u64) -> i128 {
+        let checkpoints: Vec<(u64, i128)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Checkpoints(id))
+            .unwrap_or(Vec::new(&env));
+
+        if checkpoints.is_empty() {
+            return 0;
+        }
+
+        // Binary search for the latest checkpoint at or before `timestamp`.
+        let mut lo: u32 = 0;
+        let mut hi: u32 = checkpoints.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if checkpoints.get(mid).unwrap().0 <= timestamp {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if lo == 0 {
+            0
+        } else {
+            checkpoints.get(lo - 1).unwrap().1
+        }
     }
 
     pub fn total_supply(env: Env) -> i128 {
@@ -178,7 +253,8 @@ impl ShareToken {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::Env;
 
     fn setup(env: &Env) -> (ShareTokenClient<'_>, Address) {
         let contract_id = env.register(ShareToken, ());
@@ -433,5 +509,78 @@ mod test {
         client.mint(&owner, &1_000i128);
         client.approve(&owner, &spender, &100i128);
         client.transfer_from(&spender, &owner, &recipient, &101i128);
+    }
+
+    #[test]
+    fn test_balance_at_before_any_checkpoint_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        assert_eq!(client.balance_at(&alice, &500), 0);
+    }
+
+    #[test]
+    fn test_balance_at_reflects_balance_at_past_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        client.mint(&alice, &100i128);
+
+        env.ledger().with_mut(|l| l.timestamp = 2_000);
+        client.mint(&alice, &400i128);
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        client.burn(&alice, &200i128);
+
+        // Balance history: t=1000 -> 100, t=2000 -> 500, t=3000 -> 300
+        assert_eq!(client.balance_at(&alice, &1_000), 100);
+        assert_eq!(client.balance_at(&alice, &1_500), 100);
+        assert_eq!(client.balance_at(&alice, &2_000), 500);
+        assert_eq!(client.balance_at(&alice, &2_999), 500);
+        assert_eq!(client.balance_at(&alice, &3_000), 300);
+        assert_eq!(client.balance_at(&alice, &10_000), 300);
+    }
+
+    #[test]
+    fn test_balance_at_not_affected_by_later_transfers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        client.mint(&alice, &1_000i128);
+        let snapshot_ts = env.ledger().timestamp();
+
+        env.ledger().with_mut(|l| l.timestamp = 2_000);
+        client.transfer(&alice, &bob, &1_000i128);
+
+        // Historical balance at proposal-creation time is unaffected by the
+        // later transfer that drained alice's live balance to zero.
+        assert_eq!(client.balance_at(&alice, &snapshot_ts), 1_000);
+        assert_eq!(client.balance(&alice), 0);
+    }
+
+    #[test]
+    fn test_balance_at_dedupes_same_timestamp_writes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        // transfer-to-self writes two checkpoints for alice at the same
+        // timestamp; balance_at must reflect the final value, not stack
+        // duplicate entries.
+        client.mint(&alice, &200i128);
+        client.transfer(&alice, &alice, &100i128);
+        assert_eq!(client.balance_at(&alice, &1_000), 200);
     }
 }

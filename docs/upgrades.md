@@ -6,6 +6,10 @@ migrated after an upgrade. For the operational deploy runbook see
 [`contract-upgrade-guide.md`](./contract-upgrade-guide.md); this document focuses
 on the on-chain mechanism and the version/migration hooks added in #397.
 
+The newer `governance` and `insurance` contracts do **not** currently
+implement this flow at all — see [Per-contract status](#per-contract-status)
+below.
+
 ## Overview
 
 Each contract supports an in-place WASM upgrade behind a 24-hour timelock, plus a
@@ -106,7 +110,26 @@ stellar contract invoke --id <CONTRACT_ID> -- migration_version
 | `invoice` | ✅ | ✅ | ✅ |
 | `pool` | ✅ | ✅ | ✅ |
 | `credit_score` | ✅ | ✅ | ✅ |
+| `governance` | ❌ | ❌ | ❌ |
+| `insurance` | ❌ | ❌ | ❌ |
 
-`CURRENT_MIGRATION_VERSION` is currently `1` in each contract; freshly
-initialized contracts start at `migration_version() == 0` until `run_migration`
-is invoked.
+`CURRENT_MIGRATION_VERSION` is currently `1` in each contract that has one;
+freshly initialized contracts start at `migration_version() == 0` until
+`run_migration` is invoked.
+
+### `governance` and `insurance` — no upgrade mechanism yet (#988)
+
+Neither contract implements any part of the flow above — there is no
+`propose_upgrade`/`execute_upgrade`/`run_migration`/`version`/
+`migration_version` in `contracts/governance/src/lib.rs` or
+`contracts/insurance/src/lib.rs` (confirmed by grepping both files; none of
+those identifiers appear at all). A deployed `governance` or `insurance`
+contract today has **no in-place upgrade path** — replacing its logic
+requires deploying a new contract instance and migrating state manually.
+
+Adding the timelocked upgrade + migration mechanism to these two contracts —
+following the same `propose_upgrade`/`execute_upgrade`/`run_migration`
+pattern as `invoice`/`pool`/`credit_score` — is real contract work (new
+`DataKey` variants, new admin-gated entry points, tests), not a documentation
+change, and is out of scope here. This section exists so the gap is explicit
+rather than silently assumed away.

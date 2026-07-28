@@ -142,6 +142,75 @@ export interface AsteraConfig {
   oracleRegistryContractId?: string;
   complianceContractId?: string;
   trancheContractId?: string;
+  /** #864: role-based multisig access-control contract, if deployed. */
+  accessControlContractId?: string;
+}
+
+// ─── #864: role-based multisig access control ──────────────────────────────
+// Mirrors contracts/access_control/src/lib.rs's public types.
+
+export type Role =
+  | 'SuperAdmin'
+  | 'RiskManager'
+  | 'TreasuryManager'
+  | 'ComplianceOfficer'
+  | 'OracleManager';
+
+export const ALL_ROLES: Role[] = [
+  'SuperAdmin',
+  'RiskManager',
+  'TreasuryManager',
+  'ComplianceOfficer',
+  'OracleManager',
+];
+
+/** Human-readable label for one of the five fixed roles, for admin UI. */
+export const ROLE_LABELS: Record<Role, string> = {
+  SuperAdmin: 'Super Admin',
+  RiskManager: 'Risk Manager',
+  TreasuryManager: 'Treasury Manager',
+  ComplianceOfficer: 'Compliance Officer',
+  OracleManager: 'Oracle Manager',
+};
+
+export interface MultiSigConfig {
+  signers: string[];
+  threshold: number;
+}
+
+export type ProposalStatus = 'Pending' | 'Approved' | 'Executed' | 'Rejected';
+
+// Mirrors contracts/access_control/src/lib.rs's `ActionPayload` enum. Each
+// variant's `values` tuple matches that Rust variant's fields in order.
+export type ActionPayload =
+  | { tag: 'SetPaused'; values: [boolean] }
+  | { tag: 'SetYield'; values: [number] }
+  | { tag: 'SetTreasury'; values: [string] }
+  | { tag: 'WithdrawRevenue'; values: [string, bigint] }
+  | { tag: 'SetOracleContract'; values: [string] }
+  | { tag: 'SetKycRequired'; values: [boolean] }
+  | { tag: 'SetInvestorKyc'; values: [string, boolean] }
+  | { tag: 'SetMaxUtilization'; values: [number] }
+  | { tag: 'SetOracle'; values: [string] }
+  | { tag: 'RegisterDebtor'; values: [string, string, bigint] }
+  | { tag: 'DeactivateDebtor'; values: [string] }
+  | { tag: 'AddKeeper'; values: [string] }
+  | { tag: 'SetLateThreshold'; values: [bigint] }
+  | { tag: 'SetScoreThresholds'; values: [number, number, number, number] }
+  | { tag: 'RegisterAttestor'; values: [string, number, number] }
+  | { tag: 'AddSigner'; values: [Role, string] }
+  | { tag: 'RemoveSigner'; values: [Role, string] }
+  | { tag: 'SetThreshold'; values: [Role, number] };
+
+export interface Proposal {
+  role: Role;
+  target: string;
+  action: ActionPayload;
+  proposer: string;
+  approvals: string[];
+  createdAt: bigint;
+  expiresAt: bigint;
+  status: ProposalStatus;
 }
 
 export type ComplianceStatus =
@@ -185,6 +254,16 @@ export interface OracleInfo {
   totalSlashes: number;
   registeredAt: number;
   deregisterRequestedAt?: number;
+}
+
+export interface RegistryConfig {
+  minStake: bigint;
+  stakeToken: string;
+  requiredVotes: number;
+  quorumBps: number;
+  roundDurationSecs: number;
+  deregisterCooldownSecs: number;
+  treasury?: string;
 }
 
 export interface VerificationRound {

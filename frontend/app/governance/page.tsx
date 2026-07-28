@@ -20,7 +20,14 @@ const PROPOSALS_PAGE_SIZE = 10;
 
 type StatusFilter = 'All' | ProposalStatus;
 
-const STATUS_FILTERS: StatusFilter[] = ['All', 'Active', 'Passed', 'Rejected', 'Executed'];
+const STATUS_FILTERS: StatusFilter[] = [
+  'All',
+  'Active',
+  'Passed',
+  'Rejected',
+  'Executed',
+  'Expired',
+];
 
 export default function GovernancePage() {
   const { wallet } = useStore();

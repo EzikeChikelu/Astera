@@ -148,6 +148,16 @@ export function formatEnvErrors(errors: EnvValidationError[]): string {
   return errors.map((e) => `  - ${e.variable}: ${e.message}`).join('\n');
 }
 
+// #783: canonical/absolute base URL for metadata (OG images, canonical tags,
+// sitemap entries). Falls back to the Vercel preview URL, then localhost, so
+// previews and local dev still resolve to a valid absolute URL.
+export function getAppUrl(): string {
+  return (
+    process.env.NEXT_PUBLIC_APP_URL ??
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000')
+  );
+}
+
 export function assertEnvValid(): void {
   const { valid, errors } = validateEnv();
   if (!valid) {

@@ -13,6 +13,10 @@ export interface OracleConfig {
   oracleRegistryContractId?: string;
   stakeTokenId?: string;
   registerStakeAmount?: bigint;
+  // #980: where the listener persists the last-processed Horizon paging
+  // token, so a restart resumes the stream instead of starting from 'now'
+  // (missing events) or a fixed lookback window (risking resubmitted votes).
+  listenerCursorPath: string;
 }
 
 export interface InvoiceCreatedEvent {

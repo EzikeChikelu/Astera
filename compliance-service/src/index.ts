@@ -8,7 +8,7 @@
 import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc, Address, nativeToScVal, xdr } from '@stellar/stellar-sdk';
-import { MockScreener } from './screener';
+import { MockScreener, HttpScreenerProvider, ScreenerProvider } from './screener';
 import { Monitor } from './monitor';
 import type { ComplianceConfig, RiskTier, ScreenDecision } from './types';
 
@@ -27,9 +27,19 @@ const config: ComplianceConfig = {
   structuringThreshold: BigInt(process.env.STRUCTURING_THRESHOLD || '10000000000'),
   structuringWindowMs: parseInt(process.env.STRUCTURING_WINDOW_MS || '3600000', 10),
   structuringMaxCount: parseInt(process.env.STRUCTURING_MAX_COUNT || '5', 10),
+  screeningProviderUrl: process.env.SCREENING_PROVIDER_URL || '',
+  screeningProviderApiKey: process.env.SCREENING_PROVIDER_API_KEY || '',
+  screeningProviderTimeoutMs: parseInt(process.env.SCREENING_PROVIDER_TIMEOUT_MS || '5000', 10),
+  rescreenCheckIntervalMs: parseInt(process.env.RESCREEN_CHECK_INTERVAL_MS || String(60 * 60 * 1000), 10),
 };
 
-const screener = new MockScreener();
+const screener: ScreenerProvider = config.screeningProviderUrl
+  ? new HttpScreenerProvider(
+      config.screeningProviderUrl,
+      config.screeningProviderTimeoutMs,
+      config.screeningProviderApiKey || undefined,
+    )
+  : new MockScreener();
 let monitor: Monitor | null = null;
 
 function requireAdmin(req: http.IncomingMessage): boolean {
@@ -90,6 +100,13 @@ async function submitOnChain(
   return send.hash;
 }
 
+/** #982: re-runs the screener for a subject due for periodic re-screening and submits on-chain. */
+async function runRescreen(address: string): Promise<void> {
+  const result = await screener.screen(address);
+  const hash = await submitOnChain(address, result.status, result.reasonCode, result.riskTier, result.notes);
+  console.log(`[rescreen] ${address} -> ${result.status} (tx ${hash})`);
+}
+
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -109,6 +126,7 @@ async function main() {
 
   if (config.screenerSecretKey && config.complianceContractId) {
     monitor = new Monitor(config);
+    monitor.setRescreenHandler(runRescreen);
     await monitor.start();
   } else {
     console.warn(
@@ -179,6 +197,7 @@ async function main() {
             result.riskTier,
             body.notesHash || result.notes,
           );
+          monitor?.trackSubject(body.address);
         }
 
         return json(200, { result, txHash });

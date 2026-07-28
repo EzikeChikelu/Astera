@@ -10,6 +10,7 @@ import {
   COMPLIANCE_CONTRACT_ID,
   REFERRAL_CONTRACT_ID,
   TRANCHE_CONTRACT_ID,
+  ACCESS_CONTROL_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -48,7 +49,12 @@ import type {
   RateModelConfig,
   RateSnapshot,
   ReferralStats,
+  Role,
+  MultiSigConfig,
+  ActionPayload,
+  Proposal,
 } from './types';
+import { ALL_ROLES } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
 // `./scripts/gen-bindings.sh`; see CONTRIBUTING.md.
@@ -101,11 +107,31 @@ if (REFERRAL_CONTRACT_ID) {
 const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
 const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? 'http://localhost:4000';
 
-type RpcAccount = Awaited<ReturnType<StellarRpc.Server['getAccount']>>;
+type RpcAccount = Awaited<ReturnType<StellarRpc.Server['getAccount']>> & AccountWithBalances;
 type RpcBuiltTransaction = Parameters<StellarRpc.Server['simulateTransaction']>[0];
 
+interface AccountWithBalances {
+  balances: Array<{ asset_type: string; balance: string }>;
+}
+
 function getRpcAccount(address: string): Promise<RpcAccount> {
-  return rpcExecute<RpcAccount>((server) => server.getAccount(address));
+  return rpcExecute((server) => server.getAccount(address) as Promise<RpcAccount>);
+}
+
+function getNativeBalanceStroops(account: AccountWithBalances | undefined): bigint {
+  if (!account?.balances) return 0n;
+  const nativeBalance = account.balances.find((balance) => balance.asset_type === 'native');
+  if (!nativeBalance?.balance) return 0n;
+  return BigInt(Math.round(Number.parseFloat(nativeBalance.balance) * 1_000_000));
+}
+
+function ensureSufficientNativeBalance(
+  account: AccountWithBalances,
+  requiredStroops = BigInt(BASE_FEE),
+) {
+  if (getNativeBalanceStroops(account) < requiredStroops) {
+    throw new Error('Insufficient balance for this transaction');
+  }
 }
 
 function simulateRpcTransaction(
@@ -470,6 +496,7 @@ export async function buildDepositTx(
   amount: bigint,
 ): Promise<string> {
   const account = await getRpcAccount(investor);
+  ensureSufficientNativeBalance(account);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -632,6 +659,7 @@ export async function buildCommitToInvoiceTx(params: {
   amount: bigint;
 }): Promise<string> {
   const account = await getRpcAccount(params.investor);
+  ensureSufficientNativeBalance(account);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {

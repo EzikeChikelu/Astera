@@ -40,6 +40,33 @@ impl DummyInvoice {
             .get(&Symbol::new(&env, "calls"))
             .unwrap_or_else(|| Vec::new(&env))
     }
+
+    /// Lets tests flip what `get_invoice_verification_state` reports (#953:
+    /// not-awaiting rejection, #957: value-tiered quorum). Defaults to
+    /// `(true, 0)` so existing tests that never call this keep working
+    /// unchanged.
+    pub fn set_verification_state(env: Env, awaiting: bool, amount: i128) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "awaiting"), &awaiting);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "amount"), &amount);
+    }
+
+    pub fn get_invoice_verification_state(env: Env, _id: u64) -> (bool, i128) {
+        let awaiting: bool = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "awaiting"))
+            .unwrap_or(true);
+        let amount: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "amount"))
+            .unwrap_or(0);
+        (awaiting, amount)
+    }
 }
 
 fn setup(
@@ -409,4 +436,136 @@ fn test_no_active_oracles_blocks_round_open() {
     let hash = String::from_str(&env, "h1");
     let result = client.try_open_verification_round(&caller, &7u64, &hash);
     assert_eq!(result, Err(Ok(OracleRegistryError::NoActiveOracles)));
+}
+
+// #953: `open_verification_round` must confirm with the invoice contract that
+// the invoice is actually awaiting verification before wasting registry
+// storage on a round for it.
+#[test]
+fn test_open_round_rejects_invoice_not_awaiting_verification() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, stake_token, invoice) = setup(&env, 1_000);
+    register_n_equal(&env, &client, &stake_token, 3, 1_000);
+    invoice.set_verification_state(&false, &0);
+
+    let caller = Address::generate(&env);
+    let hash = String::from_str(&env, "h1");
+    let result = client.try_open_verification_round(&caller, &7u64, &hash);
+    assert_eq!(
+        result,
+        Err(Ok(OracleRegistryError::InvoiceNotAwaitingVerification))
+    );
+}
+
+// #957: a configured quorum tier overrides the flat default for invoices at
+// or above its threshold, so a high-value invoice can demand a stricter
+// quorum than a low-value one.
+#[test]
+fn test_open_round_applies_quorum_tier_by_invoice_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, stake_token, invoice) = setup(&env, 1_000);
+    register_n_equal(&env, &client, &stake_token, 3, 1_000);
+
+    client.set_quorum_tiers(
+        &admin,
+        &Vec::from_array(
+            &env,
+            [
+                oracle_registry::QuorumTier {
+                    min_invoice_amount: 0,
+                    quorum_bps: 5_000,
+                },
+                oracle_registry::QuorumTier {
+                    min_invoice_amount: 1_000_000,
+                    quorum_bps: 9_000,
+                },
+            ],
+        ),
+    );
+
+    // A small invoice lands in the 0-threshold tier.
+    invoice.set_verification_state(&true, &500);
+    let caller = Address::generate(&env);
+    client.open_verification_round(&caller, &7u64, &String::from_str(&env, "h1"));
+    assert_eq!(
+        client.get_verification_round(&7u64).unwrap().quorum_bps,
+        5_000
+    );
+
+    // A large invoice clears the higher tier's threshold.
+    invoice.set_verification_state(&true, &2_000_000);
+    client.open_verification_round(&caller, &8u64, &String::from_str(&env, "h2"));
+    assert_eq!(
+        client.get_verification_round(&8u64).unwrap().quorum_bps,
+        9_000
+    );
+}
+
+#[test]
+fn test_set_quorum_tiers_rejects_unsorted_thresholds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _stake_token, _invoice) = setup(&env, 1_000);
+
+    let result = client.try_set_quorum_tiers(
+        &admin,
+        &Vec::from_array(
+            &env,
+            [
+                oracle_registry::QuorumTier {
+                    min_invoice_amount: 1_000_000,
+                    quorum_bps: 9_000,
+                },
+                oracle_registry::QuorumTier {
+                    min_invoice_amount: 0,
+                    quorum_bps: 5_000,
+                },
+            ],
+        ),
+    );
+    assert_eq!(result, Err(Ok(OracleRegistryError::InvalidQuorumTiers)));
+}
+
+// #954: slash_oracle must cite a real, existing round as evidence — an
+// admin can't slash on a fabricated reference or with no justification text.
+#[test]
+fn test_slash_oracle_requires_existing_round_reference() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, stake_token, _invoice) = setup(&env, 1_000);
+    let operator = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &stake_token).mint(&operator, &1_000);
+    client.register_oracle(&operator, &1_000);
+
+    let result = client.try_slash_oracle(
+        &admin,
+        &operator,
+        &5_000u32,
+        &999u64, // no round ever opened for this invoice id
+        &String::from_str(&env, "evidence"),
+    );
+    assert_eq!(result, Err(Ok(OracleRegistryError::SlashRoundNotFound)));
+}
+
+#[test]
+fn test_slash_oracle_requires_non_empty_evidence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, stake_token, _invoice) = setup(&env, 1_000);
+    let operator = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &stake_token).mint(&operator, &1_000);
+    client.register_oracle(&operator, &1_000);
+    let caller = Address::generate(&env);
+    client.open_verification_round(&caller, &7u64, &String::from_str(&env, "h1"));
+
+    let result = client.try_slash_oracle(
+        &admin,
+        &operator,
+        &5_000u32,
+        &7u64,
+        &String::from_str(&env, ""),
+    );
+    assert_eq!(result, Err(Ok(OracleRegistryError::InvalidEvidence)));
 }

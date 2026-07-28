@@ -32,7 +32,7 @@ jest.mock('@stellar/stellar-sdk', () => {
 
 import * as stellar from '@/lib/stellar';
 import { Account, Keypair } from '@stellar/stellar-sdk';
-import { buildCreateInvoiceTx } from '@/lib/contracts';
+import { buildCreateInvoiceTx, buildDepositTx, buildCommitToInvoiceTx } from '@/lib/contracts';
 
 describe('contract error handling', () => {
   it('maps wallet rejection to user-facing message', () => {
@@ -121,5 +121,32 @@ describe('buildCreateInvoiceTx validation (#687)', () => {
     expect(typeof xdr).toBe('string');
     expect(xdr).toBe('BASE64_XDR_STRING');
     expect(rpcExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects deposit before simulation when the native balance is insufficient', async () => {
+    const token = 'CC4UBX4HPQ6N4UJ5F5GX2KQJ3E6ZLZ5JQ6P5T3X4VY3QYJ2NTQJX5V5X';
+    const account = new Account(owner, '0');
+    Object.assign(account, {
+      balances: [{ asset_type: 'native', balance: '0.0000001' }],
+    });
+
+    rpcExecute.mockResolvedValueOnce(account);
+
+    await expect(buildDepositTx(owner, token, 1_000_000n)).rejects.toThrow(/insufficient balance/i);
+    expect(rpcExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects commit-to-invoice before simulation when the wallet cannot cover the fee', async () => {
+    const account = new Account(owner, '0');
+    Object.assign(account, {
+      balances: [{ asset_type: 'native', balance: '0.0000000' }],
+    });
+
+    rpcExecute.mockResolvedValueOnce(account);
+
+    await expect(
+      buildCommitToInvoiceTx({ investor: owner, invoiceId: 7, amount: 1_000n }),
+    ).rejects.toThrow(/insufficient balance/i);
+    expect(rpcExecute).toHaveBeenCalledTimes(1);
   });
 });

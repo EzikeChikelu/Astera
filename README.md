@@ -1,6 +1,7 @@
 # Astera
 
 [![Soroban Contracts CI](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml/badge.svg?branch=main)](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml)
+[![codecov](https://codecov.io/gh/astera-hq/Astera/branch/main/graph/badge.svg)](https://codecov.io/gh/astera-hq/Astera)
 
 **Real World Assets on Stellar. Invoice financing for emerging markets.**
 
@@ -268,6 +269,21 @@ Branch protection for `main` should be configured so that:
 To apply, in GitHub: **Settings → Branches → Branch protection rules → Add rule** for
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
+
+### Code coverage
+
+CI uploads coverage to [Codecov](https://codecov.io/gh/astera-hq/Astera) as two independent
+flags, each with its own PR status check (configured in [`codecov.yml`](codecov.yml)):
+
+| Flag        | Source                               | Target |
+| ----------- | ------------------------------------- | ------ |
+| `contracts` | `cargo llvm-cov` over the whole Rust workspace | 80% |
+| `frontend`  | `next test -- --coverage` (Jest)      | 70%    |
+
+A PR fails the corresponding status check if it drops a flag's coverage by more than the
+configured 1% threshold. Uploading requires a `CODECOV_TOKEN` repository secret from
+codecov.io; until that secret is set, the upload steps no-op (`fail_ci_if_error: false`)
+rather than failing CI outright.
 
 ---
 

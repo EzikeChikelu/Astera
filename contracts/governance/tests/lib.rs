@@ -391,3 +391,179 @@ fn test_cancel_proposal_by_proposer() {
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Cancelled);
 }
+
+// ── vote weight is snapshotted at proposal creation ──────────────────────────
+
+#[test]
+fn test_vote_weight_ignores_shares_acquired_after_proposal_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let latecomer = Address::generate(&env);
+    share.mint(&proposer, &1_000_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+
+    // latecomer acquires a large share balance only after the proposal was
+    // created (in a later ledger) — this must not count toward voting weight.
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    share.mint(&latecomer, &5_000_000i128);
+    let result = gov.try_vote(&id, &latecomer, &true);
+    assert!(
+        result.is_err(),
+        "voter with zero balance at snapshot time must not be able to vote"
+    );
+}
+
+#[test]
+fn test_vote_weight_uses_balance_at_creation_not_at_vote_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &50_000i128);
+    // Supply at creation = 51_000; quorum (10%) = 5_100
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+
+    // Voter transfers away most of their shares after the snapshot (in a
+    // later ledger) but before voting — their voting weight must still
+    // reflect the creation-time balance (50_000), not the post-transfer live
+    // balance.
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    let stranger = Address::generate(&env);
+    share.transfer(&voter, &stranger, &49_000i128);
+    assert_eq!(share.balance(&voter), 1_000);
+
+    gov.vote(&id, &voter, &true);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+    gov.execute_proposal(&id);
+
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 50_000i128);
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+// ── governance-configurable quorum / pass threshold ──────────────────────────
+
+#[test]
+fn test_update_config_by_admin_changes_quorum_and_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _share_admin) = setup_share(&env);
+    let (gov, gov_admin) = setup_governance(&env, &share_id);
+
+    gov.update_config(&gov_admin, &2_000u32, &5_500u32);
+
+    let config = gov.get_config();
+    assert_eq!(config.quorum_bps, 2_000);
+    assert_eq!(config.pass_bps, 5_500);
+}
+
+#[test]
+fn test_update_config_rejects_non_admin_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _gov_admin) = setup_governance(&env, &share_id);
+
+    let impostor = Address::generate(&env);
+    let result = gov.try_update_config(&impostor, &2_000u32, &5_500u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_update_config_rejects_invalid_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _share_admin) = setup_share(&env);
+    let (gov, gov_admin) = setup_governance(&env, &share_id);
+
+    // pass_bps must be > 5_000
+    let result = gov.try_update_config(&gov_admin, &2_000u32, &5_000u32);
+    assert!(result.is_err());
+}
+
+// ── passed proposals expire if not executed in time ──────────────────────────
+
+#[test]
+fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    gov.vote(&id, &voter, &true);
+
+    // Past voting period + execution delay, proposal is Passed but not yet executed.
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+    gov.list_proposals();
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Passed);
+
+    // Advance 7 days past passing without executing.
+    env.ledger().with_mut(|l| l.timestamp += 7 * 86_400 + 1);
+
+    let result = gov.try_execute_proposal(&id);
+    assert!(result.is_err(), "expired proposal must not be executable");
+
+    gov.list_proposals();
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Expired);
+}
+
+#[test]
+fn test_passed_proposal_executes_within_expiry_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    gov.vote(&id, &voter, &true);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+
+    // Executed comfortably within the 7-day expiry window.
+    env.ledger().with_mut(|l| l.timestamp += 3 * 86_400);
+    gov.execute_proposal(&id);
+
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}

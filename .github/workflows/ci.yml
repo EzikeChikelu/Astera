@@ -14,6 +14,7 @@ jobs:
   contracts:
     name: Smart Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: .
@@ -22,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown,wasm32v1-none
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
       - name: Lint contracts with clippy
@@ -34,8 +35,29 @@ jobs:
       - name: Build contracts for integration tests
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
       - run: cargo test
-      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
-      - run: cargo test -p integration-tests --test integration_tests
+        timeout-minutes: 10
+      - name: Run fuzz tests (short)
+        timeout-minutes: 10
+        run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+      - name: Run integration tests
+        timeout-minutes: 15
+        run: cargo test -p integration-tests --test integration_tests
+      # #781: code coverage for the Soroban contracts. Runs after the tests
+      # above (not instead of them) since cargo-llvm-cov's own instrumented
+      # `cargo test` still needs the prebuilt wasm32v1-none release
+      # artifacts from the "Build contracts for integration tests" step.
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Generate contracts coverage report
+        timeout-minutes: 15
+        run: cargo llvm-cov --workspace --lcov --output-path contracts-lcov.info
+      - name: Upload contracts coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: contracts-lcov.info
+          flags: contracts
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Check WASM size
@@ -57,9 +79,33 @@ jobs:
           path: target/wasm32-unknown-unknown/release/*.wasm
           retention-days: 30
 
+  benchmarks:
+    name: Contract Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `cargo bench` fails the job on a compile/panic error in the benchmark
+      # harness itself, which is enough to catch a contract-call regression
+      # that blows past a resource limit instead of it only surfacing later
+      # as a production failure. `--noplot` skips gnuplot/plotters output,
+      # which isn't needed (or reliably available) on the CI runner.
+      - name: Run contract benchmarks
+        run: cargo bench -p benchmarks -- --noplot
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-benchmark-results
+          path: target/criterion/
+          retention-days: 30
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -90,6 +136,19 @@ jobs:
       - name: Run cross-contract integration tests
         working-directory: .
         run: cargo test --manifest-path contracts/tests/Cargo.toml
+
+      # #781: frontend Jest coverage, uploaded to Codecov under its own flag
+      # so contract and frontend coverage are tracked (and can regress)
+      # independently.
+      - name: Frontend tests with coverage
+        run: npm test -- --coverage --coverageReporters=lcov
+      - name: Upload frontend coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: frontend/coverage/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   # E2E Tests job is temporarily disabled: frontend/e2e/contract-ids.ts
   # deliberately fails fast in CI when real (non-placeholder) contract IDs
@@ -167,6 +226,7 @@ jobs:
   deploy-smoke-test:
     name: Deploy Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [contracts]
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     env:

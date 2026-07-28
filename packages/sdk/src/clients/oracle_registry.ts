@@ -1,14 +1,18 @@
 import { rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { BaseClient, nativeToScVal, scValToNative, Address } from './base';
+import { Errors as OracleRegistryErrors } from '../generated/oracle_registry';
 import type {
   ClientConfig,
   VerificationRound,
   OracleInfo,
+  RegistryConfig,
   TransactionProgress,
 } from '../types';
 import type { Signer } from '../types';
 
 export class OracleRegistryClient extends BaseClient {
+  protected override readonly errors = OracleRegistryErrors;
+
   constructor(config: ClientConfig) {
     super(config);
   }
@@ -92,6 +96,23 @@ export class OracleRegistryClient extends BaseClient {
       openedAt: Number(r.opened_at),
       deadline: Number(r.deadline),
       oracleHash: r.oracle_hash as string,
+    };
+  }
+
+  async getRegistryConfig(): Promise<RegistryConfig> {
+    const sim = await this.simulate('get_registry_config', []);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+    return {
+      minStake: BigInt(String(raw.min_stake)),
+      stakeToken: raw.stake_token as string,
+      requiredVotes: Number(raw.required_votes),
+      quorumBps: Number(raw.quorum_bps),
+      roundDurationSecs: Number(raw.round_duration_secs),
+      deregisterCooldownSecs: Number(raw.deregister_cooldown_secs),
+      treasury: (raw.treasury as string | null) ?? undefined,
     };
   }
 

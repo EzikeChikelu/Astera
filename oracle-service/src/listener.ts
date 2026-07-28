@@ -1,19 +1,28 @@
+import * as fs from 'fs';
 import { Horizon, xdr, scValToNative } from '@stellar/stellar-sdk';
 import { OracleConfig } from './types';
 import { Verifier } from './verifier';
 import { ConsensusTracker } from './consensus';
+import { StakingMetricsTracker } from './staking';
 
 export class Listener {
   private config: OracleConfig;
   private verifier: Verifier;
   private horizon: Horizon.Server;
   private consensusTracker?: ConsensusTracker;
+  private stakingTracker?: StakingMetricsTracker;
   public processedCount = 0;
 
-  constructor(config: OracleConfig, verifier: Verifier, consensusTracker?: ConsensusTracker) {
+  constructor(
+    config: OracleConfig,
+    verifier: Verifier,
+    consensusTracker?: ConsensusTracker,
+    stakingTracker?: StakingMetricsTracker,
+  ) {
     this.config = config;
     this.verifier = verifier;
     this.consensusTracker = consensusTracker;
+    this.stakingTracker = stakingTracker;
     this.horizon = new Horizon.Server(config.horizonUrl);
   }
 
@@ -25,18 +34,46 @@ export class Listener {
       console.log(`[Listener] Oracle registry contract: ${this.config.oracleRegistryContractId}`);
     }
 
-    // Subscribe to contract effects (which include events)
-    // Note: In a production environment, you should persist the cursor to resume after restart.
+    // #980: resume from the last successfully processed ledger position
+    // instead of always starting from 'now', so a restart neither misses
+    // events that occurred while the service was down nor resubmits
+    // already-processed votes by guessing at a lookback window.
+    const cursor = this.loadCursor();
+    console.log(`[Listener] Starting stream from cursor: ${cursor}`);
+
     this.horizon.effects()
-      .cursor('now')
+      .cursor(cursor)
       .stream({
         onmessage: (effect: any) => {
           this.handleEffect(effect);
+          if (effect.paging_token) {
+            this.saveCursor(effect.paging_token);
+          }
         },
         onerror: (error: any) => {
           console.error('[Listener] Stream error:', error);
         }
       });
+  }
+
+  private loadCursor(): string {
+    try {
+      const saved = fs.readFileSync(this.config.listenerCursorPath, 'utf-8').trim();
+      if (saved) {
+        return saved;
+      }
+    } catch {
+      // No checkpoint file yet (first run, or it was deleted) — start fresh.
+    }
+    return 'now';
+  }
+
+  private saveCursor(pagingToken: string): void {
+    try {
+      fs.writeFileSync(this.config.listenerCursorPath, pagingToken, 'utf-8');
+    } catch (error) {
+      console.error('[Listener] Failed to persist stream cursor:', error);
+    }
   }
 
   private handleEffect(effect: any) {
@@ -90,9 +127,12 @@ export class Listener {
       // #861: forward every event under the registry's "ORACLE" topic
       // namespace to the consensus tracker so the health endpoint can report
       // live round state without a separate polling loop.
-      if (segment1 === 'ORACLE' && this.consensusTracker) {
+      if (segment1 === 'ORACLE') {
         const value = this.decodeScVal(valueXdr);
-        this.consensusTracker.handleEvent(segment2, value);
+        this.consensusTracker?.handleEvent(segment2, value);
+        // #979: also forward to the staking metrics tracker, which filters
+        // for `slashed` events concerning this node's own oracle address.
+        this.stakingTracker?.handleEvent(segment2, value, effect.created_at);
       }
     } catch (error) {
       console.error('[Listener] Failed to process effect:', error);

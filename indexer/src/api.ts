@@ -6,25 +6,54 @@ import express from 'express';
 import Database from 'better-sqlite3';
 import { getEvents, getTrancheApy } from './db';
 
-export function startApiServer(db: Database.Database, port: number): void {
+export function startApiServer(
+  db: Database.Database,
+  port: number,
+  state?: { lastProcessedLedger: string },
+): void {
   const app = express();
   app.use(express.json());
 
-  // Health check
-  app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  // #973: Enhanced health check with last-processed ledger
+  app.get("/health", (_req, res) => {
+    try {
+      const db_any = db as any;
+      const row = db_any
+        .prepare(
+          "SELECT ledger_sequence FROM events ORDER BY ledger_sequence DESC LIMIT 1",
+        )
+        .get() as { ledger_sequence: number } | undefined;
+
+      const lastProcessedLedger =
+        state?.lastProcessedLedger || row?.ledger_sequence?.toString() || null;
+      const latestStoredLedger = row?.ledger_sequence || null;
+
+      res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        lastProcessedLedger,
+        latestStoredLedger,
+        indexerActive: true,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        status: "error",
+        error: err.message,
+        timestamp: new Date().toISOString(),
+      });
+    }
   });
 
   // Get events with optional filters
-  app.get('/events', (req, res) => {
+  app.get("/events", (req, res) => {
     try {
       const {
         contract_id,
         contract_type,
         event_type,
         actor_address,
-        limit = '50',
-        offset = '0',
+        limit = "50",
+        offset = "0",
       } = req.query;
 
       const events = getEvents(db, {
@@ -43,10 +72,10 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // Get events by actor address
-  app.get('/events/actor/:actorAddress', (req, res) => {
+  app.get("/events/actor/:actorAddress", (req, res) => {
     try {
       const { actorAddress } = req.params;
-      const { limit = '50', offset = '0' } = req.query;
+      const { limit = "50", offset = "0" } = req.query;
 
       const events = getEvents(db, {
         actorAddress,
@@ -61,10 +90,10 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // Get events by contract
-  app.get('/events/contract/:contractId', (req, res) => {
+  app.get("/events/contract/:contractId", (req, res) => {
     try {
       const { contractId } = req.params;
-      const { limit = '50', offset = '0' } = req.query;
+      const { limit = "50", offset = "0" } = req.query;
 
       const events = getEvents(db, {
         contractId,
@@ -79,10 +108,10 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // Get events by type
-  app.get('/events/type/:eventType', (req, res) => {
+  app.get("/events/type/:eventType", (req, res) => {
     try {
       const { eventType } = req.params;
-      const { limit = '50', offset = '0' } = req.query;
+      const { limit = "50", offset = "0" } = req.query;
 
       const events = getEvents(db, {
         eventType,
@@ -100,18 +129,21 @@ export function startApiServer(db: Database.Database, port: number): void {
   // Supports an optional ?status= filter (e.g. Funded) which matches against
   // either the indexed event_type (lowercased) or a status field embedded in
   // the event value payload.
-  app.get('/api/invoices/by-owner/:address', (req, res) => {
+  app.get("/api/invoices/by-owner/:address", (req, res) => {
     try {
       const { address } = req.params;
-      if (!address || typeof address !== 'string') {
-        return res.status(400).json({ error: 'address path param is required' });
+      if (!address || typeof address !== "string") {
+        return res
+          .status(400)
+          .json({ error: "address path param is required" });
       }
-      const statusFilter = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const statusFilter =
+        typeof req.query.status === "string" ? req.query.status : undefined;
 
       // Fetch invoice-contract events ordered newest-first; cap to a generous
       // limit so the by-owner scan covers typical SME histories.
       const events = getEvents(db, {
-        contractType: 'invoice',
+        contractType: "invoice",
         limit: 1000,
         offset: 0,
       });
@@ -132,8 +164,8 @@ export function startApiServer(db: Database.Database, port: number): void {
           ];
           const matchesOwner = candidates.some((c) => {
             if (!c) return false;
-            if (typeof c === 'string') return c.toLowerCase() === ownerLower;
-            if (typeof c === 'object') {
+            if (typeof c === "string") return c.toLowerCase() === ownerLower;
+            if (typeof c === "object") {
               return JSON.stringify(c).toLowerCase().includes(ownerLower);
             }
             return false;
@@ -142,14 +174,18 @@ export function startApiServer(db: Database.Database, port: number): void {
           if (!statusFilter) return true;
           const wanted = statusFilter.toLowerCase();
           if (evt.eventType?.toLowerCase() === wanted) return true;
-          if (typeof value.status === 'string' && value.status.toLowerCase() === wanted) {
+          if (
+            typeof value.status === "string" &&
+            value.status.toLowerCase() === wanted
+          ) {
             return true;
           }
           return false;
         })
         .map((evt) => ({
           invoiceId:
-            (evt.value && (evt.value.invoice_id ?? evt.value.invoiceId ?? evt.value.id)) ??
+            (evt.value &&
+              (evt.value.invoice_id ?? evt.value.invoiceId ?? evt.value.id)) ??
             null,
           status: (evt.value && evt.value.status) || evt.eventType,
           amount: (evt.value && (evt.value.amount ?? evt.value.value)) ?? null,
@@ -169,24 +205,32 @@ export function startApiServer(db: Database.Database, port: number): void {
   // contractType classification is needed; we just filter the pool event
   // stream by event_type and reconstruct round state from it.
   const COFUNDING_EVENT_TYPES = new Set([
-    'cf_open',
-    'cf_commit',
-    'cf_wthdw',
-    'cf_cncl',
-    'cf_exp',
-    'cf_fin',
+    "cf_open",
+    "cf_commit",
+    "cf_wthdw",
+    "cf_cncl",
+    "cf_exp",
+    "cf_fin",
   ]);
 
   // #868: credit_score attestation lifecycle events, keyed by attestation id
   // (the first tuple element of each of these three event types).
-  const ATTESTATION_LIFECYCLE_EVENT_TYPES = new Set(['att_sub', 'att_disp', 'att_res']);
+  const ATTESTATION_LIFECYCLE_EVENT_TYPES = new Set([
+    "att_sub",
+    "att_disp",
+    "att_res",
+  ]);
 
-  app.get('/co-funding/rounds', (_req, res) => {
+  app.get("/co-funding/rounds", (_req, res) => {
     try {
-      const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
+      const events = getEvents(db, {
+        contractType: "pool",
+        limit: 2000,
+        offset: 0,
+      });
       const invoiceIds = new Set<string>();
       for (const evt of events) {
-        if (evt.eventType !== 'cf_open') continue;
+        if (evt.eventType !== "cf_open") continue;
         const id = extractCoFundingInvoiceId(evt.value);
         if (id !== null) invoiceIds.add(id);
       }
@@ -196,14 +240,20 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
-  app.get('/co-funding/rounds/:invoiceId', (req, res) => {
+  app.get("/co-funding/rounds/:invoiceId", (req, res) => {
     try {
       const { invoiceId } = req.params;
       if (!invoiceId) {
-        return res.status(400).json({ error: 'invoiceId path param is required' });
+        return res
+          .status(400)
+          .json({ error: "invoiceId path param is required" });
       }
 
-      const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
+      const events = getEvents(db, {
+        contractType: "pool",
+        limit: 2000,
+        offset: 0,
+      });
       const matches = events
         .filter(
           (evt) =>
@@ -215,23 +265,25 @@ export function startApiServer(db: Database.Database, port: number): void {
       if (matches.length === 0) {
         return res
           .status(404)
-          .json({ error: `No co-funding round found for invoice ${invoiceId}` });
+          .json({
+            error: `No co-funding round found for invoice ${invoiceId}`,
+          });
       }
 
-      let status = 'Unknown';
+      let status = "Unknown";
       for (const evt of matches) {
         switch (evt.eventType) {
-          case 'cf_open':
-            status = 'Open';
+          case "cf_open":
+            status = "Open";
             break;
-          case 'cf_fin':
-            status = 'Filled';
+          case "cf_fin":
+            status = "Filled";
             break;
-          case 'cf_exp':
-            status = 'Expired';
+          case "cf_exp":
+            status = "Expired";
             break;
-          case 'cf_cncl':
-            status = 'Cancelled';
+          case "cf_cncl":
+            status = "Cancelled";
             break;
           default:
             break;
@@ -258,17 +310,19 @@ export function startApiServer(db: Database.Database, port: number): void {
   // from cf_commit events (the second tuple element is always the investor
   // address for that event — see contracts/pool/src/lib.rs's cf_commit
   // publish call).
-  app.get('/co-funding/investor/:address', (req, res) => {
+  app.get("/co-funding/investor/:address", (req, res) => {
     try {
       const { address } = req.params;
       if (!address) {
-        return res.status(400).json({ error: 'address path param is required' });
+        return res
+          .status(400)
+          .json({ error: "address path param is required" });
       }
       const addressLower = address.toLowerCase();
 
       const events = getEvents(db, {
-        contractType: 'pool',
-        eventType: 'cf_commit',
+        contractType: "pool",
+        eventType: "cf_commit",
         limit: 2000,
         offset: 0,
       });
@@ -277,7 +331,10 @@ export function startApiServer(db: Database.Database, port: number): void {
       for (const evt of events) {
         const value = evt.value;
         const investor = Array.isArray(value) ? value[1] : undefined;
-        if (typeof investor === 'string' && investor.toLowerCase() === addressLower) {
+        if (
+          typeof investor === "string" &&
+          investor.toLowerCase() === addressLower
+        ) {
           const id = extractCoFundingInvoiceId(value);
           if (id !== null) invoiceIds.add(id);
         }
@@ -296,15 +353,17 @@ export function startApiServer(db: Database.Database, port: number): void {
   // `consensus`/`rnd_exp`/`fallback` are the terminal-or-expiry transitions —
   // the latest one of those (by ledger sequence) is the round's current
   // status.
-  app.get('/oracle-registry/rounds/:invoiceId', (req, res) => {
+  app.get("/oracle-registry/rounds/:invoiceId", (req, res) => {
     try {
       const { invoiceId } = req.params;
       if (!invoiceId) {
-        return res.status(400).json({ error: 'invoiceId path param is required' });
+        return res
+          .status(400)
+          .json({ error: "invoiceId path param is required" });
       }
 
       const events = getEvents(db, {
-        contractType: 'oracle_registry',
+        contractType: "oracle_registry",
         limit: 1000,
         offset: 0,
       });
@@ -314,21 +373,25 @@ export function startApiServer(db: Database.Database, port: number): void {
         .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
 
       if (matches.length === 0) {
-        return res.status(404).json({ error: `No round found for invoice ${invoiceId}` });
+        return res
+          .status(404)
+          .json({ error: `No round found for invoice ${invoiceId}` });
       }
 
-      let status: string = 'Unknown';
+      let status: string = "Unknown";
       for (const evt of matches) {
         switch (evt.eventType) {
-          case 'rnd_open':
-            status = 'Open';
+          case "rnd_open":
+            status = "Open";
             break;
-          case 'consensus':
-          case 'fallback':
-            status = roundApproved(evt.value) ? 'ConsensusApproved' : 'ConsensusRejected';
+          case "consensus":
+          case "fallback":
+            status = roundApproved(evt.value)
+              ? "ConsensusApproved"
+              : "ConsensusRejected";
             break;
-          case 'rnd_exp':
-            status = 'Expired';
+          case "rnd_exp":
+            status = "Expired";
             break;
           default:
             break;
@@ -359,29 +422,34 @@ export function startApiServer(db: Database.Database, port: number): void {
   // derive each attestation's current status. Time-based expiry isn't
   // eventful and is therefore not reflected here — callers who need the
   // authoritative status should also check the contract's `get_attestation`.
-  app.get('/credit-score/:sme/attestations', (req, res) => {
+  app.get("/credit-score/:sme/attestations", (req, res) => {
     try {
       const { sme } = req.params;
       if (!sme) {
-        return res.status(400).json({ error: 'sme path param is required' });
+        return res.status(400).json({ error: "sme path param is required" });
       }
       const smeLower = sme.toLowerCase();
 
-      const events = getEvents(db, { contractType: 'credit_score', limit: 5000, offset: 0 });
+      const events = getEvents(db, {
+        contractType: "credit_score",
+        limit: 5000,
+        offset: 0,
+      });
 
       const attestationIds = new Set<string>();
       for (const evt of events) {
-        if (evt.eventType !== 'att_sub') continue;
+        if (evt.eventType !== "att_sub") continue;
         const value = evt.value;
         const smeAddr = Array.isArray(value) ? value[1] : undefined;
-        if (typeof smeAddr === 'string' && smeAddr.toLowerCase() === smeLower) {
+        if (typeof smeAddr === "string" && smeAddr.toLowerCase() === smeLower) {
           attestationIds.add(String(value[0]));
         }
       }
 
       const lifecycleEvents = events
         .filter((evt) => {
-          if (!ATTESTATION_LIFECYCLE_EVENT_TYPES.has(evt.eventType)) return false;
+          if (!ATTESTATION_LIFECYCLE_EVENT_TYPES.has(evt.eventType))
+            return false;
           const id = Array.isArray(evt.value) ? String(evt.value[0]) : null;
           return id !== null && attestationIds.has(id);
         })
@@ -391,22 +459,23 @@ export function startApiServer(db: Database.Database, port: number): void {
         const idEvents = lifecycleEvents.filter(
           (evt) => Array.isArray(evt.value) && String(evt.value[0]) === id,
         );
-        let status = 'Active';
+        let status = "Active";
         let attestor: string | null = null;
         let scoreContribution: number | null = null;
         for (const evt of idEvents) {
           const value = evt.value as any[];
           switch (evt.eventType) {
-            case 'att_sub':
-              attestor = typeof value[2] === 'string' ? value[2] : null;
-              scoreContribution = value[3] !== undefined ? Number(value[3]) : null;
-              status = 'Active';
+            case "att_sub":
+              attestor = typeof value[2] === "string" ? value[2] : null;
+              scoreContribution =
+                value[3] !== undefined ? Number(value[3]) : null;
+              status = "Active";
               break;
-            case 'att_disp':
-              status = 'Disputed';
+            case "att_disp":
+              status = "Disputed";
               break;
-            case 'att_res':
-              status = value[1] ? 'Active' : 'Revoked';
+            case "att_res":
+              status = value[1] ? "Active" : "Revoked";
               break;
             default:
               break;
@@ -440,21 +509,28 @@ export function startApiServer(db: Database.Database, port: number): void {
   // repayment, and rate-model execution). This endpoint reconstructs the
   // time series for one token from those events; `from`/`to` are optional
   // unix-second bounds applied to the contract-side sample timestamp.
-  app.get('/pool/:token/rate-history', (req, res) => {
+  app.get("/pool/:token/rate-history", (req, res) => {
     try {
       const { token } = req.params;
       if (!token) {
-        return res.status(400).json({ error: 'token path param is required' });
+        return res.status(400).json({ error: "token path param is required" });
       }
-      const from = typeof req.query.from === 'string' ? Number(req.query.from) : undefined;
-      const to = typeof req.query.to === 'string' ? Number(req.query.to) : undefined;
-      if ((from !== undefined && Number.isNaN(from)) || (to !== undefined && Number.isNaN(to))) {
-        return res.status(400).json({ error: 'from/to must be unix timestamps in seconds' });
+      const from =
+        typeof req.query.from === "string" ? Number(req.query.from) : undefined;
+      const to =
+        typeof req.query.to === "string" ? Number(req.query.to) : undefined;
+      if (
+        (from !== undefined && Number.isNaN(from)) ||
+        (to !== undefined && Number.isNaN(to))
+      ) {
+        return res
+          .status(400)
+          .json({ error: "from/to must be unix timestamps in seconds" });
       }
 
       const events = getEvents(db, {
-        contractType: 'pool',
-        eventType: 'rate_snap',
+        contractType: "pool",
+        eventType: "rate_snap",
         limit: 10_000,
         offset: 0,
       });
@@ -471,7 +547,11 @@ export function startApiServer(db: Database.Database, port: number): void {
             txHash: evt.txHash,
           };
         })
-        .filter((s) => (from === undefined || s.timestamp >= from) && (to === undefined || s.timestamp <= to))
+        .filter(
+          (s) =>
+            (from === undefined || s.timestamp >= from) &&
+            (to === undefined || s.timestamp <= to),
+        )
         .sort((a, b) => a.timestamp - b.timestamp);
 
       return res.json({ token, samples, count: samples.length });
@@ -481,22 +561,31 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // #867: flagged / blocked addresses reconstructed from compliance events
-  app.get('/compliance/flagged', (req, res) => {
+  app.get("/compliance/flagged", (req, res) => {
     try {
-      const { limit = '100' } = req.query;
+      const { limit = "100" } = req.query;
       const events = getEvents(db, {
-        contractType: 'compliance',
-        eventType: 'screened',
+        contractType: "compliance",
+        eventType: "screened",
         limit: parseInt(limit as string, 10),
         offset: 0,
       });
-      const latest = new Map<string, { address: string; status: string; reasonCode: unknown; at: string; txHash: string }>();
+      const latest = new Map<
+        string,
+        {
+          address: string;
+          status: string;
+          reasonCode: unknown;
+          at: string;
+          txHash: string;
+        }
+      >();
       for (const evt of events) {
         const value = evt.value;
-        const address = Array.isArray(value) ? String(value[0] ?? '') : '';
+        const address = Array.isArray(value) ? String(value[0] ?? "") : "";
         if (!address) continue;
-        const status = Array.isArray(value) ? String(value[1] ?? '') : '';
-        if (status !== 'Flagged' && status !== 'Blocked') continue;
+        const status = Array.isArray(value) ? String(value[1] ?? "") : "";
+        if (status !== "Flagged" && status !== "Blocked") continue;
         // First hit is newest when events are returned newest-first; keep first.
         if (!latest.has(address)) {
           latest.set(address, {
@@ -515,12 +604,12 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // #867: full screening history for an address from COMPLY events
-  app.get('/compliance/history/:address', (req, res) => {
+  app.get("/compliance/history/:address", (req, res) => {
     try {
       const { address } = req.params;
-      const { limit = '100' } = req.query;
+      const { limit = "100" } = req.query;
       const events = getEvents(db, {
-        contractType: 'compliance',
+        contractType: "compliance",
         limit: parseInt(limit as string, 10),
         offset: 0,
       });
@@ -528,7 +617,7 @@ export function startApiServer(db: Database.Database, port: number): void {
         .filter((evt) => {
           const value = evt.value;
           if (!Array.isArray(value)) return false;
-          return String(value[0] ?? '') === address;
+          return String(value[0] ?? "") === address;
         })
         .map((evt) => ({
           eventType: evt.eventType,
@@ -593,11 +682,13 @@ export function startApiServer(db: Database.Database, port: number): void {
   });
 
   // Get latest ledger
-  app.get('/ledger/latest', (_req, res) => {
+  app.get("/ledger/latest", (_req, res) => {
     try {
       const db_any = db as any;
       const row = db_any
-        .prepare('SELECT ledger_sequence FROM events ORDER BY ledger_sequence DESC LIMIT 1')
+        .prepare(
+          "SELECT ledger_sequence FROM events ORDER BY ledger_sequence DESC LIMIT 1",
+        )
         .get() as { ledger_sequence: number } | undefined;
 
       res.json({ latestLedger: row?.ledger_sequence || null });
@@ -620,7 +711,7 @@ function extractCoFundingInvoiceId(value: any): string | null {
   if (value === null || value === undefined) return null;
   const candidate = Array.isArray(value) ? value[0] : value;
   if (candidate === null || candidate === undefined) return null;
-  if (typeof candidate === 'object') return null;
+  if (typeof candidate === "object") return null;
   return String(candidate);
 }
 
@@ -631,7 +722,7 @@ function extractInvoiceId(value: any): string | null {
   if (value === null || value === undefined) return null;
   const candidate = Array.isArray(value) ? value[0] : value;
   if (candidate === null || candidate === undefined) return null;
-  if (typeof candidate === 'object') return null;
+  if (typeof candidate === "object") return null;
   return String(candidate);
 }
 

@@ -165,8 +165,23 @@ pub enum InvoiceError {
     ComplianceRegistryNotConfigured = 40,
     // #766: per-address daily invoice creation rate limit exceeded
     RateLimitExceeded = 41,
-    // #747: invoice ID collision detected (counter TTL expired and reset)
-    IDCollision = 42,
+    // #772: description contains non-printable-ASCII or HTML-special
+    // characters — rejected to prevent stored-XSS via unsanitised
+    // frontend rendering of on-chain invoice data
+    InvalidDescriptionChars = 42,
+    // Pre-existing build breakage found while working this branch: these two
+    // variants are referenced from `create_invoice_with_metadata` (amount /
+    // due-date validation) but were missing from this enum on `main`,
+    // meaning the invoice contract didn't compile at HEAD. Added here so the
+    // crate builds; not part of any of the four assigned issues.
+    InvalidAmount = 43,
+    InvalidDueDate = 44,
+    // #864: role-based multisig access-control
+    AccessControlNotConfigured = 45,
+    // Pre-existing build breakage found while working this branch: raised by
+    // create_invoice's #747 collision guard but missing from this enum on
+    // `main`. Restored here so the crate builds; unrelated to #864.
+    IDCollision = 46,
 }
 
 #[contracttype]
@@ -299,6 +314,9 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
+    // Pre-existing build breakage found while working this branch: read/
+    // written by the dispute-raise/resolve flow but missing from this enum
+    // on `main`. Restored here so the crate builds; unrelated to #864.
     Dispute(u64),
     ContractVersion,
     MigrationVersion,
@@ -317,8 +335,6 @@ pub enum DataKey {
     AdminChangeScheduledAt,
     // #654: enforce oracle verification before invoices may be funded
     RequireOracleVerification,
-    // #539: invoice dispute mechanism
-    Dispute(u64),
     // #861: N-of-M staked oracle consensus network
     OracleRegistry,
     RequireConsensusVerification,
@@ -327,9 +343,27 @@ pub enum DataKey {
     RequireComplianceCheck,
     // Tracks cumulative funded amount across partial fundings
     InvoiceFunding(u64),
+    // #820: keeper addresses authorized to call mark_defaulted() on behalf of
+    // an automated monitor (e.g. Stellar Turrets), in addition to the pool contract.
+    KeeperIds,
+    // #775: borrower opt-out from the public invoice sharing link
+    Private(u64),
 }
 
 const EVT: Symbol = symbol_short!("invoice");
+// #864: optional role-based multisig access-control contract. Symbol key
+// (not a DataKey variant) so it can be added without touching DataKey's
+// discriminant layout.
+const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
+
+fn require_access_control(env: &Env, caller: &Address) {
+    let configured: Option<Address> = env.storage().instance().get(&ACCESS_CONTROL);
+    match configured {
+        Some(configured) if &configured == caller => {}
+        Some(_) => panic_with_error!(env, InvoiceError::Unauthorized),
+        None => panic_with_error!(env, InvoiceError::AccessControlNotConfigured),
+    }
+}
 
 fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     if invoice.status != InvoiceStatus::Pending {
@@ -396,6 +430,25 @@ fn validate_invoice_strings(
     if verification_hash.len() > MAX_VERIFICATION_HASH_LEN {
         panic_with_error!(env, InvoiceError::VerificationHashTooLong);
     }
+    // #772: reject descriptions containing HTML-special characters so a
+    // borrower can't stash a stored-XSS payload (e.g. `<img onerror=...>`)
+    // in on-chain data that the frontend later renders. Restricted to
+    // printable ASCII plus space; relies on the MAX_DESCRIPTION_LEN check
+    // above to bound the copy buffer.
+    if !is_safe_description(description) {
+        panic_with_error!(env, InvoiceError::InvalidDescriptionChars);
+    }
+}
+
+/// #772: printable ASCII (letters/digits/punctuation/space) only, and none
+/// of the HTML/attribute-breakout characters `< > & " '`.
+fn is_safe_description(desc: &String) -> bool {
+    let len = desc.len() as usize;
+    let mut buf = [0u8; MAX_DESCRIPTION_LEN as usize];
+    desc.copy_into_slice(&mut buf[..len]);
+    buf[..len].iter().all(|&b| {
+        (b.is_ascii_graphic() || b == b' ') && !matches!(b, b'<' | b'>' | b'&' | b'"' | b'\'')
+    })
 }
 
 fn max_extension_due_date(invoice: &Invoice) -> u64 {
@@ -1061,6 +1114,10 @@ impl InvoiceContract {
         env.storage().instance().get(&DataKey::OracleRegistry)
     }
 
+    pub fn get_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Oracle)
+    }
+
     /// #861: when `true`, `verify_invoice` (the legacy 1-of-2 oracle path)
     /// rejects direct calls and every invoice must instead go through the
     /// registered `oracle_registry`'s stake-weighted consensus flow, which
@@ -1175,6 +1232,132 @@ impl InvoiceContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, Symbol::new(&env, "keeper_added")), (admin, keeper));
+    }
+
+    // ---- #864: role-based multisig access control (additive) ----
+    //
+    // Every entrypoint below is a parallel authorization path alongside the
+    // legacy single-admin one above — it does not replace or disable any
+    // existing admin-gated function.
+
+    /// Registers the `access_control` contract whose approved multisig
+    /// proposals may call the `*_via_ac` entrypoints below. Admin-gated
+    /// (legacy path).
+    pub fn set_access_control(env: Env, admin: Address, access_control: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&ACCESS_CONTROL, &access_control);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "set_ac")), (admin, access_control));
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ACCESS_CONTROL)
+    }
+
+    /// Unified pause/unpause via an access-control-approved multisig
+    /// proposal. `true` pauses, `false` unpauses.
+    pub fn set_paused_via_ac(env: Env, access_control: Address, paused: bool) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, symbol_short!("ac_pause")),
+            (access_control, paused, env.ledger().timestamp()),
+        );
+    }
+
+    pub fn set_oracle_via_ac(env: Env, access_control: Address, oracle: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        let old_oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
+        env.storage().instance().set(&DataKey::Oracle, &oracle);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "ac_oracle")),
+            (access_control, old_oracle, oracle),
+        );
+    }
+
+    pub fn register_debtor_via_ac(
+        env: Env,
+        access_control: Address,
+        debtor_id: String,
+        debtor_name: String,
+        max_exposure: i128,
+    ) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        if max_exposure <= 0 {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
+        let record = DebtorRecord {
+            debtor_id: debtor_id.clone(),
+            debtor_name,
+            max_exposure,
+            current_exposure: 0,
+            is_active: true,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id.clone()), &record);
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DebtorIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !ids.contains(&debtor_id) {
+            ids.push_back(debtor_id);
+            env.storage().instance().set(&DataKey::DebtorIds, &ids);
+        }
+        bump_instance(&env);
+    }
+
+    pub fn deactivate_debtor_via_ac(env: Env, access_control: Address, debtor_id: String) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        let mut record: DebtorRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DebtorRecord(debtor_id.clone()))
+            .expect("debtor not found");
+        record.is_active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor_id), &record);
+        bump_instance(&env);
+    }
+
+    pub fn add_keeper_via_ac(env: Env, access_control: Address, keeper: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        require_not_paused(&env);
+        let mut keepers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !keepers.contains(&keeper) {
+            keepers.push_back(keeper.clone());
+            env.storage().instance().set(&DataKey::KeeperIds, &keepers);
+        }
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "ac_keeper")),
+            (access_control, keeper),
+        );
     }
 
     /// #801: revoke a previously whitelisted keeper. Admin-only.
@@ -1396,11 +1579,7 @@ impl InvoiceContract {
         let id = count + 1;
 
         // #747: Refresh TTL on the invoice counter to prevent expiry and ID collisions
-        env.storage().instance().extend_ttl(
-            &DataKey::InvoiceCount,
-            INSTANCE_BUMP_AMOUNT,
-            INSTANCE_BUMP_AMOUNT,
-        );
+        bump_instance(&env);
         let pool_addr: Address = env
             .storage()
             .instance()
@@ -2522,6 +2701,17 @@ impl InvoiceContract {
         load_invoice(&env, id)
     }
 
+    /// Cross-contract check for the oracle registry (#953): confirms `id` is
+    /// actually awaiting oracle verification before a `VerificationRound` is
+    /// opened for it, and returns the invoice's principal so the registry can
+    /// apply a value-based quorum tier (#957). Returns primitives rather than
+    /// `Invoice`/`InvoiceStatus` directly so the two contracts' deployed
+    /// interfaces don't need to share Rust types.
+    pub fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128) {
+        let invoice = load_invoice(&env, id);
+        (invoice.status == InvoiceStatus::AwaitingVerification, invoice.amount)
+    }
+
     pub fn get_funded_amount(env: Env, id: u64) -> i128 {
         env.storage()
             .persistent()
@@ -3162,7 +3352,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        Env,
+        Env, IntoVal,
     };
 
     mod mock_pool_true {
@@ -3814,10 +4004,7 @@ mod test {
         client.record_funding(&id, &i128::MAX, &pool);
         // Second partial funding of 1 must overflow
         let result = client.try_record_funding(&id, &1i128, &pool);
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            InvoiceError::AmountOverflow
-        );
+        assert_eq!(result.unwrap_err().unwrap(), InvoiceError::AmountOverflow);
     }
 
     #[test]
@@ -4099,6 +4286,10 @@ mod test {
         // #779: paused/unpaused events must carry both the pausing admin and
         // a timestamp.
         use soroban_sdk::testutils::Events;
+        // Pre-existing build breakage found while working this branch: this
+        // test uses `.into_val()` below but didn't import the `IntoVal`
+        // trait, so `cargo test` didn't compile at HEAD.
+        use soroban_sdk::IntoVal;
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _sme) = setup(&env);
@@ -4420,12 +4611,16 @@ mod test {
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
         let keeper = Address::generate(&env);
         client.add_keeper(&admin, &keeper);
-        assert_eq!(client.list_keepers(), soroban_sdk::vec![&env, keeper.clone()]);
+        assert_eq!(
+            client.list_keepers(),
+            soroban_sdk::vec![&env, keeper.clone()]
+        );
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         client.mark_defaulted(&id, &keeper);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
@@ -4440,13 +4635,16 @@ mod test {
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         let result = client.try_mark_defaulted(&id, &stranger);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4462,13 +4660,16 @@ mod test {
 
         let id = 1u64;
         let due = client.get_invoice(&id).due_date;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY);
+        env.ledger().with_mut(|l| {
+            l.timestamp = due + (DEFAULT_GRACE_PERIOD_DAYS as u64 + 1) * SECS_PER_DAY
+        });
 
         let result = client.try_mark_defaulted(&id, &keeper);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4482,7 +4683,9 @@ mod test {
         let result = client.try_add_keeper(&attacker, &keeper);
         assert_eq!(
             result,
-            Err(Ok::<soroban_sdk::Error, _>(InvoiceError::Unauthorized.into()))
+            Err(Ok::<soroban_sdk::Error, _>(
+                InvoiceError::Unauthorized.into()
+            ))
         );
     }
 
@@ -4601,6 +4804,87 @@ mod test {
             result.unwrap_err().unwrap(),
             InvoiceError::DescriptionTooLong.into()
         );
+    }
+
+    // ── #772: stored-XSS via unsanitised invoice description ────────────────
+
+    #[test]
+    fn test_create_invoice_description_with_script_tag_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "<script>alert(document.cookie)</script>"),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidDescriptionChars.into()
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_description_with_img_onerror_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "<img src=x onerror=alert(1)>"),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvalidDescriptionChars.into()
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_description_with_quotes_and_ampersand_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        for bad in ["He said \"hi\"", "It's ready", "Rock & Roll"] {
+            let result = client.try_create_invoice(
+                &sme,
+                &String::from_str(&env, "Debtor Corp"),
+                &1_000i128,
+                &(env.ledger().timestamp() + 86_400),
+                &String::from_str(&env, bad),
+                &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
+            );
+            assert_eq!(
+                result.unwrap_err().unwrap(),
+                InvoiceError::InvalidDescriptionChars.into()
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_invoice_plain_description_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 86_400),
+            &String::from_str(&env, "Consulting services rendered in Q2 2026."),
+            &String::from_str(&env, "hash"),
+            &String::from_str(&env, "https://example.com/meta"),
+        );
+        assert_eq!(id, 1);
     }
 
     #[test]

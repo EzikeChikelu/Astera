@@ -28,6 +28,9 @@ const MAX_HISTORY_ENTRIES: u32 = 64;
 const MAX_FLAGGED_LIST: u32 = 256;
 const MAX_PENDING_LIST: u32 = 256;
 const MAX_SCREENER_LIST: u32 = 64;
+/// #927: minimum seconds between request_review calls for the same address
+/// from the same caller. Prevents unbounded growth of the pending-review list.
+const REVIEW_REQUEST_COOLDOWN_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -46,6 +49,10 @@ pub enum ComplianceError {
     AddressNotFound = 10,
     ListFull = 11,
     InvalidReason = 12,
+    // #927: caller has already requested review for this address within the cooldown window.
+    ReviewRequestTooSoon = 13,
+    // Screener has already screened this subject within the rescreening interval.
+    RescreeningTooSoon = 14,
 }
 
 #[contracttype]
@@ -93,6 +100,18 @@ pub struct ScreeningHistoryEntry {
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
+pub struct ScreenerSubmissionEntry {
+    pub subject_address: Address,
+    pub status: ComplianceStatus,
+    pub reason_code: u32,
+    pub risk_tier: RiskTier,
+    pub screened_at: u64,
+    pub expires_at: u64,
+    pub notes_hash: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PendingScreener {
     pub address: Address,
     pub proposed_at: u64,
@@ -113,6 +132,12 @@ pub enum DataKey {
     PendingScreener(Address),
     FlaggedIds,
     PendingReviewIds,
+    // #927: last request_review timestamp keyed by (caller, target address).
+    ReviewRequestedAt(Address, Address),
+    // Screener submission history keyed by screener address.
+    ScreenerSubmissions(Address),
+    // Last screening timestamp keyed by (screener, subject address).
+    LastScreenedAt(Address, Address),
 }
 
 const EVT: Symbol = symbol_short!("COMPLY");
@@ -382,6 +407,19 @@ impl ComplianceContract {
         }
 
         let now = env.ledger().timestamp();
+
+        // Enforce rescreening interval: screener cannot rescreen same subject within interval
+        let last_screened_key = DataKey::LastScreenedAt(screener.clone(), address.clone());
+        if let Some(last_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&last_screened_key)
+        {
+            let interval = Self::get_rescreening_interval(env.clone());
+            if now < last_at.saturating_add(interval) {
+                return Err(ComplianceError::RescreeningTooSoon);
+            }
+        }
         let effective_expires = if expires_at == 0 {
             let interval = Self::get_rescreening_interval(env.clone());
             now.saturating_add(interval)
@@ -421,9 +459,28 @@ impl ComplianceContract {
                 screened_at: now,
                 screened_by: screener.clone(),
                 expires_at: effective_expires,
+                notes_hash: notes_hash.clone(),
+            },
+        );
+
+        Self::append_screener_submission(
+            &env,
+            &screener,
+            ScreenerSubmissionEntry {
+                subject_address: address.clone(),
+                status: status.clone(),
+                reason_code,
+                risk_tier,
+                screened_at: now,
+                expires_at: effective_expires,
                 notes_hash,
             },
         );
+
+        // Update last screening timestamp for this (screener, subject) pair
+        env.storage()
+            .instance()
+            .set(&last_screened_key, &now);
 
         Self::sync_status_lists(&env, &address, &status);
 
@@ -437,6 +494,7 @@ impl ComplianceContract {
     /// Permissionless flagging: moves a Cleared address to PendingReview so
     /// privileged actions pause until a screener re-clears them. Callable by
     /// the off-chain monitoring service without screener privileges.
+    /// #927: rate-limited per (caller, address) pair to prevent list spam.
     pub fn request_review(
         env: Env,
         caller: Address,
@@ -447,6 +505,20 @@ impl ComplianceContract {
         require_not_paused(&env);
 
         let now = env.ledger().timestamp();
+
+        // #927: enforce cooldown — same caller cannot re-request review for the
+        // same address within REVIEW_REQUEST_COOLDOWN_SECS.
+        let cooldown_key = DataKey::ReviewRequestedAt(caller.clone(), address.clone());
+        if let Some(last_at) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&cooldown_key)
+        {
+            if now < last_at.saturating_add(REVIEW_REQUEST_COOLDOWN_SECS) {
+                return Err(ComplianceError::ReviewRequestTooSoon);
+            }
+        }
+        env.storage().instance().set(&cooldown_key, &now);
         let existing: Option<ComplianceRecord> = env
             .storage()
             .persistent()
@@ -493,6 +565,20 @@ impl ComplianceContract {
                 risk_tier: record.risk_tier.clone(),
                 screened_at: now,
                 screened_by: caller.clone(),
+                expires_at: 0,
+                notes_hash: reason.clone(),
+            },
+        );
+
+        Self::append_screener_submission(
+            &env,
+            &caller,
+            ScreenerSubmissionEntry {
+                subject_address: address.clone(),
+                status: ComplianceStatus::PendingReview,
+                reason_code: 0,
+                risk_tier: record.risk_tier.clone(),
+                screened_at: now,
                 expires_at: 0,
                 notes_hash: reason,
             },
@@ -543,6 +629,39 @@ impl ComplianceContract {
         }
     }
 
+    /// #928: Batch variant of get_effective_status. Returns statuses in the
+    /// same order as the input addresses, reducing cross-contract calls for
+    /// flows that touch multiple addresses (e.g. fund_multiple_invoices).
+    pub fn get_effective_status_batch(
+        env: Env,
+        addresses: Vec<Address>,
+    ) -> Vec<ComplianceStatus> {
+        let now = env.ledger().timestamp();
+        let mut results = Vec::new(&env);
+        for i in 0..addresses.len() {
+            let addr = addresses.get(i).unwrap();
+            let status = match env
+                .storage()
+                .persistent()
+                .get::<DataKey, ComplianceRecord>(&DataKey::Record(addr))
+            {
+                Some(r) => {
+                    if matches!(r.status, ComplianceStatus::Cleared)
+                        && r.expires_at != 0
+                        && now >= r.expires_at
+                    {
+                        ComplianceStatus::Unscreened
+                    } else {
+                        r.status
+                    }
+                }
+                None => ComplianceStatus::Unscreened,
+            };
+            results.push_back(status);
+        }
+        results
+    }
+
     pub fn get_compliance_record(env: Env, address: Address) -> Option<ComplianceRecord> {
         env.storage().persistent().get(&DataKey::Record(address))
     }
@@ -551,6 +670,15 @@ impl ComplianceContract {
         env.storage()
             .persistent()
             .get(&DataKey::History(address))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns all screening submissions made by a specific screener across all subjects.
+    /// This allows screeners to audit their own submission history.
+    pub fn get_screener_submissions(env: Env, screener: Address) -> Vec<ScreenerSubmissionEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScreenerSubmissions(screener))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -658,6 +786,30 @@ impl ComplianceContract {
         }
         history.push_back(entry);
         env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, REGISTRY_TTL, REGISTRY_TTL);
+    }
+
+    fn append_screener_submission(env: &Env, screener: &Address, entry: ScreenerSubmissionEntry) {
+        let key = DataKey::ScreenerSubmissions(screener.clone());
+        let mut submissions: Vec<ScreenerSubmissionEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        if submissions.len() >= MAX_HISTORY_ENTRIES {
+            // Drop oldest to keep storage bounded.
+            let mut trimmed = Vec::new(env);
+            for i in 1..submissions.len() {
+                if let Some(e) = submissions.get(i) {
+                    trimmed.push_back(e);
+                }
+            }
+            submissions = trimmed;
+        }
+        submissions.push_back(entry);
+        env.storage().persistent().set(&key, &submissions);
         env.storage()
             .persistent()
             .extend_ttl(&key, REGISTRY_TTL, REGISTRY_TTL);

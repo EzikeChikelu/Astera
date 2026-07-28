@@ -19,6 +19,7 @@ export interface TrackedRound {
 export class ConsensusTracker {
   private rounds = new Map<string, TrackedRound>();
   private votedByMe = new Set<string>();
+  private paused = false;
 
   constructor(private readonly oraclePublicKey: string) {}
 
@@ -26,6 +27,14 @@ export class ConsensusTracker {
    * event emitted under the registry contract's "ORACLE" topic namespace. */
   handleEvent(topic2: string, value: unknown): void {
     switch (topic2) {
+      case 'paused': {
+        this.paused = true;
+        break;
+      }
+      case 'unpaused': {
+        this.paused = false;
+        break;
+      }
       case 'rnd_open': {
         const [invoiceId] = asArray(value);
         this.upsert(String(invoiceId), 'Open');
@@ -63,6 +72,21 @@ export class ConsensusTracker {
    * re-voting after a restart rather than eating an `AlreadyVoted` error. */
   hasVoted(invoiceId: bigint | string): boolean {
     return this.votedByMe.has(String(invoiceId));
+  }
+
+  /** Whether the registry is currently paused, per the last observed
+   * `paused`/`unpaused` event — used to skip vote submission instead of
+   * hitting (and immediately retrying) a `ContractPaused` failure. */
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Marks the registry as paused directly, for when a `submit_vote`/
+   * `open_verification_round` call fails with `ContractPaused` before this
+   * node has observed the corresponding `paused` event (e.g. a race on
+   * startup, or a missed event). */
+  markPaused(): void {
+    this.paused = true;
   }
 
   isOpen(invoiceId: bigint | string): boolean {

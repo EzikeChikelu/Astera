@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
@@ -45,6 +46,7 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 }
 
 export default function AdminLiquidityPage() {
+  const t = useTranslations('Admin.liquidity');
   const { wallet } = useStore();
   const [rows, setRows] = useState<TokenLiquidityRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,32 +54,29 @@ export default function AdminLiquidityPage() {
   const [horizon, setHorizon] = useState<(typeof HORIZON_OPTIONS)[number]>(30);
   const [drainLoading, setDrainLoading] = useState<Record<string, boolean>>({});
 
-  const load = useCallback(
-    async (horizonDays: number) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const tokens = await getAcceptedTokens();
-        const rowData = await Promise.all(
-          tokens.map(async (token) => {
-            const [totals, queue, forecast] = await Promise.all([
-              getPoolTokenTotals(token),
-              getWithdrawalQueue(token),
-              getLiquidityForecast(token, horizonDays),
-            ]);
-            return { token, totals, queue, forecast };
-          }),
-        );
-        setRows(rowData);
-      } catch (e) {
-        console.error('[AdminLiquidity] Load error:', e);
-        setError('Failed to load liquidity data. Please try again.');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
+  const load = useCallback(async (horizonDays: number) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const tokens = await getAcceptedTokens();
+      const rowData = await Promise.all(
+        tokens.map(async (token) => {
+          const [totals, queue, forecast] = await Promise.all([
+            getPoolTokenTotals(token),
+            getWithdrawalQueue(token),
+            getLiquidityForecast(token, horizonDays),
+          ]);
+          return { token, totals, queue, forecast };
+        }),
+      );
+      setRows(rowData);
+    } catch (e) {
+      console.error('[AdminLiquidity] Load error:', e);
+      setError(t('error'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     load(horizon);
@@ -85,7 +84,7 @@ export default function AdminLiquidityPage() {
 
   async function handleDrain(token: string) {
     if (!wallet.address) {
-      toast.error('Connect a wallet to submit a drain transaction.');
+      toast.error(t('connectWallet'));
       return;
     }
     setDrainLoading((p) => ({ ...p, [token]: true }));
@@ -98,10 +97,10 @@ export default function AdminLiquidityPage() {
       });
       if (signError) throw new Error(signError.message);
       await submitTx(signedTxXdr);
-      toast.success(`Drain attempt submitted for ${stablecoinLabel(token)}.`);
+      toast.success(t('drainSuccess', { token: stablecoinLabel(token) }));
       await load(horizon);
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Failed to submit drain transaction.');
+      toast.error(e instanceof Error ? e.message : t('drainFailed'));
     } finally {
       setDrainLoading((p) => ({ ...p, [token]: false }));
     }
@@ -114,10 +113,8 @@ export default function AdminLiquidityPage() {
     <div>
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white">Liquidity Forecast</h1>
-          <p className="text-brand-muted mt-1 text-sm">
-            Projected available liquidity vs queued withdrawal demand, per token.
-          </p>
+          <h1 className="text-3xl font-bold text-white">{t('title')}</h1>
+          <p className="text-brand-muted mt-1 text-sm">{t('description')}</p>
         </div>
         <div className="flex items-center gap-1 bg-brand-card border border-brand-border rounded-xl p-1">
           {HORIZON_OPTIONS.map((h) => (
@@ -125,12 +122,10 @@ export default function AdminLiquidityPage() {
               key={h}
               onClick={() => setHorizon(h)}
               className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
-                horizon === h
-                  ? 'bg-brand-gold text-black'
-                  : 'text-brand-muted hover:text-white'
+                horizon === h ? 'bg-brand-gold text-black' : 'text-brand-muted hover:text-white'
               }`}
             >
-              {h}d
+              {t('daySuffix', { h: h.toString() })}
             </button>
           ))}
         </div>
@@ -143,7 +138,7 @@ export default function AdminLiquidityPage() {
         >
           <span>{error}</span>
           <button onClick={() => load(horizon)} className="underline ml-4 shrink-0">
-            Retry
+            {t('retry')}
           </button>
         </div>
       )}
@@ -160,7 +155,7 @@ export default function AdminLiquidityPage() {
       )}
 
       {!loading && rows.length === 0 && !error && (
-        <div className="text-center py-24 text-brand-muted">No accepted tokens configured.</div>
+        <div className="text-center py-24 text-brand-muted">{t('noTokens')}</div>
       )}
 
       <div className="space-y-8">
@@ -173,51 +168,53 @@ export default function AdminLiquidityPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <StatCard
-                  label="Available Liquidity"
+                  label={t('availableLiquidity')}
                   value={formatUSDC(availableLiquidity > 0n ? availableLiquidity : 0n)}
                 />
                 <StatCard
-                  label="Queue Depth"
+                  label={t('queueDepth')}
                   value={String(queue.length)}
-                  sub={queue.length > 0 ? `${formatUSDC(queuedShares)} queued` : undefined}
+                  sub={
+                    queue.length > 0 ? t('queued', { amount: formatUSDC(queuedShares) }) : undefined
+                  }
                 />
                 <StatCard
-                  label="Projected (end of horizon)"
+                  label={t('projected')}
                   value={
                     forecast.length > 0
                       ? formatUSDC(forecast[forecast.length - 1]!.projectedAvailable)
                       : '--'
                   }
-                  sub={`${horizon}-day projection`}
+                  sub={t('projection', { days: horizon })}
                 />
               </div>
 
               <LiquidityForecastChart
                 data={forecast}
                 queuedDemand={queuedShares}
-                title={`${horizon}-Day Liquidity Forecast`}
+                title={t('forecastTitle', { days: horizon })}
               />
 
               {queue.length > 0 && (
                 <div className="bg-brand-card border border-brand-border rounded-2xl p-5">
                   <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-white">Pending requests</h3>
+                    <h3 className="text-sm font-semibold text-white">{t('pendingRequests')}</h3>
                     <button
                       onClick={() => handleDrain(token)}
                       disabled={drainLoading[token]}
                       className="px-3 py-1.5 text-xs rounded-lg bg-brand-gold text-black font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
                     >
-                      {drainLoading[token] ? 'Submitting…' : 'Try drain now'}
+                      {drainLoading[token] ? t('submitting') : t('drain')}
                     </button>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-left text-brand-muted text-xs uppercase tracking-wide border-b border-brand-border">
-                          <th className="py-2 pr-4">#</th>
-                          <th className="py-2 pr-4">Investor</th>
-                          <th className="py-2 pr-4">Shares</th>
-                          <th className="py-2 pr-4">Requested</th>
+                          <th className="py-2 pr-4">{t('tableNum')}</th>
+                          <th className="py-2 pr-4">{t('tableInvestor')}</th>
+                          <th className="py-2 pr-4">{t('tableShares')}</th>
+                          <th className="py-2 pr-4">{t('tableRequested')}</th>
                         </tr>
                       </thead>
                       <tbody>

@@ -2,48 +2,51 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { Skeleton } from '@/components/Skeleton';
 import { getMultipleInvoices, getInvoiceCount } from '@/lib/contracts';
 import { formatUSDC, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
-const AGING_BUCKETS = [
-  {
-    key: 'critical',
-    label: '90+ Days Overdue',
-    minDays: 90,
-    color: 'text-red-400 border-red-500/30 bg-red-500/10',
-  },
-  {
-    key: 'severe',
-    label: '61–90 Days Overdue',
-    minDays: 61,
-    color: 'text-orange-400 border-orange-500/30 bg-orange-500/10',
-  },
-  {
-    key: 'moderate',
-    label: '31–60 Days Overdue',
-    minDays: 31,
-    color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10',
-  },
-  {
-    key: 'mild',
-    label: '1–30 Days Overdue',
-    minDays: 1,
-    color: 'text-yellow-300 border-yellow-400/30 bg-yellow-400/5',
-  },
-  {
-    key: 'current',
-    label: 'Current (Not Overdue)',
-    minDays: 0,
-    color: 'text-green-400 border-green-500/30 bg-green-500/10',
-  },
-] as const;
+function getBucketLabels(t: (key: string) => string) {
+  return [
+    {
+      key: 'critical',
+      label: t('bucketCritical'),
+      minDays: 90,
+      color: 'text-red-400 border-red-500/30 bg-red-500/10',
+    },
+    {
+      key: 'severe',
+      label: t('bucketSevere'),
+      minDays: 61,
+      color: 'text-orange-400 border-orange-500/30 bg-orange-500/10',
+    },
+    {
+      key: 'moderate',
+      label: t('bucketModerate'),
+      minDays: 31,
+      color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10',
+    },
+    {
+      key: 'mild',
+      label: t('bucketMild'),
+      minDays: 1,
+      color: 'text-yellow-300 border-yellow-400/30 bg-yellow-400/5',
+    },
+    {
+      key: 'current',
+      label: t('bucketCurrent'),
+      minDays: 0,
+      color: 'text-green-400 border-green-500/30 bg-green-500/10',
+    },
+  ] as const;
+}
 
 const AT_RISK_DAYS = 7;
 
-type AgingBucket = (typeof AGING_BUCKETS)[number]['key'];
+type AgingBucket = 'critical' | 'severe' | 'moderate' | 'mild' | 'current';
 
 interface AgingGroup {
   bucket: AgingBucket;
@@ -53,10 +56,75 @@ interface AgingGroup {
   totalAmount: bigint;
 }
 
+function exportAgingCSV(
+  t: (key: string, values?: Record<string, unknown>) => string,
+  overdueBuckets: AgingGroup[],
+  atRiskInvoices: Invoice[],
+) {
+  const header = [
+    t('tableId'),
+    t('tableDebtor'),
+    t('csvOwner'),
+    t('tableAmount'),
+    t('tableDueDate'),
+    t('tableDaysOverdue'),
+    t('csvAgingBucket'),
+    t('csvStatus'),
+  ];
+
+  const rows: (string | number)[][] = [];
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const oneDaySecs = 86400;
+
+  for (const bucket of overdueBuckets) {
+    for (const inv of bucket.invoices) {
+      const daysOverdue = Math.floor((nowSecs - inv.dueDate) / oneDaySecs);
+      rows.push([
+        inv.id,
+        inv.debtor,
+        inv.owner,
+        formatUSDC(inv.amount),
+        new Date(inv.dueDate * 1000).toISOString().slice(0, 10),
+        daysOverdue,
+        bucket.label,
+        inv.status,
+      ]);
+    }
+  }
+
+  for (const inv of atRiskInvoices) {
+    const daysOverdue = Math.floor((nowSecs - inv.dueDate) / oneDaySecs);
+    rows.push([
+      inv.id,
+      inv.debtor,
+      inv.owner,
+      formatUSDC(inv.amount),
+      new Date(inv.dueDate * 1000).toISOString().slice(0, 10),
+      daysOverdue,
+      t('statusAtRisk'),
+      inv.status,
+    ]);
+  }
+
+  const csv = [header, ...rows]
+    .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `astera-aging-report-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function AdminAgingPage() {
+  const t = useTranslations('Admin.aging');
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedBucket, setExpandedBucket] = useState<AgingBucket | null>(null);
+  const AGING_BUCKETS = getBucketLabels(t);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -71,7 +139,7 @@ export default function AdminAgingPage() {
       const all = await getMultipleInvoices(ids);
       setInvoices(all);
     } catch (e) {
-      toast.error('Failed to load invoices for aging report.');
+      toast.error(t('noFunded'));
       console.error(e);
     } finally {
       setLoading(false);
@@ -136,6 +204,62 @@ export default function AdminAgingPage() {
   const totalOverdueAmount = overdueBuckets.reduce((sum, b) => sum + b.totalAmount, 0n);
   const totalOverdueCount = overdueBuckets.reduce((sum, b) => sum + b.invoices.length, 0);
 
+  const exportCSV = useCallback(() => {
+    const headers = [
+      t('tableId'),
+      t('tableDebtor'),
+      t('csvOwner'),
+      t('tableAmount'),
+      t('tableDueDate'),
+      t('csvStatus'),
+      t('csvAgingBucket'),
+      t('tableDaysOverdue'),
+    ];
+    const rows: string[][] = [];
+
+    for (const bucket of overdueBuckets) {
+      for (const inv of bucket.invoices) {
+        const overdueDays = Math.floor((nowSecs - inv.dueDate) / 86400);
+        rows.push([
+          inv.id.toString(),
+          inv.debtor,
+          inv.owner,
+          formatUSDC(inv.amount),
+          formatDate(inv.dueDate),
+          inv.status,
+          bucket.label,
+          overdueDays > 0 ? t('daysSuffix', { days: overdueDays }) : t('daysSuffix', { days: 0 }),
+        ]);
+      }
+    }
+
+    for (const inv of atRiskInvoices) {
+      const overdueDays = Math.floor((nowSecs - inv.dueDate) / 86400);
+      rows.push([
+        inv.id.toString(),
+        inv.debtor,
+        inv.owner,
+        formatUSDC(inv.amount),
+        formatDate(inv.dueDate),
+        inv.status,
+        t('atRiskCsv'),
+        t('daysSuffix', { days: overdueDays > 0 ? overdueDays : 0 }),
+      ]);
+    }
+
+    const csv = [headers, ...rows]
+      .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `astera-aging-report-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [t, overdueBuckets, atRiskInvoices, nowSecs]);
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -152,43 +276,59 @@ export default function AdminAgingPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold mb-2">Invoice Aging Report</h1>
-        <p className="text-brand-muted text-sm">
-          Overdue and at-risk invoices grouped by aging period.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold mb-2">{t('title')}</h1>
+          <p className="text-brand-muted text-sm">{t('description')}</p>
+        </div>
+        <button
+          onClick={exportCSV}
+          className="px-4 py-2 bg-brand-gold text-black font-semibold rounded-xl hover:brightness-110 transition-all text-sm flex items-center gap-2"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            />
+          </svg>
+          {t('downloadCsv')}
+        </button>
       </div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <SummaryCard
-          label="Total Overdue"
+          label={t('totalOverdue')}
           value={totalOverdueCount.toString()}
-          description={`${formatUSDC(totalOverdueAmount)} in overdue invoices`}
+          description={t('totalOverdueDesc', { amount: formatUSDC(totalOverdueAmount) })}
           trend={totalOverdueCount > 0 ? 'danger' : 'success'}
         />
         <SummaryCard
-          label="Critical (90+ days)"
+          label={t('critical')}
           value={overdueBuckets[0]!.invoices.length.toString()}
           description={formatUSDC(overdueBuckets[0]!.totalAmount)}
           trend={overdueBuckets[0]!.invoices.length > 0 ? 'danger' : undefined}
         />
         <SummaryCard
-          label="Current (On Track)"
+          label={t('current')}
           value={overdueBuckets[4]!.invoices.length.toString()}
-          description={`${formatUSDC(overdueBuckets[4]!.totalAmount)} in active invoices`}
+          description={t('currentDesc', { amount: formatUSDC(overdueBuckets[4]!.totalAmount) })}
           trend="success"
         />
         <SummaryCard
-          label="At Risk (due within 7d)"
+          label={t('atRisk')}
           value={atRiskInvoices.length.toString()}
-          description={`${formatUSDC(atRiskInvoices.reduce((s, i) => s + BigInt(i.amount ?? 0), 0n))}`}
+          description={t('atRiskDesc', {
+            amount: formatUSDC(atRiskInvoices.reduce((s, i) => s + BigInt(i.amount ?? 0), 0n)),
+          })}
           trend={atRiskInvoices.length > 0 ? 'primary' : undefined}
         />
         <SummaryCard
-          label="Total Funded Invoices"
+          label={t('totalFunded')}
           value={invoices.filter((i) => i.status === 'Funded').length.toString()}
-          description="Currently active funded invoices"
+          description={t('totalFundedDesc')}
         />
       </div>
 
@@ -196,7 +336,7 @@ export default function AdminAgingPage() {
       {atRiskInvoices.length > 0 && (
         <section>
           <h2 className="text-xs font-bold text-brand-muted uppercase tracking-widest mb-4">
-            At-Risk Invoices (due within {AT_RISK_DAYS} days)
+            {t('atRiskSection', { days: AT_RISK_DAYS })}
           </h2>
           <div className="bg-brand-card border border-yellow-500/30 rounded-2xl overflow-hidden">
             <InvoiceTable invoices={atRiskInvoices} nowSecs={nowSecs} />
@@ -207,7 +347,7 @@ export default function AdminAgingPage() {
       {/* Aging Buckets */}
       <section>
         <h2 className="text-xs font-bold text-brand-muted uppercase tracking-widest mb-4">
-          Overdue Invoices by Aging Period
+          {t('overdueSection')}
         </h2>
         <div className="space-y-4">
           {overdueBuckets.map((bucket) => (
@@ -226,7 +366,7 @@ export default function AdminAgingPage() {
                     {bucket.label}
                   </div>
                   <span className="text-sm text-brand-muted">
-                    {bucket.invoices.length} invoice{bucket.invoices.length !== 1 ? 's' : ''}
+                    {t('invoiceCount', { count: bucket.invoices.length })}
                   </span>
                 </div>
                 <div className="flex items-center gap-4">
@@ -258,19 +398,15 @@ export default function AdminAgingPage() {
           {totalOverdueCount === 0 && overdueBuckets[4]!.invoices.length === 0 && (
             <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
               <div className="text-3xl mb-3">✓</div>
-              <p className="text-brand-muted font-medium">No funded invoices found.</p>
-              <p className="text-xs text-brand-muted mt-1">
-                Funded invoices will appear here once the pool starts lending.
-              </p>
+              <p className="text-brand-muted font-medium">{t('noFunded')}</p>
+              <p className="text-xs text-brand-muted mt-1">{t('noFundedDesc')}</p>
             </div>
           )}
           {totalOverdueCount === 0 && overdueBuckets[4]!.invoices.length > 0 && (
             <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
               <div className="text-3xl mb-3">✓</div>
-              <p className="text-brand-muted font-medium">No overdue invoices.</p>
-              <p className="text-xs text-brand-muted mt-1">
-                All funded invoices are current on their payments.
-              </p>
+              <p className="text-brand-muted font-medium">{t('noOverdue')}</p>
+              <p className="text-xs text-brand-muted mt-1">{t('noOverdueDesc')}</p>
             </div>
           )}
         </div>
@@ -312,28 +448,29 @@ function SummaryCard({
 }
 
 function InvoiceTable({ invoices, nowSecs }: { invoices: Invoice[]; nowSecs: number }) {
+  const t = useTranslations('Admin.aging');
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-brand-border bg-brand-dark/50">
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              ID
+              {t('tableId')}
             </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              Debtor
+              {t('tableDebtor')}
             </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              Amount
+              {t('tableAmount')}
             </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              Due Date
+              {t('tableDueDate')}
             </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              Days Overdue
+              {t('tableDaysOverdue')}
             </th>
             <th className="px-6 py-4 font-semibold text-brand-muted uppercase tracking-wider">
-              Action
+              {t('tableAction')}
             </th>
           </tr>
         </thead>
@@ -365,7 +502,7 @@ function InvoiceTable({ invoices, nowSecs }: { invoices: Invoice[]; nowSecs: num
                             : 'bg-yellow-400/20 text-yellow-300'
                     }`}
                   >
-                    {overdueDays}d
+                    {t('daysSuffix', { days: overdueDays })}
                   </span>
                 </td>
                 <td className="px-6 py-4">
@@ -373,7 +510,7 @@ function InvoiceTable({ invoices, nowSecs }: { invoices: Invoice[]; nowSecs: num
                     href={`/invoice/${inv.id}`}
                     className="text-brand-gold hover:underline text-xs font-medium"
                   >
-                    View →
+                    {t('view')}
                   </Link>
                 </td>
               </tr>

@@ -81,4 +81,18 @@ describe('CSRF middleware (#770)', () => {
       expect(res.status).not.toBe(403);
     },
   );
+
+  describe('locale preservation on deep links (#971)', () => {
+    it('sets NEXT_LOCALE cookie matching locale-prefixed deep link path', () => {
+      const res = middleware(makeRequest('/fr/invoice/new'));
+      expect(res.cookies.get('NEXT_LOCALE')?.value).toBe('fr');
+    });
+
+    it('does not overwrite NEXT_LOCALE cookie if it already matches deep link path', () => {
+      const res = middleware(
+        makeRequest('/fr/invoice/new', { cookie: 'NEXT_LOCALE=fr; csrf_token=test' }),
+      );
+      expect(res.cookies.get('NEXT_LOCALE')).toBeUndefined();
+    });
+  });
 });

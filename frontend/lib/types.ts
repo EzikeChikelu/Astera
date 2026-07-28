@@ -121,7 +121,13 @@ export interface RateSnapshot {
   rateBps: number;
 }
 
-export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';
+export type ProposalStatus =
+  | 'Active'
+  | 'Passed'
+  | 'Rejected'
+  | 'Executed'
+  | 'Cancelled'
+  | 'Expired';
 
 export interface GovernanceProposal {
   id: number;
@@ -306,4 +312,69 @@ export interface FullCreditScore {
 export interface ReferralStats {
   referrer: StellarAddress;
   referralCount: number;
+}
+
+// #864: role-based multisig access control
+export type Role =
+  | 'SuperAdmin'
+  | 'RiskManager'
+  | 'TreasuryManager'
+  | 'ComplianceOfficer'
+  | 'OracleManager';
+
+export const ALL_ROLES: Role[] = [
+  'SuperAdmin',
+  'RiskManager',
+  'TreasuryManager',
+  'ComplianceOfficer',
+  'OracleManager',
+];
+
+export const ROLE_LABELS: Record<Role, string> = {
+  SuperAdmin: 'Super Admin',
+  RiskManager: 'Risk Manager',
+  TreasuryManager: 'Treasury Manager',
+  ComplianceOfficer: 'Compliance Officer',
+  OracleManager: 'Oracle Manager',
+};
+
+export interface MultiSigConfig {
+  signers: StellarAddress[];
+  threshold: number;
+}
+
+// Named distinctly from `ProposalStatus` above (governance module) since
+// access-control proposals have a different status lifecycle.
+export type AccessControlProposalStatus = 'Pending' | 'Approved' | 'Executed' | 'Rejected';
+
+/** Mirrors contracts/access_control/src/lib.rs's `ActionPayload` enum. */
+export type ActionPayload =
+  | { tag: 'SetPaused'; values: [boolean] }
+  | { tag: 'SetYield'; values: [number] }
+  | { tag: 'SetTreasury'; values: [string] }
+  | { tag: 'WithdrawRevenue'; values: [string, bigint] }
+  | { tag: 'SetOracleContract'; values: [string] }
+  | { tag: 'SetKycRequired'; values: [boolean] }
+  | { tag: 'SetInvestorKyc'; values: [string, boolean] }
+  | { tag: 'SetMaxUtilization'; values: [number] }
+  | { tag: 'SetOracle'; values: [string] }
+  | { tag: 'RegisterDebtor'; values: [string, string, bigint] }
+  | { tag: 'DeactivateDebtor'; values: [string] }
+  | { tag: 'AddKeeper'; values: [string] }
+  | { tag: 'SetLateThreshold'; values: [bigint] }
+  | { tag: 'SetScoreThresholds'; values: [number, number, number, number] }
+  | { tag: 'RegisterAttestor'; values: [string, number, number] }
+  | { tag: 'AddSigner'; values: [Role, string] }
+  | { tag: 'RemoveSigner'; values: [Role, string] }
+  | { tag: 'SetThreshold'; values: [Role, number] };
+
+export interface Proposal {
+  role: Role;
+  target: StellarAddress;
+  action: ActionPayload;
+  proposer: StellarAddress;
+  approvals: StellarAddress[];
+  createdAt: number;
+  expiresAt: number;
+  status: AccessControlProposalStatus;
 }

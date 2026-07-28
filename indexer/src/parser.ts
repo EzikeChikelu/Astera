@@ -146,7 +146,10 @@ export function parseEvents(records: any[]): IndexedEvent[] {
       if (record.type !== 'contract') continue;
 
       const topic = parseTopic(record);
-      if (!topic) continue;
+      if (!topic) {
+        console.warn('[parser] Skipping event record with missing topic:', record.id);
+        continue;
+      }
 
       const [contractType, eventType] = topic;
       const contractId = record.contract || '';
@@ -175,11 +178,10 @@ export function parseEvents(records: any[]): IndexedEvent[] {
 
 function parseTopic(record: any): [string, string] | null {
   try {
-    const topic = record.contract?.[0]?.topic;
-    if (!topic || !Array.isArray(topic) || topic.length < 2) return null;
-    // Topics are base64-encoded xdr.ScVal
-    // For simplicity, we expect the topic to be an array of strings
-    return [topic[0], topic[1]];
+    const topic = record.topic || record.contract?.[0]?.topic;
+    if (!topic || !Array.isArray(topic) || topic.length === 0) return null;
+    if (topic.length === 1) return [String(topic[0]), 'generic'];
+    return [String(topic[0]), String(topic[1])];
   } catch {
     return null;
   }
@@ -187,57 +189,91 @@ function parseTopic(record: any): [string, string] | null {
 
 function parseValue(record: any): any {
   try {
-    return record.contract?.[0]?.value || null;
+    return record.value ?? record.contract?.[0]?.value ?? null;
   } catch {
     return null;
   }
 }
 
+function isStellarAddress(val: any): boolean {
+  return typeof val === 'string' && /^(G[A-Z2-7]{55}|C[A-Z2-7]{55})$/.test(val);
+}
+
 /**
  * Extract the actor/caller address from event value based on event type.
- * The actor is always the first field in the value tuple for action events.
+ * Resilient to schema changes across contract migrations (handles tuples, objects, and scalars).
  */
 function extractActor(contractType: string, eventType: string, value: any): string | null {
-  if (!value || !Array.isArray(value) || value.length === 0) return null;
+  if (!value) return null;
 
-  // Pool action events: first field is the actor address
-  if (contractType === 'POOL') {
-    switch (eventType) {
-      case 'deposit':
-      case 'withdraw':
-      case 'repaid':
-      case 'part_pay':
-      case 'yld_claim':
-      case 'wd_full':
-      case 'wd_queue':
-      case 'wd_cncl':
-      case 'col_dep':
-        return value[0];
+  if (isStellarAddress(value)) return value;
+
+  // Object schema (struct-emitted or post-migration events)
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const candidates = [
+      value.actor,
+      value.owner,
+      value.caller,
+      value.investor,
+      value.sme,
+      value.user,
+      value.sender,
+      value.screener,
+    ];
+    for (const cand of candidates) {
+      if (isStellarAddress(cand)) return cand;
+    }
+    for (const val of Object.values(value)) {
+      if (isStellarAddress(val)) return val as string;
     }
   }
 
-  // Invoice action events: first field is often the actor
-  if (contractType === 'INVOICE') {
-    switch (eventType) {
-      case 'created':
-        return value[1]; // owner
-      case 'funded':
-      case 'paid':
-      case 'cancelled':
-      case 'resolved':
-        return value[1]; // caller/pool
-      case 'paused':
-      case 'unpaused':
-        return value[0]; // admin
+  // Tuple array schema (pre and post-migration)
+  if (Array.isArray(value) && value.length > 0) {
+    if (contractType === 'POOL') {
+      switch (eventType) {
+        case 'deposit':
+        case 'withdraw':
+        case 'repaid':
+        case 'part_pay':
+        case 'yld_claim':
+        case 'wd_full':
+        case 'wd_queue':
+        case 'wd_cncl':
+        case 'col_dep':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+      }
+    } else if (contractType === 'INVOICE') {
+      switch (eventType) {
+        case 'created':
+          if (isStellarAddress(value[1])) return value[1];
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+        case 'funded':
+        case 'paid':
+        case 'cancelled':
+        case 'resolved':
+          if (isStellarAddress(value[1])) return value[1];
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+        case 'paused':
+        case 'unpaused':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+      }
+    } else if (contractType === 'CREDIT') {
+      switch (eventType) {
+        case 'payment':
+        case 'default':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+      }
     }
-  }
 
-  // Credit score events: first field is the caller
-  if (contractType === 'CREDIT') {
-    switch (eventType) {
-      case 'payment':
-      case 'default':
-        return value[0]; // caller
+    // Fallback: scan array elements for a valid Stellar address
+    for (const item of value) {
+      if (isStellarAddress(item)) return item;
     }
   }
 

@@ -26,6 +26,51 @@ export interface ScreenContext {
   debtorConcentrationBps?: number;
 }
 
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 5000;
+
+/**
+ * #981: real upstream KYC/screening provider over HTTP.
+ *
+ * Enforces a hard timeout on the outbound call so a hung provider can't
+ * block the queue from processing other subjects.
+ */
+export class HttpScreenerProvider implements ScreenerProvider {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly timeoutMs: number = DEFAULT_UPSTREAM_TIMEOUT_MS,
+    private readonly apiKey?: string,
+  ) {}
+
+  async screen(address: string, context: ScreenContext = {}): Promise<ScreenResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}/screen`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ address, ...context, recentVolume: context.recentVolume?.toString() }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        throw new Error(`upstream screening provider returned ${res.status}`);
+      }
+      return (await res.json()) as ScreenResult;
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`upstream screening provider timed out after ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 const REASON_CLEAR = 0;
 const REASON_SANCTIONS_HIT = 9001;
 const REASON_HIGH_RISK_JURISDICTION = 2001;

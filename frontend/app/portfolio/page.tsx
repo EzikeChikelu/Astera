@@ -153,7 +153,7 @@ function StatCard({
   return (
     <div className="bg-brand-card border border-brand-border rounded-2xl p-6 flex flex-col gap-1">
       <p className="text-brand-muted text-sm font-medium">{label}</p>
-      <p className={`text-2xl font-bold ${highlight ? 'text-brand-gold' : 'text-white'}`}>
+      <p className={`text-2xl font-bold ${highlight ? 'text-brand-gold' : 'text-brand-text'}`}>
         {value}
       </p>
       {sub && <p className="text-xs text-brand-muted mt-1">{sub}</p>}
@@ -220,7 +220,7 @@ function AllocationPie({ slices }: { slices: { label: string; pct: number; color
               style={{ background: COLORS[i % COLORS.length] }}
             />
             <span className="text-brand-muted">{s.label}</span>
-            <span className="text-white font-medium ml-auto">{s.pct.toFixed(1)}%</span>
+            <span className="text-brand-text font-medium ml-auto">{s.pct.toFixed(1)}%</span>
           </div>
         ))}
       </div>
@@ -414,7 +414,7 @@ export default function PortfolioPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white">Investor Portfolio</h1>
+          <h1 className="text-3xl font-bold text-brand-text">Investor Portfolio</h1>
           <p className="text-brand-muted mt-1 text-sm">
             {lastRefresh
               ? `Last updated: ${lastRefresh.toLocaleTimeString()}`
@@ -424,7 +424,7 @@ export default function PortfolioPage() {
         <button
           onClick={load}
           disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm text-white hover:bg-brand-border transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm text-brand-text hover:bg-brand-border transition-colors disabled:opacity-50"
         >
           {loading ? (
             <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
@@ -490,7 +490,9 @@ export default function PortfolioPage() {
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
               <div className="flex-1">
                 <p className="text-brand-muted text-sm mb-1">Total Portfolio Value</p>
-                <p className="text-4xl font-bold text-white">{formatUSDC(totalUsdcDeposited)}</p>
+                <p className="text-4xl font-bold text-brand-text">
+                  {formatUSDC(totalUsdcDeposited)}
+                </p>
                 <p className="text-xs text-brand-muted mt-1">
                   ≈ USDC equivalent
                   <span
@@ -503,11 +505,11 @@ export default function PortfolioPage() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 text-sm">
                   <div>
                     <p className="text-brand-muted text-xs">Total Deposited</p>
-                    <p className="text-white font-medium">{formatUSDC(totalUsdcDeposited)}</p>
+                    <p className="text-brand-text font-medium">{formatUSDC(totalUsdcDeposited)}</p>
                   </div>
                   <div>
                     <p className="text-brand-muted text-xs">Total Deployed</p>
-                    <p className="text-white font-medium">{formatUSDC(totalUsdcDeployed)}</p>
+                    <p className="text-brand-text font-medium">{formatUSDC(totalUsdcDeployed)}</p>
                   </div>
                   <div>
                     <p className="text-brand-muted text-xs">Total Earned</p>
@@ -557,20 +559,20 @@ export default function PortfolioPage() {
 
           {/* Pool utilisation */}
           <div className="bg-brand-card border border-brand-border rounded-2xl p-6 mb-8">
-            <h2 className="text-white font-semibold mb-4">Pool Utilisation</h2>
+            <h2 className="text-brand-text font-semibold mb-4">Pool Utilisation</h2>
             <UtilisationBar utilisation={utilisation} />
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 text-sm">
               <div>
                 <p className="text-brand-muted">Total Pool Deposits</p>
-                <p className="text-white font-medium">{formatUSDC(totalPoolDeposited)}</p>
+                <p className="text-brand-text font-medium">{formatUSDC(totalPoolDeposited)}</p>
               </div>
               <div>
                 <p className="text-brand-muted">Total Deployed</p>
-                <p className="text-white font-medium">{formatUSDC(totalPoolDeployed)}</p>
+                <p className="text-brand-text font-medium">{formatUSDC(totalPoolDeployed)}</p>
               </div>
               <div>
                 <p className="text-brand-muted">Total Paid Out</p>
-                <p className="text-white font-medium">
+                <p className="text-brand-text font-medium">
                   {formatUSDC(rows.reduce((a, r) => a + r.totals.totalPaidOut, 0n))}
                 </p>
               </div>
@@ -606,7 +608,9 @@ export default function PortfolioPage() {
                     }
                   >
                     <div className="flex items-center gap-3">
-                      <h3 className="text-white font-medium text-base">{stablecoinLabel(token)}</h3>
+                      <h3 className="text-brand-text font-medium text-base">
+                        {stablecoinLabel(token)}
+                      </h3>
                       {rateBps !== 10_000 && (
                         <span className="text-xs text-brand-muted">
                           ≈ {formatUSDC(usdcDeposited)} USDC
@@ -633,19 +637,19 @@ export default function PortfolioPage() {
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                           <div>
                             <p className="text-brand-muted">Deposited</p>
-                            <p className="text-white font-medium">
+                            <p className="text-brand-text font-medium">
                               {formatUSDC(position.totalDeposited)}
                             </p>
                           </div>
                           <div>
                             <p className="text-brand-muted">Available</p>
-                            <p className="text-white font-medium">
+                            <p className="text-brand-text font-medium">
                               {formatUSDC(position.available)}
                             </p>
                           </div>
                           <div>
                             <p className="text-brand-muted">Deployed</p>
-                            <p className="text-white font-medium">
+                            <p className="text-brand-text font-medium">
                               {formatUSDC(position.deployed)}
                             </p>
                           </div>
@@ -673,17 +677,17 @@ export default function PortfolioPage() {
                       </div>
 
                       {isQueued && waitEstimate && (
-                        <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
+                        <div className="mt-4 rounded-xl border border-brand-border bg-brand-navy/40 p-4">
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div>
-                              <p className="text-white font-medium">Withdrawal queue</p>
+                              <p className="text-brand-text font-medium">Withdrawal queue</p>
                               <p className="text-brand-muted text-xs mt-1">
                                 Position {waitEstimate.queuePosition} with{' '}
                                 {formatUSDC(waitEstimate.capitalAhead)} ahead
                               </p>
                               <p className="text-brand-muted text-xs mt-1">
                                 Estimated wait:{' '}
-                                <span className="text-white">
+                                <span className="text-brand-text">
                                   {formatWaitEstimate(waitEstimate.estimatedWaitSecs)}
                                 </span>{' '}
                                 <span className="opacity-60">(estimate, not a guarantee)</span>
@@ -691,14 +695,14 @@ export default function PortfolioPage() {
                             </div>
                             <div className="text-left sm:text-right">
                               <p className="text-brand-muted text-xs">Nearest invoice due</p>
-                              <p className="text-white text-sm font-medium">{dueDate}</p>
+                              <p className="text-brand-text text-sm font-medium">{dueDate}</p>
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-2 mt-3">
                             <button
                               onClick={() => handleCancelWithdrawal(token)}
                               disabled={actionLoading}
-                              className="px-3 py-1.5 text-xs rounded-lg border border-brand-border text-white hover:bg-brand-border transition-colors disabled:opacity-50"
+                              className="px-3 py-1.5 text-xs rounded-lg border border-brand-border text-brand-text hover:bg-brand-border transition-colors disabled:opacity-50"
                             >
                               Cancel request
                             </button>
@@ -715,8 +719,8 @@ export default function PortfolioPage() {
                       )}
 
                       {!isQueued && position && position.available > 0n && (
-                        <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
-                          <p className="text-white font-medium mb-2">Request withdrawal</p>
+                        <div className="mt-4 rounded-xl border border-brand-border bg-brand-navy/40 p-4">
+                          <p className="text-brand-text font-medium mb-2">Request withdrawal</p>
                           <p className="text-brand-muted text-xs mb-3">
                             If pool liquidity can&apos;t cover it immediately, your request is
                             queued and settled automatically (FIFO, oldest-first) as liquidity
@@ -732,7 +736,7 @@ export default function PortfolioPage() {
                               onChange={(e) =>
                                 setRequestAmounts((p) => ({ ...p, [token]: e.target.value }))
                               }
-                              className="flex-1 bg-brand-dark border border-brand-border rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-brand-gold"
+                              className="flex-1 bg-brand-dark border border-brand-border rounded-lg px-3 py-1.5 text-sm text-brand-text focus:outline-none focus:border-brand-gold"
                             />
                             <button
                               onClick={() => handleRequestWithdrawal(token)}

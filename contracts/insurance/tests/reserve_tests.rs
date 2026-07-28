@@ -69,6 +69,7 @@ impl DummyCreditScore {
             score_version: 0,
             config_version: 0,
             is_stale: false,
+            blended_score: score,
         }
     }
 }

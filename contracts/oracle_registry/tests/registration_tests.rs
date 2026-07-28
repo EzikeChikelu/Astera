@@ -2,9 +2,35 @@
 
 use oracle_registry::{OracleRegistryContract, OracleRegistryContractClient, OracleRegistryError};
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token, Address, Env, String,
 };
+
+/// Minimal invoice-contract stand-in so `open_verification_round`'s
+/// cross-contract awaiting-verification check (#953) has something to call
+/// into. Always reports the invoice as awaiting verification — none of these
+/// tests exercise that rejection path (see consensus_tests.rs for that).
+#[contract]
+pub struct DummyInvoice;
+
+#[contractimpl]
+impl DummyInvoice {
+    pub fn consensus_verify(
+        _env: Env,
+        _id: u64,
+        registry: Address,
+        _approved: bool,
+        _reason: String,
+        _oracle_hash: String,
+    ) {
+        registry.require_auth();
+    }
+
+    pub fn get_invoice_verification_state(_env: Env, _id: u64) -> (bool, i128) {
+        (true, 0)
+    }
+}
 
 fn setup(env: &Env) -> (OracleRegistryContractClient<'_>, Address, Address, i128) {
     env.ledger().with_mut(|l| l.timestamp = 1_000_000);
@@ -17,6 +43,8 @@ fn setup(env: &Env) -> (OracleRegistryContractClient<'_>, Address, Address, i128
         .address();
     let min_stake = 1_000i128;
     client.initialize(&admin, &stake_token, &min_stake);
+    let invoice_id = env.register(DummyInvoice, ());
+    client.set_invoice_contract(&admin, &invoice_id);
     (client, admin, stake_token, min_stake)
 }
 
@@ -150,8 +178,18 @@ fn test_slash_oracle_reduces_stake_and_forwards_to_treasury() {
     client.register_oracle(&operator, &min_stake);
     client.set_treasury(&admin, &Some(treasury.clone()));
 
+    // #954: slash_oracle must cite a real round + evidence as justification.
+    let caller = Address::generate(&env);
+    client.open_verification_round(&caller, &1u64, &String::from_str(&env, "hash-1"));
+
     // Slash 50% (5000 bps).
-    client.slash_oracle(&admin, &operator, &5_000u32);
+    client.slash_oracle(
+        &admin,
+        &operator,
+        &5_000u32,
+        &1u64,
+        &String::from_str(&env, "colluded with debtor per dispute #12"),
+    );
 
     let info = client.get_oracle_info(&operator).unwrap();
     assert_eq!(info.stake_amount, min_stake / 2);
@@ -170,7 +208,16 @@ fn test_slash_without_treasury_keeps_funds_in_registry() {
     mint(&env, &stake_token, &operator, min_stake);
     client.register_oracle(&operator, &min_stake);
 
-    client.slash_oracle(&admin, &operator, &10_000u32); // full slash
+    let caller = Address::generate(&env);
+    client.open_verification_round(&caller, &1u64, &String::from_str(&env, "hash-1"));
+
+    client.slash_oracle(
+        &admin,
+        &operator,
+        &10_000u32, // full slash
+        &1u64,
+        &String::from_str(&env, "colluded with debtor per dispute #12"),
+    );
 
     let info = client.get_oracle_info(&operator).unwrap();
     assert_eq!(info.stake_amount, 0);
@@ -189,7 +236,13 @@ fn test_slash_unauthorized_caller_rejected() {
     mint(&env, &stake_token, &operator, min_stake);
     client.register_oracle(&operator, &min_stake);
 
-    let result = client.try_slash_oracle(&not_admin, &operator, &5_000u32);
+    let result = client.try_slash_oracle(
+        &not_admin,
+        &operator,
+        &5_000u32,
+        &1u64,
+        &String::from_str(&env, "evidence"),
+    );
     assert_eq!(result, Err(Ok(OracleRegistryError::Unauthorized)));
 }
 

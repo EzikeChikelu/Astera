@@ -1,5 +1,12 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import GlossaryTerm from '@/components/GlossaryTerm';
+
+// #783: canonical tag for the landing page — resolved against
+// metadataBase (set in the root layout) into an absolute URL.
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+};
 
 const stats = [
   { label: 'Trade Finance Gap', value: '$1.7T', sub: 'in emerging markets' },

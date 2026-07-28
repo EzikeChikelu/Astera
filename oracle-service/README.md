@@ -33,6 +33,7 @@ This service can run in one of two modes, selected purely by whether
 | `ORACLE_REGISTRY_CONTRACT_ID` | no | Enables consensus mode when set |
 | `STAKE_TOKEN_ID` | no | Informational only — the actual stake token is whatever the registry was `initialize`d with |
 | `REGISTER_STAKE_AMOUNT` | only for `--register` | Stake amount (in the registry's stake token's smallest unit) to deposit when registering |
+| `LISTENER_CURSOR_PATH` | no | File where the listener persists the last-processed Horizon paging token, so a restart resumes the stream instead of re-scanning from `now` (default `.oracle-listener-cursor`) |
 
 ## Registering as an oracle (consensus mode)
 
@@ -55,6 +56,17 @@ On every normal startup (without `--register`), if
 `ORACLE_REGISTRY_CONTRACT_ID` is set the service checks this node's
 registration/stake and logs a warning if it isn't an active registered
 oracle yet (its votes would otherwise silently fail with `NotRegistered`).
+
+In consensus mode, a `/metrics` endpoint reports this operator's current
+stake, `deregister_oracle` cooldown status (if a deregistration is pending),
+and recent `slash_oracle` events against this node — without needing to
+query the chain directly.
+
+If the registry is paused (`pause()`/`is_paused`), the node stops attempting
+`open_verification_round`/`submit_vote` calls as soon as it observes the
+`paused` event (or hits a `ContractPaused` failure directly) and resumes
+automatically once it sees `unpaused`, instead of repeatedly hitting and
+logging the same failure for every new invoice.
 
 ## Running 3+ local nodes for consensus testing
 
@@ -100,10 +112,16 @@ on the same round outcome.
 - `index.ts` — startup, config, health server, mode selection
 - `listener.ts` — streams Horizon effects for both the invoice contract
   (`created` events) and, in consensus mode, the registry contract's
-  `ORACLE` topic events
+  `ORACLE` topic events; persists the last-processed paging token
+  (`LISTENER_CURSOR_PATH`) so a restart resumes the stream rather than
+  missing events or resubmitting votes
 - `verifier.ts` — fetches invoice data, runs the (currently mocked) document
-  check, and submits this node's verdict via whichever mode is active
-- `consensus.ts` — in-memory tracker of `VerificationRound` status per
-  invoice, fed by `listener.ts`, exposed via `/health`
-- `staking.ts` — startup stake check + the `--register` CLI flow
-- `retry.ts` — exponential backoff shared by both verification paths
+  check, and submits this node's verdict via whichever mode is active;
+  skips submission while the registry is paused
+- `consensus.ts` — in-memory tracker of `VerificationRound` status and
+  registry pause state per invoice, fed by `listener.ts`, exposed via
+  `/health`
+- `staking.ts` — startup stake check, the `--register` CLI flow, and the
+  `/metrics` stake/cooldown/slash snapshot
+- `retry.ts` — capped exponential backoff with jitter, shared by both
+  verification paths

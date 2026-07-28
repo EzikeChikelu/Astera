@@ -24,6 +24,11 @@ export type {
   RiskTier,
   ComplianceRecord,
   ScreeningHistoryEntry,
+  Role,
+  MultiSigConfig,
+  ProposalStatus,
+  ActionPayload,
+  Proposal,
 } from '../../packages/sdk/src/types';
 
 export * from './generated/tranche';

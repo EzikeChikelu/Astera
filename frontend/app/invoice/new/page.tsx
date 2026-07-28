@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
@@ -11,6 +11,7 @@ import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
 import { toStroops } from '@/lib/stellar';
+import GlossaryTerm from '@/components/GlossaryTerm';
 import { getInvoiceTemplate, upsertInvoiceTemplate } from '@/lib/invoiceTemplates';
 
 const MIN_AMOUNT = 10;
@@ -262,9 +263,12 @@ export default function NewInvoicePage() {
 
               {/* Amount */}
               <div>
-                <label className="block text-sm text-brand-muted mb-2">Invoice Amount (USDC)</label>
+                <label htmlFor="amount" className="block text-sm text-brand-muted mb-2">
+                  Invoice Amount (USDC)
+                </label>
                 <div className="relative">
                   <input
+                    id="amount"
                     type="number"
                     name="amount"
                     min={MIN_AMOUNT}
@@ -290,8 +294,11 @@ export default function NewInvoicePage() {
 
               {/* Due Date */}
               <div>
-                <label className="block text-sm text-brand-muted mb-2">Due Date</label>
+                <label htmlFor="dueDate" className="block text-sm text-brand-muted mb-2">
+                  Due Date
+                </label>
                 <input
+                  id="dueDate"
                   type="date"
                   name="dueDate"
                   min={minDate}
@@ -308,13 +315,14 @@ export default function NewInvoicePage() {
 
               {/* Description */}
               <div>
-                <label className="block text-sm text-brand-muted mb-2">
+                <label htmlFor="description" className="block text-sm text-brand-muted mb-2">
                   Description{' '}
                   <span className="text-brand-muted/60">
                     (optional, {form.description.length}/{MAX_DESCRIPTION_LEN})
                   </span>
                 </label>
                 <textarea
+                  id="description"
                   name="description"
                   rows={3}
                   placeholder="Invoice #001 - Goods delivery, 500 units..."
@@ -414,8 +422,11 @@ function Field({
 }) {
   return (
     <div>
-      <label className="block text-sm text-brand-muted mb-2">{label}</label>
+      <label htmlFor={name} className="block text-sm text-brand-muted mb-2">
+        {label}
+      </label>
       <input
+        id={name}
         type="text"
         name={name}
         placeholder={placeholder}

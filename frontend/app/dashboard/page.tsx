@@ -32,7 +32,12 @@ type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
 type StatusFilter = Invoice['status'] | 'All';
 type SortOption =
-  'created-desc' | 'created-asc' | 'amount-desc' | 'amount-asc' | 'due-asc' | 'due-desc';
+  | 'created-desc'
+  | 'created-asc'
+  | 'amount-desc'
+  | 'amount-asc'
+  | 'due-asc'
+  | 'due-desc';
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
@@ -366,7 +371,7 @@ function DashboardContent() {
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                     viewMode === DASHBOARD_VIEW_MODES.LIST
                       ? 'bg-brand-gold text-brand-dark'
-                      : 'text-brand-muted hover:text-white'
+                      : 'text-brand-muted hover:text-brand-text'
                   }`}
                 >
                   {t('view.list')}
@@ -376,7 +381,7 @@ function DashboardContent() {
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                     viewMode === DASHBOARD_VIEW_MODES.PIPELINE
                       ? 'bg-brand-gold text-brand-dark'
-                      : 'text-brand-muted hover:text-white'
+                      : 'text-brand-muted hover:text-brand-text'
                   }`}
                 >
                   {t('view.pipeline')}
@@ -385,7 +390,7 @@ function DashboardContent() {
             )}
             <button
               onClick={() => setShowOnboarding(true)}
-              className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
+              className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-brand-text transition-colors text-sm"
             >
               {t('help')}
             </button>
@@ -411,13 +416,13 @@ function DashboardContent() {
             <div className="mb-6 inline-flex rounded-xl border border-brand-border bg-brand-card p-1">
               <button
                 onClick={() => setDashboardTab('borrower')}
-                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'borrower' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-white'}`}
+                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'borrower' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-brand-text'}`}
               >
                 Borrower
               </button>
               <button
                 onClick={() => setDashboardTab('lender')}
-                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'lender' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-white'}`}
+                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'lender' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-brand-text'}`}
               >
                 Lender
               </button>
@@ -436,11 +441,11 @@ function DashboardContent() {
                 <div className="lg:col-span-2 space-y-6">
                   {/* Quick stats */}
                   {loading ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                       {[1, 2, 3, 4].map((n) => (
                         <div
                           key={n}
-                          className="p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse"
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse min-h-[88px] flex flex-col justify-center"
                         >
                           <Skeleton className="h-3 w-16 mb-2" />
                           <Skeleton className="h-6 w-20" />
@@ -448,7 +453,7 @@ function DashboardContent() {
                       ))}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                       {[
                         {
                           label: t('stats.totalVolume'),
@@ -461,10 +466,12 @@ function DashboardContent() {
                       ].map((s) => (
                         <div
                           key={s.label}
-                          className="p-4 bg-brand-card border border-brand-border rounded-xl"
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl min-h-[88px] flex flex-col justify-center"
                         >
                           <p className="text-xs text-brand-muted mb-1">{s.label}</p>
-                          <p className={`text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
+                          <p
+                            className={`text-lg sm:text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}
+                          >
                             {s.value}
                           </p>
                         </div>
@@ -496,12 +503,12 @@ function DashboardContent() {
                         placeholder={t('searchPlaceholder')}
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
-                        className="w-full bg-brand-dark border border-brand-border rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
+                        className="w-full bg-brand-dark border border-brand-border rounded-xl pl-9 pr-4 py-2.5 text-sm text-brand-text placeholder-brand-muted focus:outline-none focus:border-brand-gold"
                       />
                       {search && (
                         <button
                           onClick={() => setSearch('')}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-white"
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-brand-text"
                         >
                           ✕
                         </button>
@@ -517,7 +524,7 @@ function DashboardContent() {
                               className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                                 statusFilters.length === 0
                                   ? 'bg-brand-gold text-brand-dark'
-                                  : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
+                                  : 'text-brand-muted hover:text-brand-text bg-brand-card border border-brand-border'
                               }`}
                             >
                               {t('status.all')}
@@ -535,7 +542,7 @@ function DashboardContent() {
                                 className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                                   statusFilters.includes(tab)
                                     ? 'bg-brand-gold text-brand-dark'
-                                    : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
+                                    : 'text-brand-muted hover:text-brand-text bg-brand-card border border-brand-border'
                                 }`}
                               >
                                 {t(`status.${tab.toLowerCase()}`)}
@@ -546,7 +553,7 @@ function DashboardContent() {
                           <select
                             value={sort}
                             onChange={(e) => setSort(e.target.value as SortOption)}
-                            className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
+                            className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-brand-text focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
                           >
                             {SORT_OPTIONS.map((opt) => (
                               <option key={opt.value} value={opt.value}>
@@ -563,7 +570,7 @@ function DashboardContent() {
                                 onClick={() =>
                                   setStatusFilters((prev) => prev.filter((item) => item !== status))
                                 }
-                                className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-white hover:border-brand-gold/60"
+                                className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-brand-text hover:border-brand-gold/60"
                               >
                                 {t(`status.${status.toLowerCase()}`)} ✕
                               </button>
@@ -634,7 +641,7 @@ function DashboardContent() {
                             <button
                               onClick={() => setPage((p) => Math.max(0, p - 1))}
                               disabled={page === 0}
-                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-brand-text hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                               aria-label="Previous page"
                             >
                               ← Prev
@@ -654,7 +661,7 @@ function DashboardContent() {
                                 setPage(nextPage);
                               }}
                               disabled={page >= totalPages - 1 && !hasMore}
-                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-brand-text hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                               aria-label="Next page"
                             >
                               {loadingMore ? (
@@ -674,7 +681,7 @@ function DashboardContent() {
                 </div>
 
                 {/* Right column */}
-                <div className="space-y-6">
+                <div className="space-y-6 lg:sticky lg:top-24 lg:self-start">
                   {invoices.length < 1 && (
                     <SMEOnboardingChecklist
                       walletConnected={wallet.connected}

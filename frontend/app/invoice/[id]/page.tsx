@@ -7,7 +7,12 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
-import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
+import WalletConnect from '@/components/WalletConnect';
+import { downloadInvoicePDF } from '@/components/InvoicePDF';
+// Pre-existing build breakage found while working this branch: this page
+// uses <GlossaryTerm> below but never imported it, so `tsc`/the Next.js
+// build failed at HEAD. Not part of any of the four assigned issues.
+import GlossaryTerm from '@/components/GlossaryTerm';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -26,6 +31,7 @@ import {
   submitTx,
 } from '@/lib/contracts';
 import {
+  formatAmount,
   formatUSDC,
   formatDate,
   daysUntil,
@@ -56,6 +62,7 @@ import type {
   CoFundingRound,
   FullCreditScore,
 } from '@/lib/types';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
 
@@ -367,7 +374,13 @@ export default function InvoiceDetailPage() {
 
   const repaySimulation = useTransactionSimulation(
     simulateRepay,
-    isOwner && metadata.status === 'Funded' && !!fundedInvoice && !fullyRepaid && !!wallet.address && !!invoice && (!!repayAmount || remainingDue > 0n),
+    isOwner &&
+      metadata?.status === 'Funded' &&
+      !!fundedInvoice &&
+      !fullyRepaid &&
+      !!wallet.address &&
+      !!invoice &&
+      (!!repayAmount || remainingDue > 0n),
   );
 
   async function handleRepay() {
@@ -675,7 +688,9 @@ export default function InvoiceDetailPage() {
             </span>
           </div>
 
-          <div className="text-4xl font-bold gradient-text mb-6">{formatUSDC(metadata.amount)}</div>
+          <div className="text-4xl font-bold gradient-text mb-6">
+            {formatAmount(metadata.amount, metadata.decimals)}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div>
@@ -968,8 +983,8 @@ export default function InvoiceDetailPage() {
             <div>
               <h2 className="text-lg font-semibold mb-1">Fund This Invoice</h2>
               <p className="text-xs text-brand-muted">
-                Join other lenders co-funding this invoice. Committed capital earns a
-                proportional share of this invoice&apos;s principal and interest.
+                Join other lenders co-funding this invoice. Committed capital earns a proportional
+                share of this invoice&apos;s principal and interest.
               </p>
             </div>
 

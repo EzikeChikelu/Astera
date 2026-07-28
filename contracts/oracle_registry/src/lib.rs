@@ -30,6 +30,11 @@ pub trait InvoiceContract {
         reason: String,
         oracle_hash: String,
     );
+
+    /// #953/#957: returns `(is_awaiting_verification, invoice_amount)` so the
+    /// registry can refuse to open a round for an invoice that isn't actually
+    /// awaiting verification, and pick a value-appropriate quorum tier.
+    fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128);
 }
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -64,6 +69,14 @@ pub enum OracleRegistryError {
     InvoiceContractNotSet = 18,
     InvoiceCallFailed = 19,
     InvalidConfig = 20,
+    // #953: the invoice referenced by open_verification_round isn't actually
+    // awaiting oracle verification.
+    InvoiceNotAwaitingVerification = 21,
+    // #957: malformed quorum tier list (unsorted thresholds, out-of-range bps).
+    InvalidQuorumTiers = 22,
+    // #954: slash_oracle's on-chain evidence requirement.
+    InvalidEvidence = 23,
+    SlashRoundNotFound = 24,
 }
 
 #[contracttype]
@@ -123,6 +136,18 @@ pub struct RegistryConfig {
     pub treasury: Option<Address>,
 }
 
+/// #957: one tier of the value-based quorum schedule. Invoices with a
+/// principal >= `min_invoice_amount` use `quorum_bps` instead of the
+/// registry's flat default — a $500k invoice can require a stricter quorum
+/// than a $500 one. Tiers are stored sorted ascending by `min_invoice_amount`;
+/// the highest tier whose threshold the invoice amount clears wins.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuorumTier {
+    pub min_invoice_amount: i128,
+    pub quorum_bps: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -134,6 +159,7 @@ pub enum DataKey {
     OracleIds,
     Round(u64),
     OpenRounds,
+    QuorumTiers,
 }
 
 const EVT: Symbol = symbol_short!("ORACLE");
@@ -252,6 +278,46 @@ impl OracleRegistryContract {
 
     pub fn get_registry_config(env: Env) -> Result<RegistryConfig, OracleRegistryError> {
         Self::load_config(&env)
+    }
+
+    /// #957: replaces the value-based quorum schedule wholesale. `tiers` must
+    /// be sorted strictly ascending by `min_invoice_amount` (non-negative,
+    /// unique thresholds) with each `quorum_bps` in `1..=10_000` — this keeps
+    /// `resolve_quorum_bps`'s single ascending pass correct and lets admins
+    /// reason about the schedule without the contract silently reordering it.
+    /// An empty vec restores the flat `config.quorum_bps` for every invoice.
+    pub fn set_quorum_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<QuorumTier>,
+    ) -> Result<(), OracleRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let mut prev_threshold: Option<i128> = None;
+        for tier in tiers.iter() {
+            if tier.min_invoice_amount < 0 || tier.quorum_bps == 0 || tier.quorum_bps > 10_000 {
+                return Err(OracleRegistryError::InvalidQuorumTiers);
+            }
+            if let Some(prev) = prev_threshold {
+                if tier.min_invoice_amount <= prev {
+                    return Err(OracleRegistryError::InvalidQuorumTiers);
+                }
+            }
+            prev_threshold = Some(tier.min_invoice_amount);
+        }
+
+        env.storage().instance().set(&DataKey::QuorumTiers, &tiers);
+        env.events()
+            .publish((EVT, symbol_short!("tiers_upd")), admin);
+        Ok(())
+    }
+
+    pub fn get_quorum_tiers(env: Env) -> Vec<QuorumTier> {
+        env.storage()
+            .instance()
+            .get(&DataKey::QuorumTiers)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn pause(env: Env, admin: Address) -> Result<(), OracleRegistryError> {
@@ -419,16 +485,32 @@ impl OracleRegistryContract {
     /// treasury address is configured, forwards the slashed amount there;
     /// otherwise it remains in the registry's own balance (unrecoverable by
     /// the oracle, since their tracked `stake_amount` has already been cut).
+    #[allow(clippy::too_many_arguments)]
     pub fn slash_oracle(
         env: Env,
         admin: Address,
         operator: Address,
         bps: u32,
+        round_id: u64,
+        evidence: String,
     ) -> Result<(), OracleRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         if bps == 0 || bps > 10_000 {
             return Err(OracleRegistryError::InvalidBps);
+        }
+        if evidence.is_empty() {
+            return Err(OracleRegistryError::InvalidEvidence);
+        }
+        // #954: every slash must cite the specific verification round it's
+        // punishing behavior from — otherwise a slash is an unaccountable
+        // admin fiat with no on-chain trail to audit after the fact.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Round(round_id))
+        {
+            return Err(OracleRegistryError::SlashRoundNotFound);
         }
         let key = DataKey::Oracle(operator.clone());
         let mut info: OracleInfo = env
@@ -450,7 +532,7 @@ impl OracleRegistryContract {
 
         env.events().publish(
             (EVT, symbol_short!("slashed")),
-            (operator, bps, slash_amount, admin),
+            (operator, bps, slash_amount, admin, round_id, evidence),
         );
         Ok(())
     }
@@ -480,6 +562,20 @@ impl OracleRegistryContract {
             }
         }
 
+        let invoice_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceContract)
+            .ok_or(OracleRegistryError::InvoiceContractNotSet)?;
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_contract);
+        let (awaiting_verification, invoice_amount) = invoice_client
+            .try_get_invoice_verification_state(&invoice_id)
+            .map_err(|_| OracleRegistryError::InvoiceCallFailed)?
+            .map_err(|_| OracleRegistryError::InvoiceCallFailed)?;
+        if !awaiting_verification {
+            return Err(OracleRegistryError::InvoiceNotAwaitingVerification);
+        }
+
         let config = Self::load_config(&env)?;
         let ids: Vec<Address> = env
             .storage()
@@ -504,6 +600,8 @@ impl OracleRegistryContract {
             return Err(OracleRegistryError::NoActiveOracles);
         }
 
+        let quorum_bps = Self::resolve_quorum_bps(&env, config.quorum_bps, invoice_amount);
+
         let now = env.ledger().timestamp();
         let round = VerificationRound {
             invoice_id,
@@ -513,7 +611,7 @@ impl OracleRegistryContract {
             weight_for: 0,
             weight_against: 0,
             total_stake_snapshot: total_stake,
-            quorum_bps: config.quorum_bps,
+            quorum_bps,
             status: RoundStatus::Open,
             opened_at: now,
             deadline: now.saturating_add(config.round_duration_secs),
@@ -563,6 +661,12 @@ impl OracleRegistryContract {
             .ok_or(OracleRegistryError::NotRegistered)?;
         if !info.is_active {
             return Err(OracleRegistryError::NotRegistered);
+        }
+        // #950 — an oracle that has initiated deregistration retains is_active=true
+        // during the cooldown window but should no longer contribute voting weight;
+        // it has committed to leaving and its stake may be returned at any time.
+        if info.deregister_requested_at.is_some() {
+            return Err(OracleRegistryError::DeregisterCooldownActive);
         }
 
         let round_key = DataKey::Round(invoice_id);
@@ -687,7 +791,14 @@ impl OracleRegistryContract {
             .persistent()
             .get(&round_key)
             .ok_or(OracleRegistryError::RoundNotFound)?;
-        if round.status != RoundStatus::Expired {
+        // #956: defer to the exact same condition `expire_round` uses (deadline
+        // passed) rather than trusting the stored `status` field alone — an
+        // admin must never be able to short-circuit oracle consensus on a
+        // round still within its normal voting window. Checking both the
+        // status *and* re-deriving the deadline condition means this can't
+        // silently regress if a future code path ever sets `Expired` without
+        // going through `expire_round`.
+        if round.status != RoundStatus::Expired || env.ledger().timestamp() <= round.deadline {
             return Err(OracleRegistryError::RoundNotExpired);
         }
         round.status = if approved {
@@ -763,6 +874,28 @@ impl OracleRegistryContract {
             .instance()
             .get(&DataKey::Config)
             .ok_or(OracleRegistryError::NotInitialized)
+    }
+
+    /// #957: picks the quorum_bps for `invoice_amount` from the configured
+    /// tier schedule. Tiers are stored sorted ascending, so the highest
+    /// threshold the amount clears wins; falls back to `default_bps` (the
+    /// registry's flat `config.quorum_bps`) if no tiers are configured or the
+    /// amount is below every tier's threshold.
+    fn resolve_quorum_bps(env: &Env, default_bps: u32, invoice_amount: i128) -> u32 {
+        let tiers: Vec<QuorumTier> = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumTiers)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut resolved = default_bps;
+        for tier in tiers.iter() {
+            if invoice_amount >= tier.min_invoice_amount {
+                resolved = tier.quorum_bps;
+            } else {
+                break;
+            }
+        }
+        resolved
     }
 
     fn remove_open_round(env: &Env, invoice_id: u64) {

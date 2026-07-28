@@ -175,7 +175,9 @@ impl ReferralContract {
         if bps > MAX_BPS {
             panic_with_error!(&env, ReferralError::InvalidBps);
         }
-        env.storage().instance().set(&DataKey::BorrowRewardBps, &bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::BorrowRewardBps, &bps);
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("brw_bps")), (admin, bps));

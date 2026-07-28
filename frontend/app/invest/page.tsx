@@ -25,7 +25,16 @@ import {
   getCurrentRate,
 } from '@/lib/contracts';
 import { parseStellarAddress } from '@/lib/types';
-import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID, POOL_CONTRACT_ID, nativeToScVal, Address, xdr } from '@/lib/stellar';
+import {
+  toStroops,
+  formatUSDC,
+  stablecoinLabel,
+  USDC_TOKEN_ID,
+  POOL_CONTRACT_ID,
+  nativeToScVal,
+  Address,
+  xdr,
+} from '@/lib/stellar';
 import type { PoolTokenTotals, RateModelConfig } from '@/lib/types';
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
@@ -173,11 +182,17 @@ export default function InvestPage() {
     amount !== '' &&
     toStroops(parseFloat(amount)) > remainingTokenCapacity;
 
-  const showDepositWarning =
-    mode === 'deposit' && kycRequired && !kycApproved;
+  const showDepositWarning = mode === 'deposit' && kycRequired && !kycApproved;
 
   const simulateDeposit = useCallback(() => {
-    if (!wallet.address || !selectedToken || !amount || parseFloat(amount) <= 0 || depositExceedsCap) return null;
+    if (
+      !wallet.address ||
+      !selectedToken ||
+      !amount ||
+      parseFloat(amount) <= 0 ||
+      depositExceedsCap
+    )
+      return null;
     if (mode !== 'deposit') return null;
     const stroops = toStroops(parseFloat(amount));
     return simulateContractCall(
@@ -194,7 +209,13 @@ export default function InvestPage() {
 
   const simulation = useTransactionSimulation(
     simulateDeposit,
-    !!wallet.address && !!selectedToken && !!amount && parseFloat(amount) > 0 && mode === 'deposit' && !depositExceedsCap && !showDepositWarning,
+    !!wallet.address &&
+      !!selectedToken &&
+      !!amount &&
+      parseFloat(amount) > 0 &&
+      mode === 'deposit' &&
+      !depositExceedsCap &&
+      !showDepositWarning,
   );
 
   async function submitTransaction() {
@@ -423,6 +444,35 @@ export default function InvestPage() {
                         })}
                       </p>
                     )}
+                    {mode === 'withdraw' &&
+                      tokenTotals &&
+                      // #782: pool_value minus deployed capital is the actual
+                      // ceiling on any single withdrawal — a user's own share
+                      // balance can exceed this when most of the pool is
+                      // deployed in active invoices.
+                      (() => {
+                        const poolLiquidity =
+                          tokenTotals.totalDeposited > tokenTotals.totalDeployed
+                            ? tokenTotals.totalDeposited - tokenTotals.totalDeployed
+                            : 0n;
+                        const exceedsLiquidity =
+                          !!amount && toStroops(parseFloat(amount || '0')) > poolLiquidity;
+                        return (
+                          <p
+                            className={`text-xs mt-1 ${exceedsLiquidity ? 'text-red-400' : 'text-brand-muted'}`}
+                          >
+                            {exceedsLiquidity
+                              ? t('exceedsLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })
+                              : t('poolLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })}
+                          </p>
+                        );
+                      })()}
                     {mode === 'deposit' && tokenDepositCap > 0n && tokenTotals && (
                       <div className="mt-3">
                         <div className="flex justify-between text-xs text-brand-muted mb-1">
