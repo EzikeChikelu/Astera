@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import { LiquidityForecastChart } from '@/components/analytics/LiquidityForecastChart';
+import { TrancheClass } from '@/../sdk/src/generated/tranche';
 import {
   getInvestorPosition,
   getPoolConfig,
@@ -135,7 +136,7 @@ function AllocationPie({ slices }: { slices: { label: string; pct: number; color
   }
 
   const cumulativeEnds = slices.reduce<number[]>((acc, s) => {
-    const prev = acc.length > 0 ? acc[acc.length - 1] ?? 0 : 0;
+    const prev = acc.length > 0 ? (acc[acc.length - 1] ?? 0) : 0;
     return [...acc, prev + s.pct];
   }, []);
 
@@ -659,8 +660,9 @@ export default function PortfolioPage() {
                         <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
                           <p className="text-white font-medium mb-2">Request withdrawal</p>
                           <p className="text-brand-muted text-xs mb-3">
-                            If pool liquidity can&apos;t cover it immediately, your request is queued
-                            and settled automatically (FIFO, oldest-first) as liquidity arrives.
+                            If pool liquidity can&apos;t cover it immediately, your request is
+                            queued and settled automatically (FIFO, oldest-first) as liquidity
+                            arrives.
                           </p>
                           <div className="flex flex-col sm:flex-row gap-2">
                             <input
@@ -694,6 +696,80 @@ export default function PortfolioPage() {
                           />
                         </div>
                       )}
+
+                      {/* Tranche Positions Section */}
+                      <div className="mt-4 pt-4 border-t border-brand-border">
+                        <h4 className="text-white font-medium text-sm mb-3">Tranche Positions</h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {/* Senior Tranche Card */}
+                          <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-blue-400 text-xs font-medium">
+                                Senior Tranche
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300">
+                                Lower Risk
+                              </span>
+                            </div>
+                            <div className="space-y-1 text-xs">
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Deposited</span>
+                                <span className="text-white">$2,500</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Earned</span>
+                                <span className="text-green-400">$125</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Losses</span>
+                                <span className="text-white">$0</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">APY</span>
+                                <span className="text-white">9.8%</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Junior Tranche Card */}
+                          <div className="bg-purple-900/20 border border-purple-800/30 rounded-lg p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-purple-400 text-xs font-medium">
+                                Junior Tranche
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded bg-purple-900/50 text-purple-300">
+                                Higher Risk
+                              </span>
+                            </div>
+                            <div className="space-y-1 text-xs">
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Deposited</span>
+                                <span className="text-white">$1,000</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Earned</span>
+                                <span className="text-green-400">$142</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">Losses</span>
+                                <span className="text-red-400">$75</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-brand-muted">APY</span>
+                                <span className="text-white">14.2%</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-3 text-center">
+                          <a
+                            href="/invest/tranches"
+                            className="text-xs text-brand-gold hover:underline"
+                          >
+                            Manage tranche investments →
+                          </a>
+                        </div>
+                      </div>
                     </>
                   )}
                 </div>
