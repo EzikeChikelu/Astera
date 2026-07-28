@@ -149,6 +149,17 @@ pub struct QuorumTier {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct OracleReputation {
+    pub address: Address,
+    pub is_active: bool,
+    pub total_verifications: u32,
+    pub total_slashes: u32,
+    pub registered_at: u64,
+    pub rounds_participated: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     Initialized,
@@ -160,6 +171,7 @@ pub enum DataKey {
     Round(u64),
     OpenRounds,
     QuorumTiers,
+    OracleRounds(Address),
 }
 
 const EVT: Symbol = symbol_short!("ORACLE");
@@ -707,6 +719,8 @@ impl OracleRegistryContract {
         info.total_verifications += 1;
         env.storage().persistent().set(&oracle_key, &info);
 
+        Self::append_oracle_round(&env, oracle.clone(), invoice_id);
+
         env.events().publish(
             (EVT, symbol_short!("voted")),
             (invoice_id, oracle.clone(), approved, weight, evidence_hash),
@@ -855,6 +869,63 @@ impl OracleRegistryContract {
             }
         }
         out
+    }
+
+    pub fn get_oracle_round_history(env: Env, oracle: Address) -> Vec<(u64, bool, i128)> {
+        let key = DataKey::OracleRounds(oracle.clone());
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut out = Vec::new(&env);
+        for i in 0..ids.len() {
+            let invoice_id = ids.get(i).unwrap();
+            let round: Option<VerificationRound> =
+                env.storage().persistent().get(&DataKey::Round(*invoice_id));
+            if let Some(r) = round {
+                if let Some(approved) = r.votes.get(oracle.clone()) {
+                    out.push_back((*invoice_id, approved, r.oracle_hash.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn get_oracle_reputation(env: Env, operator: Address) -> Option<OracleReputation> {
+        let info: OracleInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Oracle(operator.clone()))?;
+        let key = DataKey::OracleRounds(operator.clone());
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        Some(OracleReputation {
+            address: operator,
+            is_active: info.is_active,
+            total_verifications: info.total_verifications,
+            total_slashes: info.total_slashes,
+            registered_at: info.registered_at,
+            rounds_participated: ids.len() as u32,
+        })
+    }
+
+    fn append_oracle_round(env: &Env, oracle: Address, invoice_id: u64) {
+        let key = DataKey::OracleRounds(oracle.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if !ids.contains(&invoice_id) {
+            ids.push_back(invoice_id);
+            env.storage().persistent().set(&key, &ids);
+            let ttl = env.storage().persistent().get_ttl(&key).unwrap_or(0);
+            env.storage().persistent().extend_ttl(&key, ttl, ttl);
+        }
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), OracleRegistryError> {
