@@ -170,6 +170,8 @@ pub enum PoolError {
     // #864: role-based multisig access-control
     AccessControlNotConfigured = 88,
     AccessControlAlreadyConfigured = 89,
+    // #789: cancellation of a funded invoice failed in the invoice contract
+    InvoiceNotCancelled = 90,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -817,6 +819,7 @@ pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
     fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
+    fn mark_cancelled(env: Env, id: u64, pool: Address);
 }
 
 /// #867: cross-contract interface to the compliance registry.
@@ -5667,6 +5670,88 @@ impl FundingPool {
         env.storage().persistent().set(&round_key, &round);
         env.events()
             .publish((EVT, symbol_short!("cf_cncl")), invoice_id);
+        Ok(())
+    }
+
+    /// Cancel a funded invoice (#789). Admin-only.
+    ///
+    /// When a funded invoice is cancelled (e.g. borrower dispute, admin
+    /// intervention), the pool's `total_deployed` counter must be decremented
+    /// by the outstanding principal so that:
+    ///   - Available liquidity is no longer understated
+    ///   - New lenders can deposit into the freed-up capacity
+    ///   - Pool utilization rate is accurate
+    ///
+    /// The invoice contract is also notified so the invoice status transitions
+    /// to `Cancelled`, preventing further operations on it.
+    pub fn cancel_funded_invoice(
+        env: Env,
+        admin: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let config: PoolConfig = get_config_cached(&env)?;
+
+        // Load the funded invoice record
+        let funded_key = DataKey::FundedInvoice(invoice_id);
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .ok_or(PoolError::InvoiceNotFound)?;
+
+        let principal = record.principal;
+        let token = record.token.clone();
+        let is_co_funded = record.co_funding_round_id.is_some();
+
+        // Notify the invoice contract: transition Funded → Cancelled
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        match invoice_client.try_mark_cancelled(&invoice_id, &env.current_contract_address()) {
+            Ok(Ok(())) => {}
+            _ => return Err(PoolError::InvoiceNotCancelled),
+        }
+
+        // Decrement deployed capital (co-funded invoices bypass total_deployed)
+        if !is_co_funded {
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            tt.total_deployed = tt
+                .total_deployed
+                .checked_sub(principal)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            // Record rate snapshot since utilization changed
+            record_rate_snapshot(&env, &token);
+        }
+
+        // Remove the FundedInvoice record
+        env.storage().persistent().remove(&funded_key);
+
+        // Update stats
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageStats, &stats);
+
+        // Emit cancellation event
+        env.events().publish(
+            (EVT, symbol_short!("inv_cncl")),
+            (invoice_id, admin, principal, token, env.ledger().timestamp()),
+        );
+
         Ok(())
     }
 
