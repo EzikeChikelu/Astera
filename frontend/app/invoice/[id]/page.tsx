@@ -46,6 +46,7 @@ import {
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
 import { parseStellarAddress } from '@/lib/types';
 import type {
@@ -288,8 +289,9 @@ export default function InvoiceDetailPage() {
   }, [loadInvoice]);
 
   const days = metadata ? daysUntil(metadata.dueDate) : 0;
-  const isOwner = invoice ? wallet.address === invoice.owner : false;
-  const isAdmin = poolConfig ? wallet.address === poolConfig.admin : false;
+  const isOwner = Boolean(invoice && wallet.connected && wallet.address === invoice.owner);
+  const isAdmin = Boolean(poolConfig && wallet.connected && wallet.address === poolConfig.admin);
+  const canViewInvoice = !isPrivate || isOwner;
   const statusSteps: TransactionStep[] = invoice
     ? [
         { label: 'Created', done: true, ts: invoice.createdAt },
@@ -363,7 +365,13 @@ export default function InvoiceDetailPage() {
 
   const repaySimulation = useTransactionSimulation(
     simulateRepay,
-    isOwner && metadata.status === 'Funded' && !!fundedInvoice && !fullyRepaid && !!wallet.address && !!invoice && (!!repayAmount || remainingDue > 0n),
+    isOwner &&
+      metadata.status === 'Funded' &&
+      !!fundedInvoice &&
+      !fullyRepaid &&
+      !!wallet.address &&
+      !!invoice &&
+      (!!repayAmount || remainingDue > 0n),
   );
 
   async function handleRepay() {
@@ -610,8 +618,8 @@ export default function InvoiceDetailPage() {
   }
 
   // #775: the borrower opted this invoice out of the public sharing link —
-  // hide it from everyone except the owner, same as a genuinely missing invoice.
-  if (isPrivate && !isOwner) {
+  // hide it from everyone except the connected owner, same as a genuinely missing invoice.
+  if (!canViewInvoice) {
     return (
       <div className="min-h-screen pt-24 px-4 sm:px-6 flex flex-col items-center justify-center text-center">
         <p className="text-red-400 mb-4">Invoice not found.</p>
@@ -983,26 +991,60 @@ export default function InvoiceDetailPage() {
             </div>
           )}
 
-        {collateralModalOpen && collateralConfig && metadata && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-labelledby="collateral-modal-title">
-            <div className="w-full max-w-md rounded-2xl border border-brand-border bg-brand-card p-6 shadow-xl">
-              <h2 id="collateral-modal-title" className="text-lg font-semibold">Add collateral</h2>
-              <p className="mt-2 text-sm text-brand-muted">Your new collateral ratio is previewed from the current outstanding balance before you sign.</p>
-              <label className="mt-5 block text-xs text-brand-muted">Amount (USDC)</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={collateralAmount}
-                onChange={(e) => setCollateralAmount(e.target.value)}
-                disabled={collateralLoading}
-                className="mt-1 w-full rounded-lg border border-brand-border bg-brand-dark px-4 py-2 text-white focus:border-brand-gold focus:outline-none disabled:opacity-60"
-              />
-              <div className="mt-3 rounded-xl border border-brand-border bg-brand-dark p-3 text-sm">
-                New ratio: {(() => {
-                  const addition = collateralAmount && /^\d+$/.test(collateralAmount) ? BigInt(collateralAmount) : 0n;
-                  const outstanding = fundedInvoice ? remainingDue : metadata.amount;
-                  return outstanding > 0n && collateralDeposit ? `${(Number(((collateralDeposit.amount + addition) * 10_000n) / outstanding) / 100).toFixed(0)}%` : '—';
-                })()}
+        {coFundingRound && coFundingRound.status === 'Open' && (
+          <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6 space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold mb-1">Fund This Invoice</h2>
+              <p className="text-xs text-brand-muted">
+                Join other lenders co-funding this invoice. Committed capital earns a proportional
+                share of this invoice&apos;s principal and interest.
+              </p>
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-brand-muted mb-1">
+                <span>
+                  {formatUSDC(coFundingRound.committedPrincipal)} /{' '}
+                  {formatUSDC(coFundingRound.targetPrincipal)}
+                </span>
+                <span>
+                  {coFundingRound.targetPrincipal > 0n
+                    ? (
+                        Number(
+                          (coFundingRound.committedPrincipal * 10_000n) /
+                            coFundingRound.targetPrincipal,
+                        ) / 100
+                      ).toFixed(1)
+                    : '0'}
+                  %
+                </span>
+              </div>
+              <div className="h-2 bg-brand-border rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-brand-gold transition-all"
+                  style={{
+                    width: `${
+                      coFundingRound.targetPrincipal > 0n
+                        ? Math.min(
+                            100,
+                            Number(
+                              (coFundingRound.committedPrincipal * 10_000n) /
+                                coFundingRound.targetPrincipal,
+                            ) / 100,
+                          )
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            {!wallet.connected ? (
+              <div className="space-y-2">
+                <p className="text-sm text-brand-muted">
+                  Connect your wallet to fund this invoice.
+                </p>
+                <WalletConnect />
               </div>
               <div className="mt-5 flex gap-3">
                 <button onClick={() => setCollateralModalOpen(false)} disabled={collateralLoading} className="flex-1 rounded-xl border border-brand-border px-4 py-2 text-sm">Cancel</button>
