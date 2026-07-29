@@ -2106,6 +2106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tranche"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

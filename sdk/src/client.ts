@@ -30,4 +30,8 @@ export type {
   ActionPayload,
   Proposal,
 } from '../../packages/sdk/src/types';
-export { ALL_ROLES, ROLE_LABELS } from '../../packages/sdk/src/types';
+
+export * from './generated/tranche';
+
+export { TrancheClient } from '../../packages/sdk/src/clients/tranche';
+export type { TrancheInvestorPosition } from '../../packages/sdk/src/clients/tranche';

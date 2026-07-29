@@ -59,6 +59,7 @@ import type {
   CoFundingRound,
   FullCreditScore,
 } from '@/lib/types';
+import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
 
@@ -366,7 +367,7 @@ export default function InvoiceDetailPage() {
   const repaySimulation = useTransactionSimulation(
     simulateRepay,
     isOwner &&
-      metadata.status === 'Funded' &&
+      metadata?.status === 'Funded' &&
       !!fundedInvoice &&
       !fullyRepaid &&
       !!wallet.address &&

@@ -121,7 +121,13 @@ export interface RateSnapshot {
   rateBps: number;
 }
 
-export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled' | 'Expired';
+export type ProposalStatus =
+  | 'Active'
+  | 'Passed'
+  | 'Rejected'
+  | 'Executed'
+  | 'Cancelled'
+  | 'Expired';
 
 export interface GovernanceProposal {
   id: number;

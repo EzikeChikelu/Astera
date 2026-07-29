@@ -3,7 +3,16 @@ import { PoolClient } from './clients/pool';
 import { CreditScoreClient } from './clients/credit_score';
 import { OracleRegistryClient } from './clients/oracle_registry';
 import { ComplianceClient } from './clients/compliance';
+import { TrancheClient, type TrancheInvestorPosition } from './clients/tranche';
 import { AccessControlClient } from './clients/access_control';
+import type {
+  TranchePool,
+  TrancheConfig,
+  TrancheAccounting,
+  InvoiceTrancheExposure,
+  WaterfallSimulation,
+  TrancheClass,
+} from '../../../sdk/src/generated/tranche';
 import type {
   AsteraConfig,
   Invoice,
@@ -38,6 +47,7 @@ export class AsteraClient {
   private creditScoreClient: CreditScoreClient;
   private oracleRegistryClient: OracleRegistryClient;
   private complianceClient: ComplianceClient;
+  private trancheClient: TrancheClient;
   private accessControlClient: AccessControlClient;
 
   constructor(config: AsteraConfig) {
@@ -65,6 +75,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.complianceContractId ?? '',
+    });
+    this.trancheClient = new TrancheClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.trancheContractId ?? '',
     });
     this.accessControlClient = new AccessControlClient({
       rpcUrl: config.rpcUrl,
@@ -346,6 +361,69 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.complianceClient.requestReview(params),
+  };
+
+  public readonly tranche = {
+    getPool: (token: string): Promise<TranchePool> =>
+      this.trancheClient.getPool(token),
+
+    getConfig: (token: string): Promise<TrancheConfig> =>
+      this.trancheClient.getTrancheConfig(token),
+
+    getTotals: (token: string, trancheClass: TrancheClass): Promise<TrancheAccounting> =>
+      this.trancheClient.getTotals(token, trancheClass),
+
+    getPosition: (
+      investor: string,
+      token: string,
+      trancheClass: TrancheClass,
+    ): Promise<TrancheInvestorPosition> =>
+      this.trancheClient.getInvestorPosition(investor, token, trancheClass),
+
+    getEffectiveApy: (token: string, trancheClass: TrancheClass): Promise<number> =>
+      this.trancheClient.getEffectiveApy(token, trancheClass),
+
+    getInvoiceExposure: (invoiceId: number): Promise<InvoiceTrancheExposure | null> =>
+      this.trancheClient.getInvoiceExposure(invoiceId),
+
+    simulateWaterfall: (
+      token: string,
+      invoiceId: number,
+      hypotheticalRepayment: bigint,
+      elapsedSecs: number,
+    ): Promise<WaterfallSimulation> =>
+      this.trancheClient.simulateWaterfall(token, invoiceId, hypotheticalRepayment, elapsedSecs),
+
+    deposit: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      trancheClass: TrancheClass;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.trancheClient.deposit(params),
+
+    withdraw: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      trancheClass: TrancheClass;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.trancheClient.withdraw(params),
+
+    setConfig: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      seniorTargetYieldBps: number;
+      seniorAdvanceRateBps: number;
+      juniorFirstLossBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.trancheClient.setTrancheConfig(params),
   };
 
   /** #864: role-based multisig access control. */
