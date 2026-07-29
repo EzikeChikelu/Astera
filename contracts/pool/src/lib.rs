@@ -170,6 +170,8 @@ pub enum PoolError {
     // #864: role-based multisig access-control
     AccessControlNotConfigured = 88,
     AccessControlAlreadyConfigured = 89,
+    // #789: cancellation of a funded invoice failed in the invoice contract
+    InvoiceNotCancelled = 90,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -565,6 +567,54 @@ pub struct OpenCoFundingRequest {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrancheType {
+    Senior,
+    Junior,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoFundTranche {
+    pub tranche_type: TrancheType,
+    pub target_principal: i128,
+    pub committed_principal: i128,
+    pub rate_bps: u32,
+    pub participants: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct TranchedCoFundingRound {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub sme: Address,
+    pub due_date: u64,
+    pub senior_target_principal: i128,
+    pub junior_target_principal: i128,
+    pub senior_rate_bps: u32,
+    pub committed_senior_principal: i128,
+    pub committed_junior_principal: i128,
+    pub funding_deadline: u64,
+    pub status: CoFundingStatus,
+    pub min_senior_commitment: i128,
+    pub min_junior_commitment: i128,
+    pub max_investor_bps: u32,
+    pub participants: Vec<Address>,
+    pub senior_participants: Vec<Address>,
+    pub junior_participants: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct WaterfallProgress {
+    pub senior_principal_paid: i128,
+    pub senior_interest_paid: i128,
+    pub junior_principal_paid: i128,
+    pub junior_interest_paid: i128,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct RepaymentRequest {
     pub invoice_id: u64,
@@ -766,6 +816,12 @@ pub enum DataKey {
     RateRecord(Address, u32),
     // #866: optional default-insurance reserve integration
     InsuranceContract,
+    // #1026: senior/junior tranche co-funding rounds
+    TranchedCoFundingRound(u64),
+    TranchedRoundIds,
+    TrancheShare(u64, Address),
+    TrancheCommitted(u64, Address),
+    WaterfallProgress(u64),
 }
 
 const EVT: Symbol = symbol_short!("pool");
@@ -780,6 +836,10 @@ const REFLECTOR_ORACLE: Symbol = symbol_short!("rflector");
 // rather than a DataKey variant — DataKey is already at Soroban's 50-variant
 // ceiling (see #867/#777 above).
 const LOYALTY_TIERS: Symbol = symbol_short!("loy_tier");
+// #1026: tranche data stored under Symbol keys to stay within DataKey's
+// 50-variant ceiling.
+const TRANCHED_ROUND_PREFIX: Symbol = symbol_short!("tranche");
+const WATERFALL_PREFIX: Symbol = symbol_short!("waterfall");
 // Pre-existing build breakage found while working this branch: these two
 // keys are read/written by `get_insurance_contract`/`set_insurance_contract`
 // and `record_referral_activity`/the referral registry setter, but
@@ -817,6 +877,7 @@ pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
     fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
+    fn mark_cancelled(env: Env, id: u64, pool: Address);
 }
 
 /// #867: cross-contract interface to the compliance registry.
@@ -1678,6 +1739,246 @@ fn remove_participant(env: &Env, round: &mut CoFundingRound, investor: &Address)
         }
     }
     round.participants = updated;
+}
+
+fn distribute_pari_passu_repayment(
+    env: &Env,
+    round_id: u64,
+    actual_payment: i128,
+    tt: &mut PoolTokenTotals,
+    stats: &mut PoolStorageStats,
+    fully_repaid: bool,
+) -> PoolResult<()> {
+    let round: CoFundingRound = env
+        .storage()
+        .persistent()
+        .get(&DataKey::CoFundingRound(round_id))
+        .ok_or(PoolError::CoFundingRoundNotFound)?;
+    let participants = round.participants.clone();
+    let mut distributed: i128 = 0;
+    for i in 0..participants.len() {
+        let holder = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+        let bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFundShare(round_id, holder.clone()))
+            .unwrap_or(0);
+        if bps == 0 {
+            continue;
+        }
+        let holder_amount = actual_payment
+            .checked_mul(bps as i128)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(BPS_DENOM as i128)
+            .ok_or(PoolError::AmountOverflow)?;
+        if holder_amount > 0 {
+            credit_investor_value(env, &round.token, &holder, holder_amount, tt)?;
+            distributed = distributed
+                .checked_add(holder_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+        }
+    }
+    let dust = actual_payment
+        .checked_sub(distributed)
+        .ok_or(PoolError::AmountOverflow)?;
+    if dust > 0 {
+        tt.protocol_revenue = tt
+            .protocol_revenue
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+        tt.pool_value = tt
+            .pool_value
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
+    tt.total_paid_out = tt
+        .total_paid_out
+        .checked_add(actual_payment)
+        .ok_or(PoolError::AmountOverflow)?;
+    if fully_repaid {
+        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+    }
+    Ok(())
+}
+
+fn distribute_waterfall_repayment(
+    env: &Env,
+    round_id: u64,
+    actual_payment: i128,
+    record: &FundedInvoice,
+    now: u64,
+    tt: &mut PoolTokenTotals,
+    stats: &mut PoolStorageStats,
+) -> PoolResult<()> {
+    let round: TranchedCoFundingRound = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TranchedCoFundingRound(round_id))
+        .ok_or(PoolError::CoFundingRoundNotFound)?;
+
+    let mut progress: WaterfallProgress = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WaterfallProgress(round_id))
+        .unwrap_or(WaterfallProgress {
+            senior_principal_paid: 0,
+            senior_interest_paid: 0,
+            junior_principal_paid: 0,
+            junior_interest_paid: 0,
+        });
+
+    let total_senior_principal = round.senior_target_principal;
+    let total_junior_principal = round.junior_target_principal;
+    let senior_rate = round.senior_rate_bps as i128;
+    let junior_rate = (BPS_DENOM as i128).saturating_sub(senior_rate);
+
+    let elapsed_secs = now.saturating_sub(record.funded_at);
+    let total_interest_due = record.principal
+        .checked_mul(senior_rate)
+        .ok_or(PoolError::AmountOverflow)?
+        .checked_mul(elapsed_secs as i128)
+        .ok_or(PoolError::AmountOverflow)?
+        .checked_div(SECS_PER_YEAR as i128 * BPS_DENOM as i128)
+        .ok_or(PoolError::AmountOverflow)?;
+    let senior_interest_total = total_interest_due;
+    let junior_interest_total = 0;
+
+    let mut remaining = actual_payment;
+    let mut distributed: i128 = 0;
+
+    let senior_principal_remaining = total_senior_principal.saturating_sub(progress.senior_principal_paid);
+    let senior_interest_remaining = senior_interest_total.saturating_sub(progress.senior_interest_paid);
+    let junior_principal_remaining = total_junior_principal.saturating_sub(progress.junior_principal_paid);
+    let junior_interest_remaining = junior_interest_total.saturating_sub(progress.junior_interest_paid);
+
+    let mut payment = remaining;
+
+    if payment > 0 && senior_principal_remaining > 0 {
+        let allocate = payment.min(senior_principal_remaining);
+        Self::distribute_to_tranche(env, round_id, &TrancheType::Senior, allocate, round.token.clone(), tt)?;
+        progress.senior_principal_paid = progress.senior_principal_paid.checked_add(allocate).unwrap_or(progress.senior_principal_paid);
+        payment = payment.checked_sub(allocate).unwrap_or(0);
+        distributed = distributed.checked_add(allocate).unwrap_or(distributed);
+    }
+
+    if payment > 0 && senior_interest_remaining > 0 {
+        let allocate = payment.min(senior_interest_remaining);
+        Self::distribute_to_tranche(env, round_id, &TrancheType::Senior, allocate, round.token.clone(), tt)?;
+        progress.senior_interest_paid = progress.senior_interest_paid.checked_add(allocate).unwrap_or(progress.senior_interest_paid);
+        payment = payment.checked_sub(allocate).unwrap_or(0);
+        distributed = distributed.checked_add(allocate).unwrap_or(distributed);
+    }
+
+    if payment > 0 && junior_principal_remaining > 0 {
+        let allocate = payment.min(junior_principal_remaining);
+        Self::distribute_to_tranche(env, round_id, &TrancheType::Junior, allocate, round.token.clone(), tt)?;
+        progress.junior_principal_paid = progress.junior_principal_paid.checked_add(allocate).unwrap_or(progress.junior_principal_paid);
+        payment = payment.checked_sub(allocate).unwrap_or(0);
+        distributed = distributed.checked_add(allocate).unwrap_or(distributed);
+    }
+
+    if payment > 0 && junior_interest_remaining > 0 {
+        let allocate = payment.min(junior_interest_remaining);
+        Self::distribute_to_tranche(env, round_id, &TrancheType::Junior, allocate, round.token.clone(), tt)?;
+        progress.junior_interest_paid = progress.junior_interest_paid.checked_add(allocate).unwrap_or(progress.junior_interest_paid);
+        distributed = distributed.checked_add(allocate).unwrap_or(distributed);
+    }
+
+    let dust = remaining
+        .checked_sub(distributed)
+        .ok_or(PoolError::AmountOverflow)?;
+    if dust > 0 {
+        tt.protocol_revenue = tt
+            .protocol_revenue
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+        tt.pool_value = tt
+            .pool_value
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
+
+    tt.total_paid_out = tt
+        .total_paid_out
+        .checked_add(actual_payment)
+        .ok_or(PoolError::AmountOverflow)?;
+
+    if record.repaid_amount >= record.principal {
+        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::WaterfallProgress(round_id), &progress);
+
+    Ok(())
+}
+
+fn distribute_to_tranche(
+    env: &Env,
+    round_id: u64,
+    tranche: &TrancheType,
+    amount: i128,
+    token: Address,
+    tt: &mut PoolTokenTotals,
+) -> PoolResult<()> {
+    let round: TranchedCoFundingRound = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TranchedCoFundingRound(round_id))
+        .ok_or(PoolError::CoFundingRoundNotFound)?;
+
+    let participant_list = match tranche {
+        TrancheType::Senior => &round.senior_participants,
+        TrancheType::Junior => &round.junior_participants,
+    };
+    let mut total_tranche_bps: u64 = 0;
+    let mut holder_bps: Vec<(Address, u32)> = Vec::new(env);
+    for i in 0..participant_list.len() {
+        let holder = participant_list.get(i).ok_or(PoolError::StorageCorrupted)?;
+        let bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrancheShare(round_id, holder.clone()))
+            .unwrap_or(0);
+        if bps == 0 {
+            continue;
+        }
+        total_tranche_bps = total_tranche_bps.checked_add(bps as u64).ok_or(PoolError::AmountOverflow)?;
+        holder_bps.push_back((holder.clone(), bps));
+    }
+    if total_tranche_bps == 0 {
+        return Ok(());
+    }
+    let mut distributed: i128 = 0;
+    for i in 0..holder_bps.len() {
+        let (holder, bps) = holder_bps.get(i).unwrap();
+        let holder_amount = amount
+            .checked_mul(bps as i128)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(BPS_DENOM as i128)
+            .ok_or(PoolError::AmountOverflow)?;
+        if holder_amount > 0 {
+            credit_investor_value(env, &token, holder, holder_amount, tt)?;
+            distributed = distributed
+                .checked_add(holder_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+        }
+    }
+    let dust = amount
+        .checked_sub(distributed)
+        .ok_or(PoolError::AmountOverflow)?;
+    if dust > 0 {
+        tt.protocol_revenue = tt
+            .protocol_revenue
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+        tt.pool_value = tt
+            .pool_value
+            .checked_add(dust)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
+    Ok(())
 }
 
 fn fund_invoice_request(
@@ -3719,67 +4020,26 @@ impl FundingPool {
                 .unwrap_or_default();
 
             if let Some(round_id) = record.co_funding_round_id {
-                // #860: co-funded invoices bypass the pool-wide
-                // reward_per_share accumulator and total_deployed entirely —
-                // that capital was never counted there (see
-                // commit_to_invoice/finalize_co_funding). Every stroop paid
-                // in THIS call is distributed immediately, pro-rata by
-                // CoFundShare bps, directly to the round's participants —
-                // so partial repayments accrue incrementally rather than
-                // waiting for full repayment (#860 req #6).
-                let round: CoFundingRound = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::CoFundingRound(round_id))
-                    .ok_or(PoolError::CoFundingRoundNotFound)?;
-                let participants = round.participants.clone();
-                let mut distributed: i128 = 0;
-                for i in 0..participants.len() {
-                    let holder = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
-                    let bps: u32 = env
-                        .storage()
-                        .persistent()
-                        .get(&DataKey::CoFundShare(round_id, holder.clone()))
-                        .unwrap_or(0);
-                    if bps == 0 {
-                        continue;
-                    }
-                    let holder_amount = actual_payment
-                        .checked_mul(bps as i128)
-                        .ok_or(PoolError::AmountOverflow)?
-                        .checked_div(BPS_DENOM as i128)
-                        .ok_or(PoolError::AmountOverflow)?;
-                    if holder_amount > 0 {
-                        credit_investor_value(env, &record.token, &holder, holder_amount, &mut tt)?;
-                        distributed = distributed
-                            .checked_add(holder_amount)
-                            .ok_or(PoolError::AmountOverflow)?;
-                    }
-                }
-                // Floor-division dust (bps not summing to exactly 100% of
-                // `amount`) becomes protocol revenue rather than vanishing —
-                // consistent with this contract's existing
-                // rounds-in-favor-of-protocol convention (e.g.
-                // calculate_factoring_fee's ceiling division).
-                let dust = actual_payment
-                    .checked_sub(distributed)
-                    .ok_or(PoolError::AmountOverflow)?;
-                if dust > 0 {
-                    tt.protocol_revenue = tt
-                        .protocol_revenue
-                        .checked_add(dust)
-                        .ok_or(PoolError::AmountOverflow)?;
-                    tt.pool_value = tt
-                        .pool_value
-                        .checked_add(dust)
-                        .ok_or(PoolError::AmountOverflow)?;
-                }
-                tt.total_paid_out = tt
-                    .total_paid_out
-                    .checked_add(actual_payment)
-                    .ok_or(PoolError::AmountOverflow)?;
-                if fully_repaid {
-                    stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+                let tranched_key = DataKey::TranchedCoFundingRound(round_id);
+                if env.storage().persistent().has(&tranched_key) {
+                    Self::distribute_waterfall_repayment(
+                        env,
+                        round_id,
+                        actual_payment,
+                        &record,
+                        now,
+                        &mut tt,
+                        &mut stats,
+                    )?;
+                } else {
+                    Self::distribute_pari_passu_repayment(
+                        env,
+                        round_id,
+                        actual_payment,
+                        &mut tt,
+                        &mut stats,
+                        fully_repaid,
+                    )?;
                 }
             } else if fully_repaid {
                 tt.total_deployed = tt
@@ -4090,6 +4350,57 @@ impl FundingPool {
                     depositor,
                     env.ledger().timestamp(),
                 ),
+            );
+            Ok(())
+        })
+    }
+
+    /// Adds to an active invoice's existing collateral deposit. This is kept
+    /// separate from `deposit_collateral` so the initial collateral requirement
+    /// remains a pre-funding gate while borrowers can improve their position
+    /// after funding.
+    pub fn top_up_collateral(
+        env: Env,
+        invoice_id: u64,
+        depositor: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        depositor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        non_reentrant!(&env, {
+            let key = DataKey::CollateralDeposit(invoice_id);
+            let mut record: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
+
+            if record.settled || record.depositor != depositor || record.token != token {
+                return Err(PoolError::StorageCorrupted);
+            }
+
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&depositor, &env.current_contract_address(), &amount);
+            record.amount = record
+                .amount
+                .checked_add(amount)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            env.storage().persistent().set(&key, &record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ACTIVE_INVOICE_TTL, ACTIVE_INVOICE_TTL);
+            env.events().publish(
+                (EVT, symbol_short!("col_topup")),
+                (invoice_id, depositor, token, amount, record.amount),
             );
             Ok(())
         })
@@ -5406,6 +5717,339 @@ impl FundingPool {
         Ok(())
     }
 
+    #[contracttype]
+    #[derive(Clone)]
+    pub struct OpenTranchedCoFundingRequest {
+        pub invoice_id: u64,
+        pub token: Address,
+        pub sme: Address,
+        pub due_date: u64,
+        pub senior_target_principal: i128,
+        pub junior_target_principal: i128,
+        pub senior_rate_bps: u32,
+        pub funding_deadline: u64,
+        pub min_senior_commitment: i128,
+        pub min_junior_commitment: i128,
+        pub max_investor_bps: u32,
+    }
+
+    /// Admin opens a tranched co-funding round with senior and junior tranches.
+    /// Senior gets paid first from repayments (principal + interest), junior gets
+    /// residual. Only one co-funding round per invoice.
+    pub fn open_tranched_co_funding(
+        env: Env,
+        admin: Address,
+        request: OpenTranchedCoFundingRequest,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        Self::assert_accepted_token(&env, &request.token)?;
+
+        if request.senior_target_principal <= 0 || request.junior_target_principal <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        if request.senior_rate_bps > BPS_DENOM {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.min_senior_commitment < 0
+            || request.min_senior_commitment > request.senior_target_principal
+        {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.min_junior_commitment < 0
+            || request.min_junior_commitment > request.junior_target_principal
+        {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.max_investor_bps > BPS_DENOM {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        let now = env.ledger().timestamp();
+        if request.funding_deadline <= now {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.due_date <= now {
+            return Err(PoolError::InvoiceExpired);
+        }
+
+        let round_key = DataKey::CoFundingRound(request.invoice_id);
+        if env.storage().persistent().has(&round_key) {
+            return Err(PoolError::CoFundingRoundAlreadyExists);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(request.invoice_id))
+        {
+            return Err(PoolError::StorageCorrupted);
+        }
+
+        let tranched_key = DataKey::TranchedCoFundingRound(request.invoice_id);
+        if env.storage().persistent().has(&tranched_key) {
+            return Err(PoolError::CoFundingRoundAlreadyExists);
+        }
+
+        let round = TranchedCoFundingRound {
+            invoice_id: request.invoice_id,
+            token: request.token.clone(),
+            sme: request.sme,
+            due_date: request.due_date,
+            senior_target_principal: request.senior_target_principal,
+            junior_target_principal: request.junior_target_principal,
+            senior_rate_bps: request.senior_rate_bps,
+            committed_senior_principal: 0,
+            committed_junior_principal: 0,
+            funding_deadline: request.funding_deadline,
+            status: CoFundingStatus::Open,
+            min_senior_commitment: request.min_senior_commitment,
+            min_junior_commitment: request.min_junior_commitment,
+            max_investor_bps: request.max_investor_bps,
+            participants: Vec::new(&env),
+            senior_participants: Vec::new(&env),
+            junior_participants: Vec::new(&env),
+        };
+        env.storage().persistent().set(&tranched_key, &round);
+        env.storage().persistent().extend_ttl(
+            &tranched_key,
+            INSTANCE_LIFETIME_THRESHOLD,
+            ACTIVE_INVOICE_TTL,
+        );
+
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TranchedRoundIds)
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(request.invoice_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::TranchedRoundIds, &ids);
+
+        env.events().publish(
+            (EVT, symbol_short!("tcf_open")),
+            (
+                request.invoice_id,
+                request.token,
+                request.senior_target_principal,
+                request.junior_target_principal,
+                request.senior_rate_bps,
+                request.funding_deadline,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Investor commits `amount` into a specific tranche of an open tranched
+    /// co-funding round. Burns LP shares like `commit_to_invoice` and records
+    /// the investor's tranche choice for later waterfall distribution.
+    pub fn commit_to_tranched_invoice(
+        env: Env,
+        investor: Address,
+        invoice_id: u64,
+        amount: i128,
+        tranche: TrancheType,
+    ) -> Result<(), PoolError> {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        non_reentrant!(&env, {
+            let tranched_key = DataKey::TranchedCoFundingRound(invoice_id);
+            let mut round: TranchedCoFundingRound = env
+                .storage()
+                .persistent()
+                .get(&tranched_key)
+                .ok_or(PoolError::CoFundingRoundNotFound)?;
+
+            if round.status != CoFundingStatus::Open {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+            let now = env.ledger().timestamp();
+            if now >= round.funding_deadline {
+                return Err(PoolError::CoFundingDeadlinePassed);
+            }
+
+            let remaining = match tranche {
+                TrancheType::Senior => round
+                    .senior_target_principal
+                    .checked_sub(round.committed_senior_principal)
+                    .ok_or(PoolError::AmountOverflow)?,
+                TrancheType::Junior => round
+                    .junior_target_principal
+                    .checked_sub(round.committed_junior_principal)
+                    .ok_or(PoolError::AmountOverflow)?,
+            };
+            if remaining <= 0 {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+            let commit_amount = if amount > remaining {
+                remaining
+            } else {
+                amount
+            };
+
+            let token = round.token.clone();
+            let share_token_key = DataKey::ShareToken(token.clone());
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let share_token: Address = env
+                .storage()
+                .instance()
+                .get(&share_token_key)
+                .ok_or(PoolError::ShareTokenNotConfigured)?;
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+
+            let rate_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ExchangeRate(token.clone()))
+                .unwrap_or(10_000u32);
+            let usdc_equiv = commit_amount
+                .checked_mul(rate_bps as i128)
+                .ok_or(PoolError::AmountOverflow)?
+                .checked_div(10_000i128)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            let total_shares: i128 = env.invoke_contract(
+                &share_token,
+                &Symbol::new(&env, "total_supply"),
+                Vec::new(&env),
+            );
+            if total_shares == 0 || tt.pool_value == 0 {
+                return Err(PoolError::InsufficientLiquidity);
+            }
+            let shares_to_burn = usdc_equiv
+                .checked_mul(total_shares)
+                .ok_or(PoolError::AmountOverflow)?
+                .checked_div(tt.pool_value)
+                .ok_or(PoolError::AmountOverflow)?;
+            if shares_to_burn <= 0 {
+                return Err(PoolError::InvalidAmount);
+            }
+
+            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+            let mut position: InvestorPosition = env
+                .storage()
+                .persistent()
+                .get(&investor_pos_key)
+                .unwrap_or(InvestorPosition {
+                    deposited: 0,
+                    available: 0,
+                    deployed: 0,
+                    earned: 0,
+                    deposit_count: 0,
+                    loyalty_start_at: 0,
+                });
+            if position.available < shares_to_burn {
+                return Err(PoolError::InvalidAmount);
+            }
+
+            let tranche_share_key = DataKey::TrancheShare(invoice_id, investor.clone());
+            let tranche_committed_key = DataKey::TrancheCommitted(invoice_id, investor.clone());
+            let existing_tranche_committed: i128 =
+                env.storage().persistent().get(&tranche_committed_key).unwrap_or(0);
+
+            let new_investor_committed = existing_tranche_committed
+                .checked_add(commit_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+            if round.max_investor_bps > 0 {
+                let total_target = round
+                    .senior_target_principal
+                    .checked_add(round.junior_target_principal)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let cap_amount = total_target
+                    .checked_mul(round.max_investor_bps as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(BPS_DENOM as i128)
+                    .ok_or(PoolError::AmountOverflow)?;
+                if new_investor_committed > cap_amount {
+                    return Err(PoolError::CoFundingInvestorCapExceeded);
+                }
+            }
+
+            let mut burn_args = Vec::new(&env);
+            burn_args.push_back(investor.clone().into_val(&env));
+            burn_args.push_back(shares_to_burn.into_val(&env));
+            let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
+
+            position.available = position
+                .available
+                .checked_sub(shares_to_burn)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().persistent().set(&investor_pos_key, &position);
+
+            tt.pool_value = tt
+                .pool_value
+                .checked_sub(usdc_equiv)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            let tranche_bps: u32 = (new_investor_committed as u64
+                * BPS_DENOM as u64
+                / match tranche {
+                    TrancheType::Senior => round.senior_target_principal as u64,
+                    TrancheType::Junior => round.junior_target_principal as u64,
+                }) as u32;
+            env.storage()
+                .persistent()
+                .set(&tranche_share_key, &tranche_bps);
+            env.storage()
+                .persistent()
+                .set(&tranche_committed_key, &new_investor_committed);
+
+            match tranche {
+                TrancheType::Senior => {
+                    round.committed_senior_principal = round
+                        .committed_senior_principal
+                        .checked_add(commit_amount)
+                        .ok_or(PoolError::AmountOverflow)?;
+                }
+                TrancheType::Junior => {
+                    round.committed_junior_principal = round
+                        .committed_junior_principal
+                        .checked_add(commit_amount)
+                        .ok_or(PoolError::AmountOverflow)?;
+                }
+            }
+
+            if !round.participants.contains(&investor) {
+                if round.participants.len() >= MAX_CO_FUNDING_PARTICIPANTS {
+                    return Err(PoolError::CoFundingTooManyParticipants);
+                }
+                round.participants.push_back(investor.clone());
+            }
+            match tranche {
+                TrancheType::Senior => {
+                    if !round.senior_participants.contains(&investor) {
+                        round.senior_participants.push_back(investor.clone());
+                    }
+                }
+                TrancheType::Junior => {
+                    if !round.junior_participants.contains(&investor) {
+                        round.junior_participants.push_back(investor.clone());
+                    }
+                }
+            }
+
+            env.storage().persistent().set(&tranched_key, &round);
+
+            env.events().publish(
+                (EVT, symbol_short!("tcf_cmt")),
+                (invoice_id, investor, commit_amount, tranche_bps),
+            );
+            Ok(())
+        })
+    }
+
     /// Investor commits `amount` (raw token units) of their own liquid pool
     /// position toward an open co-funding round. Burns the equivalent LP
     /// shares from the investor (same conversion `deposit`/`withdraw` use)
@@ -5667,6 +6311,88 @@ impl FundingPool {
         env.storage().persistent().set(&round_key, &round);
         env.events()
             .publish((EVT, symbol_short!("cf_cncl")), invoice_id);
+        Ok(())
+    }
+
+    /// Cancel a funded invoice (#789). Admin-only.
+    ///
+    /// When a funded invoice is cancelled (e.g. borrower dispute, admin
+    /// intervention), the pool's `total_deployed` counter must be decremented
+    /// by the outstanding principal so that:
+    ///   - Available liquidity is no longer understated
+    ///   - New lenders can deposit into the freed-up capacity
+    ///   - Pool utilization rate is accurate
+    ///
+    /// The invoice contract is also notified so the invoice status transitions
+    /// to `Cancelled`, preventing further operations on it.
+    pub fn cancel_funded_invoice(
+        env: Env,
+        admin: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let config: PoolConfig = get_config_cached(&env)?;
+
+        // Load the funded invoice record
+        let funded_key = DataKey::FundedInvoice(invoice_id);
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .ok_or(PoolError::InvoiceNotFound)?;
+
+        let principal = record.principal;
+        let token = record.token.clone();
+        let is_co_funded = record.co_funding_round_id.is_some();
+
+        // Notify the invoice contract: transition Funded → Cancelled
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        match invoice_client.try_mark_cancelled(&invoice_id, &env.current_contract_address()) {
+            Ok(Ok(())) => {}
+            _ => return Err(PoolError::InvoiceNotCancelled),
+        }
+
+        // Decrement deployed capital (co-funded invoices bypass total_deployed)
+        if !is_co_funded {
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            tt.total_deployed = tt
+                .total_deployed
+                .checked_sub(principal)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            // Record rate snapshot since utilization changed
+            record_rate_snapshot(&env, &token);
+        }
+
+        // Remove the FundedInvoice record
+        env.storage().persistent().remove(&funded_key);
+
+        // Update stats
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageStats, &stats);
+
+        // Emit cancellation event
+        env.events().publish(
+            (EVT, symbol_short!("inv_cncl")),
+            (invoice_id, admin, principal, token, env.ledger().timestamp()),
+        );
+
         Ok(())
     }
 
@@ -8976,6 +9702,38 @@ mod test {
         );
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert_eq!(fi.repaid_amount, 0i128);
+    }
+
+    #[test]
+    fn test_borrower_can_top_up_active_collateral() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let principal = 5_000i128;
+        let initial_collateral = 1_000i128;
+        let top_up = 500i128;
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000, 2_000);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, initial_collateral + top_up);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &initial_collateral);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        client.top_up_collateral(&1u64, &sme, &usdc_id, &top_up);
+
+        let collateral = client.get_collateral_deposit(&1u64).unwrap();
+        assert_eq!(collateral.amount, initial_collateral + top_up);
+        assert!(!collateral.settled);
     }
 
     #[test]

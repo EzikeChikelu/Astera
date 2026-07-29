@@ -12,6 +12,12 @@ const DEFAULT_VOTING_PERIOD_SECS: u64 = 7 * 86_400;
 const DEFAULT_EXECUTION_DELAY_SECS: u64 = 48 * 3_600;
 const DEFAULT_QUORUM_BPS: u32 = 1_000;
 const DEFAULT_PASS_BPS: u32 = 6_000;
+/// #933: default quorum for parameter-change proposals (10%).
+const DEFAULT_PARAMETER_QUORUM_BPS: u32 = 1_000;
+/// #933: default quorum for treasury proposals (20%).
+const DEFAULT_TREASURY_QUORUM_BPS: u32 = 2_000;
+/// #933: default quorum for critical proposals e.g. admin changes (50%).
+const DEFAULT_CRITICAL_QUORUM_BPS: u32 = 5_000;
 /// A passed proposal not executed within this window of passing expires and
 /// can no longer be executed, so a stale approval can't be enacted long after
 /// the conditions that justified it have changed.
@@ -26,6 +32,19 @@ pub enum ProposalStatus {
     Executed,
     Cancelled,
     Expired,
+}
+
+/// #933: Proposal severity. Parameter tweaks need less consensus than critical
+/// actions (admin changes, upgrades). Quorum is resolved per category.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalCategory {
+    /// Fee / parameter adjustments — lower quorum bar.
+    ParameterChange,
+    /// Treasury moves and fund allocation.
+    Treasury,
+    /// Admin, upgrades, and other high-impact actions — highest quorum.
+    Critical,
 }
 
 #[contracttype]
@@ -50,6 +69,13 @@ pub struct Proposal {
     /// Ledger timestamp at which the proposal transitioned to `Passed`, or 0 if
     /// it has not (yet) passed. Used to enforce `EXECUTION_EXPIRY_SECS`.
     pub passed_at: u64,
+    /// #933: category chosen at creation; drives which quorum tier applies.
+    pub category: ProposalCategory,
+    /// #933: quorum_bps snapshotted at creation so mid-vote admin changes to
+    /// category quorums cannot retarget an in-flight proposal.
+    pub quorum_bps: u32,
+    /// #933: pass_bps snapshotted at creation (same freeze rationale as quorum).
+    pub pass_bps: u32,
 }
 
 #[contracttype]
@@ -58,10 +84,17 @@ pub struct GovernanceConfig {
     pub admin: Address,
     pub share_token: Address,
     pub voting_period_secs: u64,
+    /// Default / ParameterChange quorum (kept for backward-compatible get_config).
     pub quorum_bps: u32,
     pub pass_bps: u32,
     pub execution_delay_secs: u64,
+    /// #931: absolute minimum share balance required to create a proposal.
+    /// Must be > 0 so spam from zero-balance addresses is blocked.
     pub min_share_balance: i128,
+    /// #933: treasury-category quorum in basis points.
+    pub treasury_quorum_bps: u32,
+    /// #933: critical-category quorum in basis points.
+    pub critical_quorum_bps: u32,
 }
 
 #[contracttype]
@@ -107,6 +140,25 @@ fn load_config(env: &Env) -> GovernanceResult<GovernanceConfig> {
         .ok_or(GovernanceError::NotInitialized)
 }
 
+fn validate_bps(quorum_bps: u32, pass_bps: u32) -> GovernanceResult<()> {
+    if quorum_bps == 0 || quorum_bps > 10_000 {
+        return Err(GovernanceError::InvalidConfig);
+    }
+    if pass_bps <= 5_000 || pass_bps > 10_000 {
+        return Err(GovernanceError::InvalidConfig);
+    }
+    Ok(())
+}
+
+/// #933: resolve the quorum tier for a category from live config.
+fn quorum_for_category(config: &GovernanceConfig, category: &ProposalCategory) -> u32 {
+    match category {
+        ProposalCategory::ParameterChange => config.quorum_bps,
+        ProposalCategory::Treasury => config.treasury_quorum_bps,
+        ProposalCategory::Critical => config.critical_quorum_bps,
+    }
+}
+
 /// Voting weight is the holder's share balance at the moment the proposal was
 /// created (`snapshot_at`), not their balance at vote time — otherwise shares
 /// acquired mid-vote (or borrowed just long enough to vote) would inflate
@@ -120,21 +172,21 @@ fn finalize_proposal(env: &Env, proposal: &mut Proposal) -> GovernanceResult<()>
         return Ok(());
     }
 
-    let config = load_config(env)?;
     let snapshot_supply = proposal.snapshot_supply;
     if snapshot_supply <= 0 {
         proposal.status = ProposalStatus::Rejected;
         return Ok(());
     }
 
+    // #933: use quorum/pass snapshotted onto the proposal at creation.
     let total_votes = proposal.votes_for + proposal.votes_against;
-    let quorum = (snapshot_supply * config.quorum_bps as i128) / 10_000i128;
+    let quorum = (snapshot_supply * proposal.quorum_bps as i128) / 10_000i128;
     if total_votes < quorum {
         proposal.status = ProposalStatus::Rejected;
         return Err(GovernanceError::QuorumNotMet);
     }
 
-    if proposal.votes_for * 10_000i128 >= total_votes * config.pass_bps as i128 {
+    if proposal.votes_for * 10_000i128 >= total_votes * proposal.pass_bps as i128 {
         proposal.status = ProposalStatus::Passed;
         // Anchored to voting_ends_at (not "now") so a delayed finalization
         // call can't push back the execution-expiry window.
@@ -189,6 +241,11 @@ impl Governance {
         if voting_period_secs > 0 && voting_period_secs < MIN_VOTING_PERIOD_SECS {
             panic!("voting period too short");
         }
+        // #931: proposal creation requires a positive stake threshold so any
+        // address without holdings cannot spam list_proposals.
+        if min_share_balance <= 0 {
+            panic!("min_share_balance must be positive");
+        }
 
         let config = GovernanceConfig {
             admin: admin.clone(),
@@ -214,13 +271,20 @@ impl Governance {
                 execution_delay_secs
             },
             min_share_balance,
+            // #933: tiered defaults (parameter uses quorum_bps above).
+            treasury_quorum_bps: DEFAULT_TREASURY_QUORUM_BPS,
+            critical_quorum_bps: DEFAULT_CRITICAL_QUORUM_BPS,
         };
+        let _ = DEFAULT_PARAMETER_QUORUM_BPS;
 
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
+    /// #931 / #933: create a proposal. Caller must hold at least
+    /// `min_share_balance` shares (proposal threshold). Category selects the
+    /// quorum tier, which is snapshotted onto the proposal.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -228,12 +292,21 @@ impl Governance {
         target_contract: Address,
         function_name: String,
         calldata: String,
+        category: ProposalCategory,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
         let config = load_config(&env)?;
         let now = env.ledger().timestamp();
         let balance = proposal_weight(&env, &config.share_token, &proposer, now);
+        // #931: absolute proposal threshold — reject zero/under-threshold stake.
         if balance < config.min_share_balance {
+            return Err(GovernanceError::InsufficientShareBalance);
+        }
+
+        let snapshot_supply = ShareTokenClient::new(&env, &config.share_token).total_supply();
+        // #931: quorum-eligibility — proposer must hold a positive stake against
+        // a non-zero supply so empty/spam proposals cannot open governance noise.
+        if snapshot_supply <= 0 || balance <= 0 {
             return Err(GovernanceError::InsufficientShareBalance);
         }
 
@@ -243,7 +316,7 @@ impl Governance {
             .get(&DataKey::ProposalCount)
             .unwrap_or(0);
         let id = count + 1;
-        let snapshot_supply = ShareTokenClient::new(&env, &config.share_token).total_supply();
+        let quorum_bps = quorum_for_category(&config, &category);
         let proposal = Proposal {
             id,
             proposer: proposer.clone(),
@@ -259,6 +332,9 @@ impl Governance {
             execution_delay: config.execution_delay_secs,
             snapshot_supply,
             passed_at: 0,
+            category,
+            quorum_bps,
+            pass_bps: config.pass_bps,
         };
 
         env.storage()
@@ -293,7 +369,9 @@ impl Governance {
         {
             return Err(GovernanceError::AlreadyVoted);
         }
-        if env.ledger().timestamp() > proposal.voting_ends_at {
+        // #932: voting window is [created_at, voting_ends_at). At equality the
+        // period has fully elapsed — no more votes, and finalize may run.
+        if env.ledger().timestamp() >= proposal.voting_ends_at {
             let _ = finalize_proposal(&env, &mut proposal);
             env.storage()
                 .instance()
@@ -340,7 +418,10 @@ impl Governance {
         {
             return Err(GovernanceError::ProposalInactive);
         }
-        if env.ledger().timestamp() < proposal.voting_ends_at {
+        // #932: voting period must fully elapse before execution. Reject while
+        // `now <= voting_ends_at` so fast unanimous support cannot skip the
+        // configured window (and so vote/execute never both succeed at equality).
+        if env.ledger().timestamp() <= proposal.voting_ends_at {
             return Err(GovernanceError::VotingPeriodActive);
         }
         if env.ledger().timestamp()
@@ -440,8 +521,10 @@ impl Governance {
                 .get::<DataKey, Proposal>(&DataKey::Proposal(id))
             {
                 let mut changed = false;
+                // #932: align finalize with vote/execute — period fully elapsed
+                // at `now >= voting_ends_at`.
                 if proposal.status == ProposalStatus::Active
-                    && env.ledger().timestamp() > proposal.voting_ends_at
+                    && env.ledger().timestamp() >= proposal.voting_ends_at
                 {
                     let _ = finalize_proposal(&env, &mut proposal);
                     changed = true;
@@ -484,12 +567,9 @@ impl Governance {
         Ok(weight)
     }
 
-    /// Updates the quorum and pass-threshold, gated to the address holding
-    /// governance authority (`config.admin`) so quorum/threshold stay
-    /// configurable by current governance rather than fixed at deploy time.
-    /// Does not affect proposals already created — their `snapshot_supply`
-    /// and finalization use the config values in effect when `execute_proposal`
-    /// runs, consistent with how quorum/threshold already work today.
+    /// Updates the default (ParameterChange) quorum and pass-threshold.
+    /// Gated to `config.admin`. Does not rewrite snapshotted values on
+    /// already-created proposals.
     pub fn update_config(
         env: Env,
         caller: Address,
@@ -501,12 +581,7 @@ impl Governance {
         if caller != config.admin {
             return Err(GovernanceError::Unauthorized);
         }
-        if quorum_bps == 0 || quorum_bps > 10_000 {
-            return Err(GovernanceError::InvalidConfig);
-        }
-        if pass_bps <= 5_000 || pass_bps > 10_000 {
-            return Err(GovernanceError::InvalidConfig);
-        }
+        validate_bps(quorum_bps, pass_bps)?;
 
         config.quorum_bps = quorum_bps;
         config.pass_bps = pass_bps;
@@ -514,5 +589,43 @@ impl Governance {
         env.events()
             .publish((EVT, symbol_short!("cfg")), (caller, quorum_bps, pass_bps));
         Ok(())
+    }
+
+    /// #933: set per-category quorum (and optional pass threshold via pass_bps).
+    /// `pass_bps` applies globally (same supermajority rule for all categories);
+    /// category only differentiates quorum. Snapshotted onto new proposals only.
+    pub fn set_category_quorum(
+        env: Env,
+        caller: Address,
+        category: ProposalCategory,
+        quorum_bps: u32,
+    ) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        let mut config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        if quorum_bps == 0 || quorum_bps > 10_000 {
+            return Err(GovernanceError::InvalidConfig);
+        }
+
+        match category {
+            ProposalCategory::ParameterChange => config.quorum_bps = quorum_bps,
+            ProposalCategory::Treasury => config.treasury_quorum_bps = quorum_bps,
+            ProposalCategory::Critical => config.critical_quorum_bps = quorum_bps,
+        }
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("cat_q")), (caller, category, quorum_bps));
+        Ok(())
+    }
+
+    /// #933: read the quorum bps configured for a category.
+    pub fn get_category_quorum(
+        env: Env,
+        category: ProposalCategory,
+    ) -> Result<u32, GovernanceError> {
+        let config = load_config(&env)?;
+        Ok(quorum_for_category(&config, &category))
     }
 }

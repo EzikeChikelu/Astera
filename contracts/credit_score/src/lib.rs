@@ -152,6 +152,11 @@ const MAX_SCORE_CONTRIBUTION: u32 = 1000;
 /// preventing absurd far-future expiries that would never lapse.
 const MAX_ATTESTATION_HORIZON_SECS: u64 = 2 * 365 * 24 * 60 * 60;
 
+/// TTL for simulate_score_with_attestations cache in seconds.
+/// Short enough that UIs see fresh results after a scoring event; long enough
+/// to absorb repeated keystroke-triggered calls during a single interaction.
+const SIMULATE_CACHE_TTL_SECS: u64 = 30;
+
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecord {
@@ -371,6 +376,17 @@ pub struct Attestation {
     pub status: AttestationStatus,
 }
 
+/// Cached result of `simulate_score_with_attestations`, keyed by
+/// (sme_address, hash_of_hypothetical). `cached_at` is the ledger timestamp
+/// when the cache entry was written; callers check it against
+/// `SIMULATE_CACHE_TTL_SECS` before treating the entry as a hit.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulateScoreCacheEntry {
+    pub result: u32,
+    pub cached_at: u64,
+}
+
 /// Returned by `get_credit_score`. Includes the current config version alongside the
 /// stored score so callers can detect staleness in a single call without a separate
 /// `get_scoring_config()` round-trip.
@@ -454,6 +470,12 @@ pub enum DataKey {
     SmeAttestations(Address),
     /// #868: reason hash supplied to `dispute_attestation`, keyed by attestation id.
     AttestationDisputeReason(u64),
+    /// Late-payment threshold (in days) that was in effect when this SME's
+    /// most recent payment was recorded. Enables forward-only threshold changes.
+    SmeLateThreshold(Address),
+    /// Short-lived cache for `simulate_score_with_attestations`, keyed by
+    /// (sme_address, hash_of_hypothetical_attestation_pairs).
+    SimulateScoreCache(Address, u64),
 }
 
 const EVT: Symbol = symbol_short!("credit");
@@ -687,6 +709,18 @@ fn blend_score(
     blended.clamp(min_score as i128, max_score as i128) as u32
 }
 
+/// Deterministic hash of a `(weight_bps, score_contribution)` vector for
+/// cache-key derivation. Not a cryptographic hash — we only need collision
+/// resistance within a single SME's attestation set, which is tiny (<100).
+fn hash_attestation_pairs(pairs: &Vec<(u32, u32)>) -> u64 {
+    let mut h: u64 = 0;
+    for (w, s) in pairs.iter() {
+        h = h.wrapping_mul(31).wrapping_add(w as u64);
+        h = h.wrapping_mul(31).wrapping_add(s as u64);
+    }
+    h
+}
+
 #[contractimpl]
 impl CreditScoreContract {
     pub fn initialize(env: Env, admin: Address, invoice_contract: Address, pool_contract: Address) {
@@ -869,10 +903,17 @@ impl CreditScoreContract {
                 credit_data.average_payment_days * prev_paid + days_late,
             );
         }
+        // Snapshot the late threshold so future score computations use the
+        // value that was in effect at record time — threshold changes applied
+        // via set_late_threshold only affect payments recorded after the change.
+        let late_threshold = get_late_threshold(env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SmeLateThreshold(sme.clone()), &late_threshold);
         credit_data.score = calculate_score_with_config(
             env,
             &scoring_config,
-            get_late_threshold(env),
+            late_threshold,
             credit_data.total_invoices,
             credit_data.paid_on_time,
             credit_data.paid_late,
@@ -1985,11 +2026,30 @@ impl CreditScoreContract {
     /// Preview the blended score as if `hypothetical` additional attestations
     /// (weight_bps, score_contribution) existed, without persisting anything.
     /// Powers a "what would my score be if I verified X" frontend flow.
+    ///
+    /// Results are cached for `SIMULATE_CACHE_TTL_SECS` so repeated calls with
+    /// the same SME and hypothetical set (e.g. keystroke-by-keystroke UI
+    /// re-simulation) avoid recomputing the full attestation-signal pipeline.
     pub fn simulate_score_with_attestations(
         env: Env,
         sme: Address,
         hypothetical: Vec<(u32, u32)>,
     ) -> u32 {
+        let cache_key = hash_attestation_pairs(&hypothetical);
+        let now = env.ledger().timestamp();
+        // Cache hit? Return the stale-or-miss path only when needed.
+        if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, SimulateScoreCacheEntry>(&DataKey::SimulateScoreCache(
+                sme.clone(),
+                cache_key,
+            )) {
+            if entry.cached_at.saturating_add(SIMULATE_CACHE_TTL_SECS) > now {
+                return entry.result;
+            }
+        }
+
         let data = Self::get_or_create_credit_data(&env, &sme);
         let config = load_scoring_config(&env);
         let mut signals = Self::collect_active_attestation_signals(&env, &sme);
@@ -1998,13 +2058,22 @@ impl CreditScoreContract {
         }
         let external =
             compute_external_component(&signals, config.core.min_score, config.core.max_score);
-        blend_score(
+        let result = blend_score(
             data.score,
             external,
             &config.attestation,
             config.core.min_score,
             config.core.max_score,
-        )
+        );
+
+        env.storage().persistent().set(
+            &DataKey::SimulateScoreCache(sme, cache_key),
+            &SimulateScoreCacheEntry {
+                result,
+                cached_at: now,
+            },
+        );
+        result
     }
 
     /// File a dispute against an attestation. Callable by the attested SME or

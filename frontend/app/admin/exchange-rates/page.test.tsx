@@ -34,7 +34,9 @@ jest.mock('react-hot-toast', () => ({
 }));
 
 jest.mock('@/components/Skeleton', () => ({
-  Skeleton: ({ className }: { className: string }) => <div data-testid="skeleton" className={className} />,
+  Skeleton: ({ className }: { className: string }) => (
+    <div data-testid="skeleton" className={className} />
+  ),
 }));
 
 describe('AdminExchangeRatesPage', () => {
@@ -65,7 +67,9 @@ describe('AdminExchangeRatesPage', () => {
 
     await user.click(screen.getByRole('button', { name: /confirm & submit/i }));
 
-    await waitFor(() => expect(mockBuildSetExchangeRateTx).toHaveBeenCalledWith('GABC123', 'USDC', 10_800));
+    await waitFor(() =>
+      expect(mockBuildSetExchangeRateTx).toHaveBeenCalledWith('GABC123', 'USDC', 10_800),
+    );
     expect(mockSubmitTx).toHaveBeenCalledWith('signed-xdr');
   });
 });

@@ -109,7 +109,9 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
         <div className="mt-4 border-t border-[var(--border)] pt-4">
           <div className="flex items-center justify-between text-xs text-[var(--muted)] mb-1.5">
             <span>Co-funding progress</span>
-            <span className="text-[var(--text-primary)] font-medium">{fundedPercent.toFixed(1)}%</span>
+            <span className="text-[var(--text-primary)] font-medium">
+              {fundedPercent.toFixed(1)}%
+            </span>
           </div>
           <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
             <div
