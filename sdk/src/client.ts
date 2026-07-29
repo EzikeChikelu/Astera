@@ -29,5 +29,8 @@ export type {
   ProposalStatus,
   ActionPayload,
   Proposal,
+  Listing,
+  ListingStatus,
+  ListingKind,
 } from '../../packages/sdk/src/types';
 export { ALL_ROLES, ROLE_LABELS } from '../../packages/sdk/src/types';
