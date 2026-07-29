@@ -153,6 +153,39 @@ impl ShareToken {
             .unwrap_or(0)
     }
 
+    pub fn increase_allowance(env: Env, owner: Address, spender: Address, added_amount: i128) {
+        owner.require_auth();
+        if added_amount <= 0 {
+            panic!("added amount must be positive");
+        }
+        let current = Self::allowance(env.clone(), owner.clone(), spender.clone());
+        let new_allowance = current
+            .checked_add(added_amount)
+            .expect("allowance overflow");
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &new_allowance);
+        env.events()
+            .publish((EVT, symbol_short!("incr_allow")), (owner, spender, new_allowance));
+    }
+
+    pub fn decrease_allowance(env: Env, owner: Address, spender: Address, subtracted_amount: i128) {
+        owner.require_auth();
+        if subtracted_amount <= 0 {
+            panic!("subtracted amount must be positive");
+        }
+        let current = Self::allowance(env.clone(), owner.clone(), spender.clone());
+        if current < subtracted_amount {
+            panic!("allowance underflow");
+        }
+        let new_allowance = current - subtracted_amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &new_allowance);
+        env.events()
+            .publish((EVT, symbol_short!("decr_allow")), (owner, spender, new_allowance));
+    }
+
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         spender.require_auth();
         if amount <= 0 {
