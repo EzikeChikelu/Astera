@@ -229,6 +229,16 @@ impl ComplianceContract {
         {
             return Err(ComplianceError::ScreenerAlreadyRegistered);
         }
+        // #926: reject re-register while a pending registration already exists.
+        // Otherwise lowering set_screener_timelock and re-calling register could
+        // overwrite the frozen effective_at (or instantly activate with timelock 0).
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingScreener(screener.clone()))
+        {
+            return Err(ComplianceError::ScreenerAlreadyRegistered);
+        }
 
         let timelock: u64 = env
             .storage()
@@ -240,6 +250,8 @@ impl ComplianceContract {
         if timelock == 0 {
             Self::activate_screener(&env, &screener)?;
         } else {
+            // Freeze effective_at at registration time — confirm uses this value,
+            // never the live ScreenerTimelockSecs config (#926).
             let pending = PendingScreener {
                 address: screener.clone(),
                 proposed_at: now,
@@ -359,6 +371,9 @@ impl ComplianceContract {
             .unwrap_or(DEFAULT_RESCREENING_INTERVAL_SECS)
     }
 
+    /// Updates the timelock applied to *future* `register_screener` calls only.
+    /// #926: must not rewrite `effective_at` on any in-flight PendingScreener —
+    /// confirm always uses the value frozen at registration time.
     pub fn set_screener_timelock(
         env: Env,
         admin: Address,

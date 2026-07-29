@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use governance::{Governance, GovernanceClient, ProposalStatus};
+use governance::{Governance, GovernanceClient, GovernanceError, ProposalCategory, ProposalStatus};
 use share::{ShareToken, ShareTokenClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -49,6 +49,24 @@ fn make_proposal(env: &Env, gov: &GovernanceClient, proposer: &Address, target: 
         target,
         &String::from_str(env, "no_op"),
         &String::from_str(env, "{}"),
+        &ProposalCategory::ParameterChange,
+    )
+}
+
+fn make_proposal_with_category(
+    env: &Env,
+    gov: &GovernanceClient,
+    proposer: &Address,
+    target: &Address,
+    category: &ProposalCategory,
+) -> u64 {
+    gov.create_proposal(
+        proposer,
+        &String::from_str(env, "Test proposal"),
+        target,
+        &String::from_str(env, "no_op"),
+        &String::from_str(env, "{}"),
+        category,
     )
 }
 
@@ -317,6 +335,7 @@ fn test_zero_snapshot_supply_rejects_proposal_immediately() {
         &share_admin2,
         &String::from_str(&env, "no_op"),
         &String::from_str(&env, "{}"),
+        &ProposalCategory::ParameterChange,
     );
     // No votes cast → total_votes = 0. quorum = 0 so 0 >= 0 passes quorum check.
     // Then pass threshold: YES=0, total=0. 0*10000 >= 0*6000 → 0 >= 0 → Passed.
@@ -566,4 +585,258 @@ fn test_passed_proposal_executes_within_expiry_window() {
 
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+// ── #932: voting period must fully elapse before execute ─────────────────────
+
+#[test]
+fn test_execute_rejected_at_exact_voting_ends_at() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    gov.vote(&id, &voter, &true);
+
+    let proposal = gov.get_proposal(&id).unwrap();
+    // Land exactly on voting_ends_at — period has not fully elapsed past the end.
+    env.ledger()
+        .with_mut(|l| l.timestamp = proposal.voting_ends_at);
+
+    let result = gov.try_execute_proposal(&id);
+    assert_eq!(
+        result,
+        Err(Ok(GovernanceError::VotingPeriodActive)),
+        "execute at voting_ends_at must fail even with unanimous support"
+    );
+
+    // Vote at equality must also fail (no overlap window).
+    let late_voter = Address::generate(&env);
+    share.mint(&late_voter, &10_000i128);
+    let vote_result = gov.try_vote(&id, &late_voter, &true);
+    assert!(vote_result.is_err(), "vote at voting_ends_at must fail");
+}
+
+#[test]
+fn test_execute_requires_voting_period_elapsed_before_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    gov.vote(&id, &voter, &true);
+
+    // Still inside voting window.
+    env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD / 2);
+    let early = gov.try_execute_proposal(&id);
+    assert_eq!(early, Err(Ok(GovernanceError::VotingPeriodActive)));
+
+    // One second after voting ends — voting closed, but execution delay still active.
+    let proposal = gov.get_proposal(&id).unwrap();
+    env.ledger()
+        .with_mut(|l| l.timestamp = proposal.voting_ends_at + 1);
+    let delay = gov.try_execute_proposal(&id);
+    assert_eq!(delay, Err(Ok(GovernanceError::TimelockActive)));
+}
+
+// ── #931: proposal threshold / create eligibility ────────────────────────────
+
+#[test]
+fn test_create_proposal_rejects_zero_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    // Ensure supply is non-zero via another holder, but proposer has nothing.
+    let holder = Address::generate(&env);
+    share.mint(&holder, &100_000i128);
+    let poor = Address::generate(&env);
+
+    let result = gov.try_create_proposal(
+        &poor,
+        &String::from_str(&env, "spam"),
+        &holder,
+        &String::from_str(&env, "no_op"),
+        &String::from_str(&env, "{}"),
+        &ProposalCategory::ParameterChange,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InsufficientShareBalance)));
+}
+
+#[test]
+fn test_create_proposal_rejects_below_min_share_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, share_admin) = setup_share(&env);
+    let gov_admin = Address::generate(&env);
+    let gov_id = env.register(Governance, ());
+    let gov = GovernanceClient::new(&env, &gov_id);
+    // Threshold of 10_000 shares to create.
+    gov.initialize(
+        &gov_admin,
+        &share_id,
+        &VOTING_PERIOD,
+        &QUORUM_BPS,
+        &PASS_BPS,
+        &EXEC_DELAY,
+        &10_000i128,
+    );
+
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &9_999i128);
+
+    let result = gov.try_create_proposal(
+        &proposer,
+        &String::from_str(&env, "under threshold"),
+        &share_admin,
+        &String::from_str(&env, "no_op"),
+        &String::from_str(&env, "{}"),
+        &ProposalCategory::ParameterChange,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InsufficientShareBalance)));
+
+    share.mint(&proposer, &1i128); // now exactly 10_000
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "at threshold"),
+        &share_admin,
+        &String::from_str(&env, "no_op"),
+        &String::from_str(&env, "{}"),
+        &ProposalCategory::ParameterChange,
+    );
+    assert_eq!(id, 1u64);
+}
+
+// ── #933: proposal categories with per-category quorum ───────────────────────
+
+#[test]
+fn test_category_quorum_defaults_and_snapshot() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, gov_admin) = setup_governance(&env, &share_id);
+
+    assert_eq!(
+        gov.get_category_quorum(&ProposalCategory::ParameterChange),
+        QUORUM_BPS
+    );
+    assert_eq!(gov.get_category_quorum(&ProposalCategory::Treasury), 2_000);
+    assert_eq!(gov.get_category_quorum(&ProposalCategory::Critical), 5_000);
+
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &1_000_000i128);
+
+    let param_id =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::ParameterChange);
+    let treasury_id =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Treasury);
+    let critical_id =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+
+    assert_eq!(gov.get_proposal(&param_id).unwrap().quorum_bps, QUORUM_BPS);
+    assert_eq!(gov.get_proposal(&treasury_id).unwrap().quorum_bps, 2_000);
+    assert_eq!(gov.get_proposal(&critical_id).unwrap().quorum_bps, 5_000);
+    assert_eq!(
+        gov.get_proposal(&critical_id).unwrap().category,
+        ProposalCategory::Critical
+    );
+
+    // Mid-flight config change must not rewrite snapshotted quorum.
+    gov.set_category_quorum(&gov_admin, &ProposalCategory::Critical, &8_000u32);
+    assert_eq!(gov.get_category_quorum(&ProposalCategory::Critical), 8_000);
+    assert_eq!(
+        gov.get_proposal(&critical_id).unwrap().quorum_bps,
+        5_000,
+        "in-flight proposal keeps creation-time quorum"
+    );
+
+    let new_critical =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+    assert_eq!(gov.get_proposal(&new_critical).unwrap().quorum_bps, 8_000);
+}
+
+#[test]
+fn test_critical_category_requires_higher_quorum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    // Supply = 1_000_000. Parameter quorum 10% = 100_000; Critical 50% = 500_000.
+    share.mint(&proposer, &800_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let param_id =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::ParameterChange);
+    let critical_id =
+        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+
+    // 200k votes: enough for parameter (100k), not for critical (500k).
+    gov.vote(&param_id, &voter, &true);
+    gov.vote(&critical_id, &voter, &true);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+
+    gov.execute_proposal(&param_id);
+    assert_eq!(
+        gov.get_proposal(&param_id).unwrap().status,
+        ProposalStatus::Executed
+    );
+
+    let critical_result = gov.try_execute_proposal(&critical_id);
+    assert!(critical_result.is_err());
+    gov.list_proposals();
+    assert_eq!(
+        gov.get_proposal(&critical_id).unwrap().status,
+        ProposalStatus::Rejected
+    );
+}
+
+#[test]
+fn test_set_category_quorum_rejects_non_admin_and_invalid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _) = setup_share(&env);
+    let (gov, gov_admin) = setup_governance(&env, &share_id);
+
+    let impostor = Address::generate(&env);
+    assert!(gov
+        .try_set_category_quorum(&impostor, &ProposalCategory::Treasury, &3_000u32)
+        .is_err());
+    assert!(gov
+        .try_set_category_quorum(&gov_admin, &ProposalCategory::Treasury, &0u32)
+        .is_err());
+    assert!(gov
+        .try_set_category_quorum(&gov_admin, &ProposalCategory::Treasury, &10_001u32)
+        .is_err());
 }
