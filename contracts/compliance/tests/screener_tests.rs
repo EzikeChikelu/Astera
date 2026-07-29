@@ -398,3 +398,78 @@ fn test_custom_rescreening_interval() {
         &String::from_str(&env, "sanctions"),
     );
 }
+
+// ── #926: reducing screener timelock must not unlock pending registrations ───
+
+#[test]
+fn test_reducing_timelock_does_not_shorten_pending_registration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let screener = Address::generate(&env);
+
+    // Default 24h timelock; register freezes effective_at = now + 86400.
+    client.register_screener(&admin, &screener);
+    assert!(!client.is_screener(&screener));
+
+    // Admin shortens (or zeros) the configured timelock mid-flight.
+    client.set_screener_timelock(&admin, &0u64);
+    assert_eq!(client.get_screener_timelock(), 0u64);
+
+    // Still before the *original* effective_at — confirm must fail.
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 3_600);
+    let too_soon = client.try_confirm_screener_registration(&admin, &screener);
+    assert_eq!(too_soon, Err(Ok(ComplianceError::ScreenerTimelockActive)));
+    assert!(!client.is_screener(&screener));
+
+    // After original 24h window, confirm succeeds.
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 86_400);
+    client.confirm_screener_registration(&admin, &screener);
+    assert!(client.is_screener(&screener));
+}
+
+#[test]
+fn test_re_register_while_pending_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let screener = Address::generate(&env);
+
+    client.register_screener(&admin, &screener);
+    // Lower timelock then try to re-register — must not overwrite frozen effective_at
+    // or instantly activate with the new (zero) timelock.
+    client.set_screener_timelock(&admin, &0u64);
+    let again = client.try_register_screener(&admin, &screener);
+    assert_eq!(again, Err(Ok(ComplianceError::ScreenerAlreadyRegistered)));
+    assert!(!client.is_screener(&screener));
+
+    // Original commitment still governs confirm.
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 1);
+    let early = client.try_confirm_screener_registration(&admin, &screener);
+    assert_eq!(early, Err(Ok(ComplianceError::ScreenerTimelockActive)));
+}
+
+#[test]
+fn test_reducing_timelock_only_affects_future_registrations() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let pending = Address::generate(&env);
+    let fresh = Address::generate(&env);
+
+    client.register_screener(&admin, &pending);
+    client.set_screener_timelock(&admin, &3_600u64);
+
+    // New registration uses the shortened 1h timelock.
+    client.register_screener(&admin, &fresh);
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 3_600);
+    client.confirm_screener_registration(&admin, &fresh);
+    assert!(client.is_screener(&fresh));
+
+    // Original pending still needs the full original 24h.
+    let still_pending = client.try_confirm_screener_registration(&admin, &pending);
+    assert_eq!(
+        still_pending,
+        Err(Ok(ComplianceError::ScreenerTimelockActive))
+    );
+}
