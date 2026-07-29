@@ -2302,6 +2302,50 @@ impl InvoiceContract {
         );
     }
 
+    /// #789: Mark a funded invoice as cancelled (admin action via the pool).
+    /// Only the authorized pool contract can call this. Decreases SME
+    /// outstanding and debtor exposure since the funds are being returned.
+    pub fn mark_cancelled(env: Env, id: u64, pool: Address) {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized: only pool can mark cancelled");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("invoice is not funded");
+        }
+        invoice.status = InvoiceStatus::Cancelled;
+        let sme = invoice.owner.clone();
+        decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, true);
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_invoices = stats.active_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+        env.events().publish(
+            (EVT, symbol_short!("cancelled")),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
+        );
+    }
+
     pub fn raise_dispute(env: Env, id: u64, borrower: Address, evidence_hash: String) {
         borrower.require_auth();
         require_not_paused(&env);
