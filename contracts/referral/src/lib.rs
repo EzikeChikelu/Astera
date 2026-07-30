@@ -6,7 +6,8 @@
 // - Referee (new user): register()
 // - Pool contract: record_activity()
 // - Referrer: claim_rewards()
-// - Anyone: read-only view functions (get_stats, get_referrer, get_pending_reward)
+// - Anyone: read-only view functions (get_stats, get_referrer, get_pending_reward,
+//   get_top_referrers)
 //
 // #799: on-chain referral program. A referee names their referrer once via
 // register(). The pool contract calls record_activity() whenever it
@@ -20,7 +21,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Env, Symbol,
+    Address, Env, Symbol, Vec,
 };
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -34,6 +35,10 @@ const MAX_BPS: u32 = 10_000;
 const DEFAULT_BORROW_REWARD_BPS: u32 = 500;
 /// Referee deposits: referrer earns 10% of the yield fee from their deposits.
 const DEFAULT_DEPOSIT_REWARD_BPS: u32 = 1_000;
+/// #943: number of top referrers tracked for get_top_referrers(). A referrer
+/// only needs to be tracked here once their referral_count exceeds the
+/// current lowest-ranked tracked entry.
+const MAX_LEADERBOARD_SIZE: u32 = 25;
 
 const EVT: Symbol = symbol_short!("REFERRAL");
 
@@ -56,6 +61,14 @@ pub struct ReferralStats {
     pub referral_count: u32,
 }
 
+/// #943: one row of the get_top_referrers() leaderboard.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeaderboardEntry {
+    pub referrer: Address,
+    pub referral_count: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -74,6 +87,9 @@ pub enum DataKey {
     /// referrer -> number of referees who have completed a qualifying
     /// activity
     ReferralCount(Address),
+    /// #943: descending-sorted leaderboard of the top MAX_LEADERBOARD_SIZE
+    /// referrers by referral_count.
+    TopReferrers,
 }
 
 fn bump_instance(env: &Env) {
@@ -91,6 +107,75 @@ fn require_not_paused(env: &Env) {
     {
         panic_with_error!(env, ReferralError::ContractPaused);
     }
+}
+
+/// #943: keep the on-chain leaderboard current whenever a referrer's
+/// referral_count changes. Referrers outside the tracked top
+/// MAX_LEADERBOARD_SIZE are left untouched to avoid unbounded storage
+/// growth from a naive "record every referrer" approach.
+fn update_leaderboard(env: &Env, referrer: &Address, new_count: u32) {
+    let mut board: Vec<LeaderboardEntry> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TopReferrers)
+        .unwrap_or(Vec::new(env));
+
+    let mut existing_idx: Option<u32> = None;
+    for i in 0..board.len() {
+        if &board.get(i).unwrap().referrer == referrer {
+            existing_idx = Some(i);
+            break;
+        }
+    }
+
+    let entry = LeaderboardEntry {
+        referrer: referrer.clone(),
+        referral_count: new_count,
+    };
+
+    if let Some(i) = existing_idx {
+        board.set(i, entry);
+    } else if board.len() < MAX_LEADERBOARD_SIZE {
+        board.push_back(entry);
+    } else {
+        let mut min_idx: u32 = 0;
+        let mut min_count = board.get(0).unwrap().referral_count;
+        for i in 1..board.len() {
+            let count = board.get(i).unwrap().referral_count;
+            if count < min_count {
+                min_count = count;
+                min_idx = i;
+            }
+        }
+        if new_count <= min_count {
+            // Doesn't crack the tracked top set — nothing to persist.
+            return;
+        }
+        board.set(min_idx, entry);
+    }
+
+    // Re-sort descending by referral_count (selection sort — board is
+    // capped at MAX_LEADERBOARD_SIZE so this stays cheap).
+    let mut sorted: Vec<LeaderboardEntry> = Vec::new(env);
+    let len = board.len();
+    for _ in 0..len {
+        let mut best_idx: u32 = 0;
+        let mut best = board.get(0).unwrap();
+        for j in 1..board.len() {
+            let candidate = board.get(j).unwrap();
+            if candidate.referral_count > best.referral_count {
+                best_idx = j;
+                best = candidate;
+            }
+        }
+        sorted.push_back(best);
+        board.remove(best_idx);
+    }
+
+    env.storage().persistent().set(&DataKey::TopReferrers, &sorted);
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::TopReferrers, REGISTRY_TTL, REGISTRY_TTL);
 }
 
 fn require_admin(env: &Env, admin: &Address) {
@@ -293,10 +378,12 @@ impl ReferralContract {
                 .extend_ttl(&activated_key, REGISTRY_TTL, REGISTRY_TTL);
             let count_key = DataKey::ReferralCount(referrer.clone());
             let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-            env.storage().persistent().set(&count_key, &(count + 1));
+            let new_count = count + 1;
+            env.storage().persistent().set(&count_key, &new_count);
             env.storage()
                 .persistent()
                 .extend_ttl(&count_key, REGISTRY_TTL, REGISTRY_TTL);
+            update_leaderboard(&env, &referrer, new_count);
             env.events().publish(
                 (EVT, symbol_short!("activatd")),
                 (referee.clone(), referrer.clone()),
@@ -371,6 +458,28 @@ impl ReferralContract {
             referrer,
             referral_count,
         }
+    }
+
+    /// #943: top referrers by referral_count, descending. `limit` caps the
+    /// number of rows returned; 0 (or a value larger than the tracked set)
+    /// returns the full tracked leaderboard, which holds at most
+    /// MAX_LEADERBOARD_SIZE entries.
+    pub fn get_top_referrers(env: Env, limit: u32) -> Vec<LeaderboardEntry> {
+        let board: Vec<LeaderboardEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TopReferrers)
+            .unwrap_or(Vec::new(&env));
+        let take = if limit == 0 || limit > board.len() {
+            board.len()
+        } else {
+            limit
+        };
+        let mut result = Vec::new(&env);
+        for i in 0..take {
+            result.push_back(board.get(i).unwrap());
+        }
+        result
     }
 }
 
