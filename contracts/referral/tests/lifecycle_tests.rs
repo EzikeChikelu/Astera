@@ -273,6 +273,159 @@ fn test_claim_rewards_transfers_token_and_resets_pending() {
 }
 
 #[test]
+fn test_get_top_referrers_empty_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _pool) = setup(&env);
+
+    assert_eq!(client.get_top_referrers(&0).len(), 0);
+    assert_eq!(client.get_top_referrers(&5).len(), 0);
+}
+
+#[test]
+fn test_get_top_referrers_ranks_by_referral_count_descending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let token = setup_token(&env);
+
+    let referrer_a = Address::generate(&env);
+    let referrer_b = Address::generate(&env);
+    let referrer_c = Address::generate(&env);
+
+    // referrer_a: 3 activated referees, referrer_b: 1, referrer_c: 2.
+    for _ in 0..3 {
+        let referee = Address::generate(&env);
+        client.register(&referee, &referrer_a);
+        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+    }
+    let referee_b = Address::generate(&env);
+    client.register(&referee_b, &referrer_b);
+    client.record_activity(&pool, &referee_b, &Symbol::new(&env, "deposit"), &0i128, &token);
+
+    for _ in 0..2 {
+        let referee = Address::generate(&env);
+        client.register(&referee, &referrer_c);
+        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+    }
+
+    let board = client.get_top_referrers(&0);
+    assert_eq!(board.len(), 3);
+    assert_eq!(board.get(0).unwrap().referrer, referrer_a);
+    assert_eq!(board.get(0).unwrap().referral_count, 3);
+    assert_eq!(board.get(1).unwrap().referrer, referrer_c);
+    assert_eq!(board.get(1).unwrap().referral_count, 2);
+    assert_eq!(board.get(2).unwrap().referrer, referrer_b);
+    assert_eq!(board.get(2).unwrap().referral_count, 1);
+}
+
+#[test]
+fn test_get_top_referrers_respects_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let token = setup_token(&env);
+
+    for _ in 0..4 {
+        let referrer = Address::generate(&env);
+        let referee = Address::generate(&env);
+        client.register(&referee, &referrer);
+        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+    }
+
+    assert_eq!(client.get_top_referrers(&2).len(), 2);
+    // A limit larger than the tracked set just returns everything tracked.
+    assert_eq!(client.get_top_referrers(&100).len(), 4);
+}
+
+#[test]
+fn test_get_top_referrers_does_not_double_count_repeat_activity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let token = setup_token(&env);
+    let referee = Address::generate(&env);
+    let referrer = Address::generate(&env);
+    client.register(&referee, &referrer);
+
+    // Activation (first qualifying activity) plus a second activity from the
+    // same already-activated referee must only ever count once.
+    client.record_activity(
+        &pool,
+        &referee,
+        &Symbol::new(&env, "borrow"),
+        &1_000_0000000i128,
+        &token,
+    );
+    client.record_activity(
+        &pool,
+        &referee,
+        &Symbol::new(&env, "borrow"),
+        &500_0000000i128,
+        &token,
+    );
+
+    let board = client.get_top_referrers(&0);
+    assert_eq!(board.len(), 1);
+    assert_eq!(board.get(0).unwrap().referral_count, 1);
+}
+
+#[test]
+fn test_get_top_referrers_evicts_lowest_when_full() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let token = setup_token(&env);
+
+    // Fill the leaderboard to its MAX_LEADERBOARD_SIZE (25) cap, each with a
+    // distinct referral_count so ranking (and eviction) is unambiguous.
+    let mut referrers = std::vec::Vec::new();
+    for i in 0..25u32 {
+        let referrer = Address::generate(&env);
+        for _ in 0..=i {
+            let referee = Address::generate(&env);
+            client.register(&referee, &referrer);
+            client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+        }
+        referrers.push(referrer);
+    }
+    // Lowest-ranked tracked referrer so far has referral_count == 1.
+    assert_eq!(client.get_top_referrers(&0).len(), 25);
+    assert_eq!(
+        client.get_top_referrers(&0).get(24).unwrap().referral_count,
+        1
+    );
+
+    // A brand-new referrer with 2 activated referees beats the current
+    // lowest entry (count 1) and should bump it off the board.
+    let challenger = Address::generate(&env);
+    for _ in 0..2 {
+        let referee = Address::generate(&env);
+        client.register(&referee, &challenger);
+        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+    }
+
+    let board = client.get_top_referrers(&0);
+    assert_eq!(board.len(), 25);
+    let mut found_challenger = false;
+    let mut found_evicted = false;
+    for i in 0..board.len() {
+        let entry = board.get(i).unwrap();
+        if entry.referrer == challenger {
+            found_challenger = true;
+        }
+        if entry.referrer == referrers.get(0).unwrap().clone() {
+            found_evicted = true;
+        }
+    }
+    assert!(found_challenger, "challenger should be on the leaderboard");
+    assert!(
+        !found_evicted,
+        "lowest-ranked referrer (count 1) should have been evicted"
+    );
+}
+
+#[test]
 fn test_pause_blocks_register_and_claim() {
     let env = Env::default();
     env.mock_all_auths();
