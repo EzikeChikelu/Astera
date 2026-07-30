@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import { LiquidityForecastChart } from '@/components/analytics/LiquidityForecastChart';
+import { TrancheClass } from '@/../sdk/src/generated/tranche';
 import {
   getInvestorPosition,
   getPoolConfig,
@@ -17,6 +18,7 @@ import {
   buildCancelWithdrawalRequestTx,
   buildDrainWithdrawalQueueTx,
   submitTx,
+  getTrancheInvestorPosition,
 } from '@/lib/contracts';
 import { formatUSDC, stablecoinLabel, toStroops } from '@/lib/stellar';
 import type { PoolTokenTotals, WaitEstimate, LiquidityForecastPoint } from '@/lib/types';
@@ -29,6 +31,13 @@ interface PortfolioSnapshot {
   depositCount: number;
 }
 
+interface TranchePositionData {
+  senior: { deposited: bigint; earned: bigint; losses: bigint };
+  junior: { deposited: bigint; earned: bigint; losses: bigint };
+  seniorApyPct: number;
+  juniorApyPct: number;
+}
+
 interface TokenRow {
   token: string;
   totals: PoolTokenTotals;
@@ -37,6 +46,55 @@ interface TokenRow {
   forecast: LiquidityForecastPoint[];
   /** Exchange rate in bps (10_000 = 1:1 USD) */
   rateBps: number;
+  /** #862: per-investor senior/junior tranche positions, null if none/unavailable */
+  tranche: TranchePositionData | null;
+}
+
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+
+async function fetchTranchePositions(
+  investor: string,
+  token: string,
+): Promise<TranchePositionData | null> {
+  try {
+    const [senior, junior] = await Promise.all([
+      getTrancheInvestorPosition(investor, token, TrancheClass.Senior).catch(() => null),
+      getTrancheInvestorPosition(investor, token, TrancheClass.Junior).catch(() => null),
+    ]);
+    if (!senior && !junior) return null;
+    // Only surface the section if the investor actually has tranche exposure.
+    if ((senior?.deposited ?? 0n) === 0n && (junior?.deposited ?? 0n) === 0n) return null;
+
+    let seniorApyPct = 0;
+    let juniorApyPct = 0;
+    try {
+      const res = await fetch(`${INDEXER_URL}/tranches/${encodeURIComponent(token)}/apy`);
+      if (res.ok) {
+        const data = await res.json();
+        seniorApyPct = data.senior?.realizedApyPct ?? 0;
+        juniorApyPct = data.junior?.realizedApyPct ?? 0;
+      }
+    } catch {
+      // indexer optional — leave APY at 0 if unavailable
+    }
+
+    return {
+      senior: {
+        deposited: senior?.deposited ?? 0n,
+        earned: senior?.earned ?? 0n,
+        losses: senior?.losses ?? 0n,
+      },
+      junior: {
+        deposited: junior?.deposited ?? 0n,
+        earned: junior?.earned ?? 0n,
+        losses: junior?.losses ?? 0n,
+      },
+      seniorApyPct,
+      juniorApyPct,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Render a seconds duration as a short human string, e.g. "3h", "2d", "~1mo". */
@@ -195,12 +253,13 @@ export default function PortfolioPage() {
 
       const rowData: TokenRow[] = await Promise.all(
         tokens.map(async (token) => {
-          const [totals, rawPos, rateBps, waitEstimate, forecast] = await Promise.all([
+          const [totals, rawPos, rateBps, waitEstimate, forecast, tranche] = await Promise.all([
             getPoolTokenTotals(token),
             getInvestorPosition(wallet.address!, token),
             getExchangeRate(token).catch(() => 10_000),
             estimateWithdrawalWait(wallet.address!, token).catch(() => null),
             getLiquidityForecast(token, 30).catch(() => []),
+            fetchTranchePositions(wallet.address!, token),
           ]);
 
           const position: PortfolioSnapshot | null = rawPos
@@ -213,7 +272,7 @@ export default function PortfolioPage() {
               }
             : null;
 
-          return { token, totals, position, waitEstimate, forecast, rateBps };
+          return { token, totals, position, waitEstimate, forecast, rateBps, tranche };
         }),
       );
 
@@ -528,8 +587,8 @@ export default function PortfolioPage() {
 
           {/* Per-token positions (collapsible when > 1 token) */}
           <div className="space-y-4">
-            <h2 className="text-brand-text font-semibold text-lg">Token Positions</h2>
-            {rows.map(({ token, position, totals, waitEstimate, forecast, rateBps }) => {
+            <h2 className="text-white font-semibold text-lg">Token Positions</h2>
+            {rows.map(({ token, position, totals, waitEstimate, forecast, rateBps, tranche }) => {
               const isCollapsed = collapsed[token] ?? false;
               const usdcDeposited = position ? toUsdcEquiv(position.totalDeposited, rateBps) : 0n;
               const dueDate = waitEstimate?.nearestInvoiceDueDate
@@ -697,6 +756,101 @@ export default function PortfolioPage() {
                             title="30-Day Liquidity Forecast"
                             queuedDemand={waitEstimate?.capitalAhead}
                           />
+                        </div>
+                      )}
+
+                      {/* #862: Tranche Positions Section — real per-investor
+                          positions from the tranche contract, with trailing
+                          realized APY sourced from the indexer. Hidden when the
+                          investor has no tranche exposure for this token. */}
+                      {tranche && (
+                        <div className="mt-4 pt-4 border-t border-brand-border">
+                          <h4 className="text-white font-medium text-sm mb-3">Tranche Positions</h4>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {/* Senior Tranche Card */}
+                            <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-blue-400 text-xs font-medium">
+                                  Senior Tranche
+                                </span>
+                                <span className="text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300">
+                                  Lower Risk
+                                </span>
+                              </div>
+                              <div className="space-y-1 text-xs">
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Deposited</span>
+                                  <span className="text-white">
+                                    {formatUSDC(tranche.senior.deposited)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Earned</span>
+                                  <span className="text-green-400">
+                                    {formatUSDC(tranche.senior.earned)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Losses</span>
+                                  <span className="text-white">
+                                    {formatUSDC(tranche.senior.losses)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Trailing APY</span>
+                                  <span className="text-white">
+                                    {tranche.seniorApyPct.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Junior Tranche Card */}
+                            <div className="bg-purple-900/20 border border-purple-800/30 rounded-lg p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-purple-400 text-xs font-medium">
+                                  Junior Tranche
+                                </span>
+                                <span className="text-xs px-2 py-0.5 rounded bg-purple-900/50 text-purple-300">
+                                  Higher Risk
+                                </span>
+                              </div>
+                              <div className="space-y-1 text-xs">
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Deposited</span>
+                                  <span className="text-white">
+                                    {formatUSDC(tranche.junior.deposited)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Earned</span>
+                                  <span className="text-green-400">
+                                    {formatUSDC(tranche.junior.earned)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Losses</span>
+                                  <span className="text-red-400">
+                                    {formatUSDC(tranche.junior.losses)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-brand-muted">Trailing APY</span>
+                                  <span className="text-white">
+                                    {tranche.juniorApyPct.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="mt-3 text-center">
+                            <a
+                              href="/invest/tranches"
+                              className="text-xs text-brand-gold hover:underline"
+                            >
+                              Manage tranche investments →
+                            </a>
+                          </div>
                         </div>
                       )}
                     </>

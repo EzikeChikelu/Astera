@@ -348,6 +348,8 @@ pub enum DataKey {
     KeeperIds,
     // #775: borrower opt-out from the public invoice sharing link
     Private(u64),
+    // #895: index of invoice IDs by debtor name
+    DebtorInvoices(String),
 }
 
 const EVT: Symbol = symbol_short!("invoice");
@@ -627,6 +629,48 @@ fn add_invoice_to_owner(env: &Env, owner: &Address, invoice_id: u64) {
 /// Remove an invoice ID from the owner's invoice index (#651).
 fn remove_invoice_from_owner(env: &Env, owner: &Address, invoice_id: u64) {
     let key = DataKey::SmeInvoices(owner.clone());
+    let ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_ids: Vec<u64> = Vec::new(env);
+    for i in 0..ids.len() {
+        let id = ids.get(i).unwrap();
+        if id != invoice_id {
+            new_ids.push_back(id);
+        }
+    }
+    if new_ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LEDGERS_PER_DAY * 365, LEDGERS_PER_DAY * 365);
+    }
+}
+
+/// Add an invoice ID to the debtor's invoice index (#895).
+fn add_invoice_to_debtor(env: &Env, debtor: &String, invoice_id: u64) {
+    let key = DataKey::DebtorInvoices(debtor.clone());
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(&invoice_id) {
+        ids.push_back(invoice_id);
+        env.storage().persistent().set(&key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LEDGERS_PER_DAY * 365, LEDGERS_PER_DAY * 365);
+    }
+}
+
+/// Remove an invoice ID from the debtor's invoice index (#895).
+fn remove_invoice_from_debtor(env: &Env, debtor: &String, invoice_id: u64) {
+    let key = DataKey::DebtorInvoices(debtor.clone());
     let ids: Vec<u64> = env
         .storage()
         .persistent()
@@ -1633,6 +1677,7 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
         env.storage().instance().set(&DataKey::InvoiceCount, &id);
         add_invoice_to_owner(&env, &owner, id);
+        add_invoice_to_debtor(&env, &invoice.debtor, id);
 
         let mut stats: StorageStats = env
             .storage()
@@ -2139,8 +2184,10 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Paid;
         invoice.paid_at = env.ledger().timestamp();
         let sme = invoice.owner.clone();
+        let debtor = invoice.debtor.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
+        decrease_debtor_exposure(&env, &debtor, invoice.amount);
+        remove_invoice_from_debtor(&env, &debtor, id);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -2234,6 +2281,52 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Defaulted;
         let sme = invoice.owner.clone();
+        let debtor = invoice.debtor.clone();
+        decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &debtor, invoice.amount);
+        remove_invoice_from_debtor(&env, &debtor, id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, true);
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_invoices = stats.active_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+        env.events().publish(
+            (EVT, symbol_short!("default")),
+            (id, invoice.owner.clone(), env.ledger().timestamp()),
+        );
+    }
+
+    /// #789: Mark a funded invoice as cancelled (admin action via the pool).
+    /// Only the authorized pool contract can call this. Decreases SME
+    /// outstanding and debtor exposure since the funds are being returned.
+    pub fn mark_cancelled(env: Env, id: u64, pool: Address) {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized: only pool can mark cancelled");
+        }
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("invoice is not funded");
+        }
+        invoice.status = InvoiceStatus::Cancelled;
+        let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
         decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
@@ -2248,7 +2341,7 @@ impl InvoiceContract {
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
         env.events().publish(
-            (EVT, symbol_short!("default")),
+            (EVT, symbol_short!("cancelled")),
             (id, invoice.owner.clone(), env.ledger().timestamp()),
         );
     }
@@ -2454,8 +2547,10 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Cancelled;
         remove_invoice_from_owner(&env, &invoice.owner, id);
         let sme = invoice.owner.clone();
+        let debtor = invoice.debtor.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
+        decrease_debtor_exposure(&env, &debtor, invoice.amount);
+        remove_invoice_from_debtor(&env, &debtor, id);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -2518,7 +2613,9 @@ impl InvoiceContract {
         // State transition: move to Cancelled
         invoice.status = InvoiceStatus::Cancelled;
         remove_invoice_from_owner(&env, &invoice.owner, id);
-        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
+        let debtor = invoice.debtor.clone();
+        decrease_debtor_exposure(&env, &debtor, invoice.amount);
+        remove_invoice_from_debtor(&env, &debtor, id);
 
         // Note: We do NOT call decrease_sme_outstanding here because the invoice
         // was never funded. SME outstanding is only incremented in mark_funded(),
@@ -2571,6 +2668,9 @@ impl InvoiceContract {
         if !is_completed {
             panic!("can only cleanup completed invoices");
         }
+        let debtor = invoice.debtor.clone();
+        remove_invoice_from_debtor(&env, &debtor, id);
+        remove_invoice_from_owner(&env, &invoice.owner, id);
         env.storage().persistent().remove(&DataKey::Invoice(id));
         let mut stats: StorageStats = env
             .storage()
@@ -2768,6 +2868,15 @@ impl InvoiceContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Returns all invoice IDs where `debtor` is the named debtor (#895).
+    pub fn get_invoices_by_debtor(env: Env, debtor: String) -> Vec<u64> {
+        bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::DebtorInvoices(debtor))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn get_storage_stats(env: Env) -> StorageStats {
         bump_instance(&env);
         env.storage()
@@ -2798,7 +2907,9 @@ impl InvoiceContract {
         let mut expired_inv = inv;
         expired_inv.status = InvoiceStatus::Expired;
         remove_invoice_from_owner(&env, &expired_inv.owner, id);
-        decrease_debtor_exposure(&env, &expired_inv.debtor, expired_inv.amount);
+        let debtor = expired_inv.debtor.clone();
+        decrease_debtor_exposure(&env, &debtor, expired_inv.amount);
+        remove_invoice_from_debtor(&env, &debtor, id);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &expired_inv);

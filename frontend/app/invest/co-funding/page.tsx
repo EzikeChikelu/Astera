@@ -14,7 +14,7 @@ import {
   buildTransferCoFundShareTx,
 } from '@/lib/contracts';
 import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
-import { useTrackTransaction } from '@/hooks/useTrackTransaction';
+import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
 
 const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -26,7 +26,7 @@ const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
 export default function CoFundingPage() {
   const { wallet } = useStore();
   const [txLoading, setTxLoading] = useState(false);
-  const trackedSubmit = useTrackTransaction('Co-Funding');
+  const trackedSubmit = UseTrackTransaction('Co-Funding');
 
   const [commitAmounts, setCommitAmounts] = useState<Record<number, string>>({});
 
@@ -46,7 +46,7 @@ export default function CoFundingPage() {
       address: wallet.address!,
     });
     if (signError) throw new Error(signError.message || 'Signing rejected.');
-    const submitter = label ? useTrackTransaction(label) : trackedSubmit;
+    const submitter = label ? UseTrackTransaction(label) : trackedSubmit;
     await submitter(signedTxXdr);
   }
 
@@ -135,10 +135,9 @@ export default function CoFundingPage() {
       <div>
         <h1 className="text-3xl font-bold mb-2">Co-Funding Rounds</h1>
         <p className="text-brand-muted text-sm">
-          Commit capital toward a specific invoice alongside other investors. Every co-funder
-          ranks pari passu and owns a proportional slice of that invoice&apos;s principal and
-          interest — separate from the general pool position, and tradeable once the round is
-          filled.
+          Commit capital toward a specific invoice alongside other investors. Every co-funder ranks
+          pari passu and owns a proportional slice of that invoice&apos;s principal and interest —
+          separate from the general pool position, and tradeable once the round is filled.
         </p>
       </div>
 

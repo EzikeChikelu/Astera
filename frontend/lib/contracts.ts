@@ -9,6 +9,7 @@ import {
   ORACLE_REGISTRY_CONTRACT_ID,
   COMPLIANCE_CONTRACT_ID,
   REFERRAL_CONTRACT_ID,
+  TRANCHE_CONTRACT_ID,
   ACCESS_CONTROL_CONTRACT_ID,
   NETWORK,
   simulateTx,
@@ -106,14 +107,18 @@ if (REFERRAL_CONTRACT_ID) {
 const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
 const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? 'http://localhost:4000';
 
-type RpcAccount = Awaited<ReturnType<StellarRpc.Server['getAccount']>>;
+type RpcAccount = Awaited<ReturnType<StellarRpc.Server['getAccount']>> & AccountWithBalances;
 type RpcBuiltTransaction = Parameters<StellarRpc.Server['simulateTransaction']>[0];
 
-function getRpcAccount(address: string): Promise<RpcAccount> {
-  return rpcExecute<RpcAccount>((server) => server.getAccount(address));
+interface AccountWithBalances {
+  balances: Array<{ asset_type: string; balance: string }>;
 }
 
-function getNativeBalanceStroops(account: Pick<RpcAccount, 'balances'> | undefined): bigint {
+function getRpcAccount(address: string): Promise<RpcAccount> {
+  return rpcExecute((server) => server.getAccount(address) as Promise<RpcAccount>);
+}
+
+function getNativeBalanceStroops(account: AccountWithBalances | undefined): bigint {
   if (!account?.balances) return 0n;
   const nativeBalance = account.balances.find((balance) => balance.asset_type === 'native');
   if (!nativeBalance?.balance) return 0n;
@@ -121,7 +126,7 @@ function getNativeBalanceStroops(account: Pick<RpcAccount, 'balances'> | undefin
 }
 
 function ensureSufficientNativeBalance(
-  account: Pick<RpcAccount, 'balances'>,
+  account: AccountWithBalances,
   requiredStroops = BigInt(BASE_FEE),
 ) {
   if (getNativeBalanceStroops(account) < requiredStroops) {
@@ -1781,6 +1786,36 @@ export async function buildDepositCollateralTx(params: {
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
+export async function buildTopUpCollateralTx(params: {
+  invoiceId: number;
+  depositor: string;
+  token: string;
+  amount: bigint;
+}): Promise<string> {
+  const account = await getRpcAccount(params.depositor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'top_up_collateral',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.depositor).toScVal(),
+        new Address(params.token).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 // ---- Credit Score Contract ----
 
 export async function getCreditScoreStatus(
@@ -2635,267 +2670,121 @@ export async function buildRegisterReferralTx(referee: string, referrer: string)
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
-// ---- #864: role-based multisig access control ----
+// ── #862: Tranche helpers ─────────────────────────────────────────────────────
 
-const SIMULATION_SOURCE = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+import { TrancheClass } from '@/../sdk/src/generated/tranche';
+import type { TranchePool, TrancheConfig } from '@/../sdk/src/generated/tranche';
 
-function roleToScVal(role: Role): xdr.ScVal {
-  return xdr.ScVal.scvVec([nativeToScVal(role, { type: 'symbol' })]);
+export type { TranchePool, TrancheConfig };
+export { TrancheClass };
+
+const DUMMY_CALLER = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+
+function trancheClassToScVal(tc: TrancheClass): xdr.ScVal {
+  const name = tc === TrancheClass.Senior ? 'Senior' : 'Junior';
+  return xdr.ScVal.scvVec([nativeToScVal(name, { type: 'symbol' })]);
 }
 
-/**
- * Encodes an `ActionPayload` (mirrors contracts/access_control/src/lib.rs's
- * `ActionPayload` enum) the same way `attestorTypeToScVal` above encodes a
- * unit-variant enum, extended for tuple-variant payloads: a Vec whose first
- * element is the variant name (Symbol) followed by its fields in order.
- */
-function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
-  const tag = nativeToScVal(action.tag, { type: 'symbol' });
-  switch (action.tag) {
-    case 'SetPaused':
-    case 'SetKycRequired':
-      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'bool' })]);
-    case 'SetYield':
-    case 'SetMaxUtilization':
-      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u32' })]);
-    case 'SetTreasury':
-    case 'SetOracleContract':
-    case 'SetOracle':
-    case 'AddKeeper':
-      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
-    case 'WithdrawRevenue':
-      return xdr.ScVal.scvVec([
-        tag,
-        new Address(action.values[0]).toScVal(),
-        nativeToScVal(action.values[1], { type: 'i128' }),
-      ]);
-    case 'SetInvestorKyc':
-      return xdr.ScVal.scvVec([
-        tag,
-        new Address(action.values[0]).toScVal(),
-        nativeToScVal(action.values[1], { type: 'bool' }),
-      ]);
-    case 'RegisterDebtor':
-      return xdr.ScVal.scvVec([
-        tag,
-        nativeToScVal(action.values[0], { type: 'string' }),
-        nativeToScVal(action.values[1], { type: 'string' }),
-        nativeToScVal(action.values[2], { type: 'i128' }),
-      ]);
-    case 'DeactivateDebtor':
-      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'string' })]);
-    case 'SetLateThreshold':
-      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'i64' })]);
-    case 'SetScoreThresholds':
-      return xdr.ScVal.scvVec([
-        tag,
-        nativeToScVal(action.values[0], { type: 'u32' }),
-        nativeToScVal(action.values[1], { type: 'u32' }),
-        nativeToScVal(action.values[2], { type: 'u32' }),
-        nativeToScVal(action.values[3], { type: 'u32' }),
-      ]);
-    case 'RegisterAttestor':
-      return xdr.ScVal.scvVec([
-        tag,
-        new Address(action.values[0]).toScVal(),
-        nativeToScVal(action.values[1], { type: 'u32' }),
-        nativeToScVal(action.values[2], { type: 'u32' }),
-      ]);
-    case 'AddSigner':
-    case 'RemoveSigner':
-      return xdr.ScVal.scvVec([
-        tag,
-        roleToScVal(action.values[0]),
-        new Address(action.values[1]).toScVal(),
-      ]);
-    case 'SetThreshold':
-      return xdr.ScVal.scvVec([
-        tag,
-        roleToScVal(action.values[0]),
-        nativeToScVal(action.values[1], { type: 'u32' }),
-      ]);
-  }
-}
-
-/**
- * `scValToNative` decodes our `[tag, ...fields]` vec encoding of an
- * `ActionPayload` variant into a flat native array (e.g. `['SetYield', 650]`),
- * not the `{ tag, values }` shape `ActionPayload` expects — reshape it here.
- */
-function actionPayloadFromNative(raw: unknown): ActionPayload {
-  const [tag, ...values] = raw as [ActionPayload['tag'], ...unknown[]];
-  return { tag, values } as ActionPayload;
-}
-
-function proposalFromScVal(raw: Record<string, unknown>): Proposal {
+function accountingFromRaw(r: Record<string, unknown>) {
   return {
-    role: enumTagFromNative<Role>(raw.role),
-    target: raw.target as StellarAddress,
-    action: actionPayloadFromNative(raw.action),
-    proposer: raw.proposer as StellarAddress,
-    approvals: (raw.approvals as StellarAddress[]) ?? [],
-    createdAt: Number(raw.created_at ?? 0),
-    expiresAt: Number(raw.expires_at ?? 0),
-    status: enumTagFromNative<ProposalStatusRaw>(raw.status) as unknown as Proposal['status'],
+    deposited: BigInt(String(r.deposited ?? 0)),
+    available: BigInt(String(r.available ?? 0)),
+    deployed: BigInt(String(r.deployed ?? 0)),
+    earned: BigInt(String(r.earned ?? 0)),
+    losses: BigInt(String(r.losses ?? 0)),
   };
 }
 
-type ProposalStatusRaw = 'Pending' | 'Approved' | 'Executed' | 'Rejected';
-
-export async function getRoleConfig(role: Role): Promise<MultiSigConfig | null> {
+export async function getTranchePool(token: string): Promise<TranchePool> {
   const sim = await simulateTx(
-    ACCESS_CONTROL_CONTRACT_ID,
-    'get_role_config',
-    [roleToScVal(role)],
-    SIMULATION_SOURCE,
+    TRANCHE_CONTRACT_ID,
+    'get_pool',
+    [new Address(token).toScVal()],
+    DUMMY_CALLER,
   );
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
-  if (!raw) return null;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
   return {
-    signers: (raw.signers as StellarAddress[]) ?? [],
-    threshold: Number(raw.threshold ?? 0),
+    senior: accountingFromRaw(raw.senior as Record<string, unknown>),
+    junior: accountingFromRaw(raw.junior as Record<string, unknown>),
+    config: raw.config as TrancheConfig,
   };
 }
 
-/** Fetches every role's config in one round-trip, for the admin roles page. */
-export async function listAllRoleConfigs(): Promise<Record<Role, MultiSigConfig | null>> {
-  const entries = await Promise.all(
-    ALL_ROLES.map(async (role) => [role, await getRoleConfig(role)] as const),
-  );
-  return Object.fromEntries(entries) as Record<Role, MultiSigConfig | null>;
-}
-
-export async function isRoleSigner(role: Role, address: string): Promise<boolean> {
+export async function getTrancheInvestorPosition(
+  investor: string,
+  token: string,
+  trancheClass: TrancheClass,
+): Promise<{ deposited: bigint; shares: bigint; earned: bigint; losses: bigint }> {
   const sim = await simulateTx(
-    ACCESS_CONTROL_CONTRACT_ID,
-    'is_signer',
-    [roleToScVal(role), new Address(address).toScVal()],
-    SIMULATION_SOURCE,
+    TRANCHE_CONTRACT_ID,
+    'get_position',
+    [
+      new Address(investor).toScVal(),
+      new Address(token).toScVal(),
+      trancheClassToScVal(trancheClass),
+    ],
+    DUMMY_CALLER,
   );
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  return Boolean(scValToNative(result!.retval));
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    deposited: BigInt(String(raw.deposited ?? 0)),
+    shares: BigInt(String(raw.shares ?? 0)),
+    earned: BigInt(String(raw.earned ?? 0)),
+    losses: BigInt(String(raw.losses ?? 0)),
+  };
 }
 
-export async function getProposal(proposalId: number): Promise<Proposal | null> {
-  const sim = await simulateTx(
-    ACCESS_CONTROL_CONTRACT_ID,
-    'get_proposal',
-    [nativeToScVal(proposalId, { type: 'u64' })],
-    SIMULATION_SOURCE,
-  );
-  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  const raw = scValToNative(result!.retval) as Record<string, unknown> | null;
-  return raw ? proposalFromScVal(raw) : null;
-}
-
-async function getNextProposalId(): Promise<number> {
-  const sim = await simulateTx(
-    ACCESS_CONTROL_CONTRACT_ID,
-    'get_next_proposal_id',
-    [],
-    SIMULATION_SOURCE,
-  );
-  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  return Number(scValToNative(result!.retval));
-}
-
-/**
- * Fetches every proposal in `0..getNextProposalId()` — no pagination, since
- * this governance system is meant for tens of proposals, not thousands.
- */
-export async function listProposals(): Promise<Array<{ id: number; proposal: Proposal }>> {
-  if (!ACCESS_CONTROL_CONTRACT_ID) return [];
-  const nextId = await getNextProposalId();
-  const results: Array<{ id: number; proposal: Proposal }> = [];
-  for (let id = 0; id < nextId; id++) {
-    const proposal = await getProposal(id);
-    if (proposal) results.push({ id, proposal });
-  }
-  return results;
-}
-
-export async function buildProposeActionTx(params: {
-  role: Role;
-  proposer: string;
-  target: string;
-  action: ActionPayload;
-}): Promise<string> {
-  const account = await getRpcAccount(params.proposer);
-  const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
-
+export async function buildTrancheDepositTx(
+  investor: string,
+  token: string,
+  trancheClass: TrancheClass,
+  amount: bigint,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(TRANCHE_CONTRACT_ID);
   const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
     .addOperation(
       contract.call(
-        'propose_action',
-        roleToScVal(params.role),
-        new Address(params.proposer).toScVal(),
-        new Address(params.target).toScVal(),
-        actionPayloadToScVal(params.action),
+        'deposit_tranche',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+        trancheClassToScVal(trancheClass),
+        nativeToScVal(amount, { type: 'i128' }),
       ),
     )
     .setTimeout(30)
     .build();
-
   const sim = await simulateRpcTransaction(tx);
-  if (StellarRpc.Api.isSimulationError(sim)) {
-    throw new Error(`Simulation failed: ${sim.error}`);
-  }
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
-function buildSignerOnlyActionTx(
-  method: 'approve_action' | 'reject_action' | 'revoke_approval',
-): (params: { signer: string; proposalId: number }) => Promise<string> {
-  return async ({ signer, proposalId }) => {
-    const account = await getRpcAccount(signer);
-    const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
-
-    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
-      .addOperation(
-        contract.call(
-          method,
-          new Address(signer).toScVal(),
-          nativeToScVal(proposalId, { type: 'u64' }),
-        ),
-      )
-      .setTimeout(30)
-      .build();
-
-    const sim = await simulateRpcTransaction(tx);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
-  };
-}
-
-export const buildApproveActionTx = buildSignerOnlyActionTx('approve_action');
-export const buildRejectActionTx = buildSignerOnlyActionTx('reject_action');
-export const buildRevokeApprovalTx = buildSignerOnlyActionTx('revoke_approval');
-
-export async function buildExecuteActionTx(params: {
-  caller: string;
-  proposalId: number;
-}): Promise<string> {
-  const account = await getRpcAccount(params.caller);
-  const contract = new Contract(ACCESS_CONTROL_CONTRACT_ID);
-
+export async function buildSetTrancheConfigTx(
+  admin: string,
+  token: string,
+  seniorTargetYieldBps: number,
+  seniorAdvanceRateBps: number,
+  juniorFirstLossBps: number,
+): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(TRANCHE_CONTRACT_ID);
   const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
     .addOperation(
       contract.call(
-        'execute_action',
-        new Address(params.caller).toScVal(),
-        nativeToScVal(params.proposalId, { type: 'u64' }),
+        'set_tranche_config',
+        new Address(admin).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(seniorTargetYieldBps, { type: 'u32' }),
+        nativeToScVal(seniorAdvanceRateBps, { type: 'u32' }),
+        nativeToScVal(juniorFirstLossBps, { type: 'u32' }),
       ),
     )
     .setTimeout(30)
     .build();
-
   const sim = await simulateRpcTransaction(tx);
-  if (StellarRpc.Api.isSimulationError(sim)) {
-    throw new Error(`Simulation failed: ${sim.error}`);
-  }
+  if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 

@@ -158,6 +158,7 @@ export interface AsteraConfig {
   creditScoreContractId?: string;
   oracleRegistryContractId?: string;
   complianceContractId?: string;
+  trancheContractId?: string;
   /** #864: role-based multisig access-control contract, if deployed. */
   accessControlContractId?: string;
 }

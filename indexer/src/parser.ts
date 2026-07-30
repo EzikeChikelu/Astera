@@ -13,6 +13,7 @@ export type ContractType =
   | 'credit_score'
   | 'oracle_registry'
   | 'compliance'
+  | 'tranche'
   | 'unknown';
 
 export interface IndexedEvent {
@@ -36,6 +37,8 @@ const POOL_CONTRACT_ID = (process.env.POOL_CONTRACT_ID || '').trim();
 const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || '').trim();
 // #867: on-chain compliance / sanctions screening registry
 const COMPLIANCE_CONTRACT_ID = (process.env.COMPLIANCE_CONTRACT_ID || '').trim();
+// #862: invoice tranching (senior/junior) with waterfall repayment and loss allocation
+const TRANCHE_CONTRACT_ID = (process.env.TRANCHE_CONTRACT_ID || '').trim();
 
 // #861: oracle_registry contract emits these event subtypes under the
 // "ORACLE" topic (see `EVT` in contracts/oracle_registry/src/lib.rs).
@@ -77,6 +80,16 @@ const COMPLIANCE_EVENT_TYPES = new Set([
   'unpaused',
 ]);
 
+// #862: tranche contract emits these event subtypes under the "TRANCHE" topic
+const TRANCHE_EVENT_TYPES = new Set([
+  'deposit',
+  'withdraw',
+  'fund',
+  'repay',
+  'default',
+  'config',
+]);
+
 // #700: credit_score contract emits these event subtypes under the "CREDIT" topic
 const CREDIT_SCORE_EVENT_TYPES = new Set([
   'payment',
@@ -109,9 +122,13 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (COMPLIANCE_CONTRACT_ID && contractId === COMPLIANCE_CONTRACT_ID) {
     return 'compliance';
   }
+  if (TRANCHE_CONTRACT_ID && contractId === TRANCHE_CONTRACT_ID) {
+    return 'tranche';
+  }
   // Fallback: infer from topic. credit_score events publish under "CREDIT",
   // oracle_registry events publish under "ORACLE" (#861),
-  // compliance events publish under "COMPLY" (#867).
+  // compliance events publish under "COMPLY" (#867),
+  // tranche events publish under "TRANCHE" (#862).
   if (contractType === 'CREDIT' || CREDIT_SCORE_EVENT_TYPES.has(eventType)) {
     return 'credit_score';
   }
@@ -120,6 +137,9 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   }
   if (contractType === 'COMPLY' || COMPLIANCE_EVENT_TYPES.has(eventType)) {
     return 'compliance';
+  }
+  if (contractType === 'TRANCHE' || TRANCHE_EVENT_TYPES.has(eventType)) {
+    return 'tranche';
   }
   if (contractType === 'invoice') return 'invoice';
   if (contractType === 'pool') return 'pool';
@@ -270,6 +290,20 @@ function extractActor(contractType: string, eventType: string, value: any): stri
     // Fallback: scan array elements for a valid Stellar address
     for (const item of value) {
       if (isStellarAddress(item)) return item;
+    }
+  }
+
+  // Tranche events: first field is usually the actor
+  if (contractType === 'TRANCHE') {
+    switch (eventType) {
+      case 'deposit':
+      case 'withdraw':
+      case 'fund':
+      case 'repay':
+      case 'default':
+        return value[0]; // investor or caller
+      case 'config':
+        return value[0]; // admin
     }
   }
 
