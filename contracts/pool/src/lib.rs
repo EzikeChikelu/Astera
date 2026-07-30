@@ -170,8 +170,13 @@ pub enum PoolError {
     // #864: role-based multisig access-control
     AccessControlNotConfigured = 88,
     AccessControlAlreadyConfigured = 89,
-    // #789: cancellation of a funded invoice failed in the invoice contract
-    InvoiceNotCancelled = 90,
+    // #1025: secondary market errors
+    ListingNotFound = 90,
+    ListingNotOpen = 91,
+    ListingNotSeller = 92,
+    InsufficientListingBalance = 93,
+    TooManyListings = 94,
+    ListingPriceMismatch = 95,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -621,6 +626,44 @@ pub struct RepaymentRequest {
     pub amount: i128,
 }
 
+// #1025: secondary market for pool positions and co-funding shares.
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingStatus {
+    Open,
+    Filled,
+    Cancelled,
+}
+
+/// Whether the listing covers a co-funded share (bps of a CoFundingRound)
+/// or a single-funded position slice (raw token amount of deployed principal).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingKind {
+    CoFunding,
+    SingleFunded,
+}
+
+/// A secondary-market listing created by `list_position`.
+/// `amount_or_bps` is:
+///   - for `CoFunding`: the bps of the seller's CoFundShare being offered
+///   - for `SingleFunded`: the raw token amount of deployed principal being offered
+/// `price` is the flat token amount the seller wants in exchange.
+#[contracttype]
+#[derive(Clone)]
+pub struct Listing {
+    pub listing_id: u64,
+    pub invoice_id: u64,
+    pub seller: Address,
+    pub token: Address,
+    pub kind: ListingKind,
+    pub amount_or_bps: u64,
+    pub price: i128,
+    pub created_at: u64,
+    pub status: ListingStatus,
+}
+
 #[contracttype]
 #[derive(Clone, Default)]
 pub struct PoolStorageStats {
@@ -864,6 +907,15 @@ const ORACLE_FALLBACK_PX: Symbol = symbol_short!("fb_price");
 // #777: default max age (seconds) a Reflector price may have before it's
 // treated as stale and the admin fallback price is used instead.
 const DEFAULT_ORACLE_STALE_SECS: u64 = 3600;
+// #1025: secondary market — per-listing storage (listing_id -> Listing) and
+// per-invoice / per-investor index vecs. Symbol keys because DataKey is
+// already at Soroban's 50-variant ceiling.
+const LISTING_DATA: Symbol = symbol_short!("lst_data");
+const LISTING_IDS_INV: Symbol = symbol_short!("lst_inv"); // invoice_id -> Vec<u64>
+const LISTING_IDS_SELLER: Symbol = symbol_short!("lst_sel"); // seller -> Vec<u64>
+const LISTING_COUNTER: Symbol = symbol_short!("lst_cnt");
+// Maximum open listings per invoice to bound iteration gas cost.
+const MAX_LISTINGS_PER_INVOICE: u32 = 50;
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -7964,6 +8016,488 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::ReentrancyGuard, &false);
+    }
+
+    // ── #1025: Secondary market for pool positions and co-funding shares ──────
+
+    /// List part or all of a position for sale on the secondary market.
+    ///
+    /// For `CoFunding` kind: `amount_or_bps` is the bps of the seller's
+    /// `CoFundShare` to offer (1..=seller_share). The round must be `Filled`.
+    ///
+    /// For `SingleFunded` kind: `amount_or_bps` is the raw token amount of
+    /// deployed principal to offer. The invoice must not be fully repaid.
+    ///
+    /// `price` is the flat token amount the buyer must pay from their
+    /// `available` balance.
+    ///
+    /// Compliance and KYC are checked on the seller at listing time.
+    pub fn list_position(
+        env: Env,
+        seller: Address,
+        invoice_id: u64,
+        kind: ListingKind,
+        amount_or_bps: u64,
+        price: i128,
+    ) -> Result<u64, PoolError> {
+        seller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_compliance_cleared(&env, &seller)?;
+
+        if amount_or_bps == 0 {
+            return Err(PoolError::ZeroAmount);
+        }
+        if price <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        non_reentrant!(&env, {
+            let record: FundedInvoice = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FundedInvoice(invoice_id))
+                .ok_or(PoolError::InvoiceNotFound)?;
+
+            let token = record.token.clone();
+
+            match kind {
+                ListingKind::CoFunding => {
+                    let round_id = record.co_funding_round_id.ok_or(PoolError::InvalidAmount)?;
+                    let round: CoFundingRound = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::CoFundingRound(round_id))
+                        .ok_or(PoolError::CoFundingRoundNotFound)?;
+                    if round.status != CoFundingStatus::Filled {
+                        return Err(PoolError::CoFundingRoundNotFilled);
+                    }
+                    let seller_bps: u32 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::CoFundShare(round_id, seller.clone()))
+                        .unwrap_or(0);
+                    if amount_or_bps as u32 > seller_bps || seller_bps == 0 {
+                        return Err(PoolError::InsufficientListingBalance);
+                    }
+                }
+                ListingKind::SingleFunded => {
+                    if record.co_funding_round_id.is_some() {
+                        return Err(PoolError::InvalidAmount);
+                    }
+                    let pos_key = DataKey::InvestorPosition(seller.clone(), token.clone());
+                    let position: InvestorPosition = env
+                        .storage()
+                        .persistent()
+                        .get(&pos_key)
+                        .unwrap_or(InvestorPosition {
+                            deposited: 0,
+                            available: 0,
+                            deployed: 0,
+                            earned: 0,
+                            deposit_count: 0,
+                            loyalty_start_at: 0,
+                        });
+                    if (amount_or_bps as i128) > position.deployed || position.deployed == 0 {
+                        return Err(PoolError::InsufficientListingBalance);
+                    }
+                }
+            }
+
+            // Enforce per-invoice listing cap to bound iteration gas.
+            let mut inv_map: Map<u64, Vec<u64>> = env
+                .storage()
+                .instance()
+                .get(&LISTING_IDS_INV)
+                .unwrap_or_else(|| Map::new(&env));
+            let existing: Vec<u64> = inv_map
+                .get(invoice_id)
+                .unwrap_or_else(|| Vec::new(&env));
+            if existing.len() >= MAX_LISTINGS_PER_INVOICE {
+                return Err(PoolError::TooManyListings);
+            }
+
+            // Allocate listing ID.
+            let listing_id: u64 = env
+                .storage()
+                .instance()
+                .get(&LISTING_COUNTER)
+                .unwrap_or(0u64)
+                .checked_add(1)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage()
+                .instance()
+                .set(&LISTING_COUNTER, &listing_id);
+
+            let listing = Listing {
+                listing_id,
+                invoice_id,
+                seller: seller.clone(),
+                token,
+                kind,
+                amount_or_bps,
+                price,
+                created_at: env.ledger().timestamp(),
+                status: ListingStatus::Open,
+            };
+
+            // Store listing data in persistent storage.
+            let mut all_listings: Map<u64, Listing> = env
+                .storage()
+                .persistent()
+                .get(&LISTING_DATA)
+                .unwrap_or_else(|| Map::new(&env));
+            all_listings.set(listing_id, listing);
+            env.storage()
+                .persistent()
+                .set(&LISTING_DATA, &all_listings);
+            env.storage().persistent().extend_ttl(
+                &LISTING_DATA,
+                ACTIVE_INVOICE_TTL,
+                ACTIVE_INVOICE_TTL,
+            );
+
+            // Update invoice index.
+            let mut updated_inv = existing;
+            updated_inv.push_back(listing_id);
+            inv_map.set(invoice_id, updated_inv);
+            env.storage().instance().set(&LISTING_IDS_INV, &inv_map);
+
+            // Update seller index.
+            let mut sel_map: Map<Address, Vec<u64>> = env
+                .storage()
+                .instance()
+                .get(&LISTING_IDS_SELLER)
+                .unwrap_or_else(|| Map::new(&env));
+            let mut seller_vec: Vec<u64> = sel_map
+                .get(seller.clone())
+                .unwrap_or_else(|| Vec::new(&env));
+            seller_vec.push_back(listing_id);
+            sel_map.set(seller.clone(), seller_vec);
+            env.storage()
+                .instance()
+                .set(&LISTING_IDS_SELLER, &sel_map);
+
+            env.events().publish(
+                (EVT, symbol_short!("lst_open")),
+                (listing_id, invoice_id, seller, amount_or_bps, price),
+            );
+            Ok(listing_id)
+        })
+    }
+
+    /// Cancel an open listing. Only the original seller may cancel.
+    pub fn cancel_listing(env: Env, seller: Address, listing_id: u64) -> Result<(), PoolError> {
+        seller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        non_reentrant!(&env, {
+            
+            let mut all_listings: Map<u64, Listing> = env
+                .storage()
+                .persistent()
+                .get(&LISTING_DATA)
+                .ok_or(PoolError::ListingNotFound)?;
+            let mut listing: Listing = all_listings
+                .get(listing_id)
+                .ok_or(PoolError::ListingNotFound)?;
+
+            if listing.seller != seller {
+                return Err(PoolError::ListingNotSeller);
+            }
+            if listing.status != ListingStatus::Open {
+                return Err(PoolError::ListingNotOpen);
+            }
+
+            listing.status = ListingStatus::Cancelled;
+            all_listings.set(listing_id, listing.clone());
+            env.storage().persistent().set(&LISTING_DATA, &all_listings);
+
+            env.events().publish(
+                (EVT, symbol_short!("lst_cncl")),
+                (listing_id, listing.invoice_id, seller),
+            );
+            Ok(())
+        })
+    }
+
+    /// Buy an open listing. The buyer's `available` balance in the listing's
+    /// token is debited by `listing.price`; the seller's claim (CoFundShare
+    /// bps or deployed principal slice) is atomically transferred to the buyer.
+    ///
+    /// Compliance, KYC, and concentration-cap checks are enforced on the buyer.
+    pub fn buy_listing(
+        env: Env,
+        buyer: Address,
+        listing_id: u64,
+    ) -> Result<(), PoolError> {
+        buyer.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_compliance_cleared(&env, &buyer)?;
+
+        non_reentrant!(&env, {
+            
+            let mut all_listings: Map<u64, Listing> = env
+                .storage()
+                .persistent()
+                .get(&LISTING_DATA)
+                .ok_or(PoolError::ListingNotFound)?;
+            let mut listing: Listing = all_listings
+                .get(listing_id)
+                .ok_or(PoolError::ListingNotFound)?;
+
+            if listing.status != ListingStatus::Open {
+                return Err(PoolError::ListingNotOpen);
+            }
+            if listing.seller == buyer {
+                return Err(PoolError::Unauthorized);
+            }
+
+            // KYC check on buyer.
+            let kyc_required: bool = env
+                .storage()
+                .instance()
+                .get(&DataKey::KycRequired)
+                .unwrap_or(false);
+            if kyc_required {
+                let status: KycStatus = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::InvestorKyc(buyer.clone()))
+                    .unwrap_or(KycStatus::NotRequested);
+                match status {
+                    KycStatus::Approved => {}
+                    KycStatus::NotRequested => return Err(PoolError::KycNotRequested),
+                    KycStatus::Rejected => return Err(PoolError::KycRejected),
+                }
+            }
+
+            let token = listing.token.clone();
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+
+            // Buyer must have enough available balance to pay the price.
+            let buyer_pos_key = DataKey::InvestorPosition(buyer.clone(), token.clone());
+            let mut buyer_pos: InvestorPosition = env
+                .storage()
+                .persistent()
+                .get(&buyer_pos_key)
+                .unwrap_or(InvestorPosition {
+                    deposited: 0,
+                    available: 0,
+                    deployed: 0,
+                    earned: 0,
+                    deposit_count: 0,
+                    loyalty_start_at: 0,
+                });
+            if buyer_pos.available < listing.price {
+                return Err(PoolError::InvalidAmount);
+            }
+
+            // Concentration cap: buying deployed capital increases the buyer's
+            // effective share of the pool. Check against max_single_investor_bps.
+            let config = get_config_cached(&env)?;
+            if config.max_single_investor_bps < BPS_DENOM {
+                let buyer_new_deployed = buyer_pos
+                    .deployed
+                    .checked_add(listing.price)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let pool_value = tt.pool_value.max(1);
+                let share_bps =
+                    ((buyer_new_deployed as u128 * BPS_DENOM as u128) / pool_value as u128) as u32;
+                if share_bps > config.max_single_investor_bps {
+                    return Err(PoolError::ConcentrationLimitExceeded);
+                }
+            }
+
+            // Transfer the claim to the buyer.
+            match listing.kind {
+                ListingKind::CoFunding => {
+                    let record: FundedInvoice = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::FundedInvoice(listing.invoice_id))
+                        .ok_or(PoolError::InvoiceNotFound)?;
+                    let round_id = record.co_funding_round_id.ok_or(PoolError::InvalidAmount)?;
+
+                    let from_key =
+                        DataKey::CoFundShare(round_id, listing.seller.clone());
+                    let to_key = DataKey::CoFundShare(round_id, buyer.clone());
+
+                    let from_bps: u32 = env
+                        .storage()
+                        .persistent()
+                        .get(&from_key)
+                        .unwrap_or(0);
+                    let transfer_bps = listing.amount_or_bps as u32;
+                    if transfer_bps > from_bps {
+                        return Err(PoolError::InsufficientListingBalance);
+                    }
+                    let to_bps: u32 = env
+                        .storage()
+                        .persistent()
+                        .get(&to_key)
+                        .unwrap_or(0);
+
+                    let new_from = from_bps - transfer_bps;
+                    let new_to = to_bps
+                        .checked_add(transfer_bps)
+                        .ok_or(PoolError::AmountOverflow)?;
+
+                    if new_from == 0 {
+                        env.storage().persistent().remove(&from_key);
+                    } else {
+                        env.storage().persistent().set(&from_key, &new_from);
+                    }
+                    env.storage().persistent().set(&to_key, &new_to);
+
+                    // Keep round participant list in sync.
+                    if let Some(mut round) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, CoFundingRound>(&DataKey::CoFundingRound(round_id))
+                    {
+                        if new_from == 0 {
+                            remove_participant(&env, &mut round, &listing.seller);
+                        }
+                        if to_bps == 0 {
+                            if round.participants.len() >= MAX_CO_FUNDING_PARTICIPANTS {
+                                return Err(PoolError::CoFundingTooManyParticipants);
+                            }
+                            round.participants.push_back(buyer.clone());
+                        }
+                        env.storage()
+                            .persistent()
+                            .set(&DataKey::CoFundingRound(round_id), &round);
+                    }
+                }
+                ListingKind::SingleFunded => {
+                    // Move deployed principal slice from seller to buyer.
+                    let seller_pos_key =
+                        DataKey::InvestorPosition(listing.seller.clone(), token.clone());
+                    let mut seller_pos: InvestorPosition = env
+                        .storage()
+                        .persistent()
+                        .get(&seller_pos_key)
+                        .unwrap_or(InvestorPosition {
+                            deposited: 0,
+                            available: 0,
+                            deployed: 0,
+                            earned: 0,
+                            deposit_count: 0,
+                            loyalty_start_at: 0,
+                        });
+                    let transfer_amount = listing.amount_or_bps as i128;
+                    if seller_pos.deployed < transfer_amount {
+                        return Err(PoolError::InsufficientListingBalance);
+                    }
+                    seller_pos.deployed = seller_pos
+                        .deployed
+                        .checked_sub(transfer_amount)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    env.storage()
+                        .persistent()
+                        .set(&seller_pos_key, &seller_pos);
+
+                    buyer_pos.deployed = buyer_pos
+                        .deployed
+                        .checked_add(transfer_amount)
+                        .ok_or(PoolError::AmountOverflow)?;
+                }
+            }
+
+            // Debit buyer's available balance and credit seller.
+            buyer_pos.available = buyer_pos
+                .available
+                .checked_sub(listing.price)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().persistent().set(&buyer_pos_key, &buyer_pos);
+
+            let seller_pos_key =
+                DataKey::InvestorPosition(listing.seller.clone(), token.clone());
+            let mut seller_pos: InvestorPosition = env
+                .storage()
+                .persistent()
+                .get(&seller_pos_key)
+                .unwrap_or(InvestorPosition {
+                    deposited: 0,
+                    available: 0,
+                    deployed: 0,
+                    earned: 0,
+                    deposit_count: 0,
+                    loyalty_start_at: 0,
+                });
+            seller_pos.available = seller_pos
+                .available
+                .checked_add(listing.price)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage()
+                .persistent()
+                .set(&seller_pos_key, &seller_pos);
+
+            // Mark listing filled.
+            listing.status = ListingStatus::Filled;
+            all_listings.set(listing_id, listing.clone());
+            env.storage().persistent().set(&LISTING_DATA, &all_listings);
+
+            env.events().publish(
+                (EVT, symbol_short!("lst_buy")),
+                (
+                    listing_id,
+                    listing.invoice_id,
+                    listing.seller.clone(),
+                    buyer.clone(),
+                    listing.price,
+                ),
+            );
+            Ok(())
+        })
+    }
+
+    /// Read a single listing by ID. Returns `None` if not found.
+    pub fn get_listing(env: Env, listing_id: u64) -> Option<Listing> {
+        bump_instance(&env);
+        
+        let all_listings: Map<u64, Listing> = env
+            .storage()
+            .persistent()
+            .get(&LISTING_DATA)
+            .unwrap_or_else(|| Map::new(&env));
+        all_listings.get(listing_id)
+    }
+
+    /// List all listing IDs for a given invoice (open and closed).
+    pub fn list_listings_for_invoice(env: Env, invoice_id: u64) -> Vec<u64> {
+        bump_instance(&env);
+        
+        let inv_listings: Map<u64, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&LISTING_IDS_INV)
+            .unwrap_or_else(|| Map::new(&env));
+        inv_listings
+            .get(invoice_id)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// List all listing IDs created by a given seller (open and closed).
+    pub fn list_listings_for_investor(env: Env, seller: Address) -> Vec<u64> {
+        bump_instance(&env);
+        
+        let sel_listings: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&LISTING_IDS_SELLER)
+            .unwrap_or_else(|| Map::new(&env));
+        sel_listings
+            .get(seller)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 }
 

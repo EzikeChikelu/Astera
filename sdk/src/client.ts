@@ -29,6 +29,9 @@ export type {
   ProposalStatus,
   ActionPayload,
   Proposal,
+  Listing,
+  ListingStatus,
+  ListingKind,
 } from '../../packages/sdk/src/types';
 
 export * from './generated/tranche';

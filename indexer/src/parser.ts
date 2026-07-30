@@ -58,6 +58,14 @@ const ORACLE_REGISTRY_EVENT_TYPES = new Set([
   'unpaused',
 ]);
 
+// #1025: secondary market events emitted by the pool contract under the
+// "pool" topic.
+const SECONDARY_MARKET_EVENT_TYPES = new Set([
+  'lst_open',
+  'lst_cncl',
+  'lst_buy',
+]);
+
 // #867: compliance contract emits under the "COMPLY" topic
 const COMPLIANCE_EVENT_TYPES = new Set([
   'screened',
@@ -242,6 +250,14 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         case 'wd_cncl':
         case 'col_dep':
           if (isStellarAddress(value[0])) return value[0];
+          break;
+        // #1025: secondary market — seller is value[2], buyer is value[3]
+        case 'lst_open':
+        case 'lst_cncl':
+          if (isStellarAddress(value[2])) return value[2];
+          break;
+        case 'lst_buy':
+          if (isStellarAddress(value[3])) return value[3];
           break;
       }
     } else if (contractType === 'INVOICE') {

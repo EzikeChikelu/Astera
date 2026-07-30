@@ -110,6 +110,23 @@ export interface FundedInvoice {
 
 export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
 
+// #1025: secondary market
+export type ListingStatus = 'Open' | 'Filled' | 'Cancelled';
+export type ListingKind = 'CoFunding' | 'SingleFunded';
+
+export interface Listing {
+  listingId: bigint;
+  invoiceId: bigint;
+  seller: string;
+  token: string;
+  kind: ListingKind;
+  /** bps of CoFundShare (CoFunding) or raw token amount (SingleFunded) */
+  amountOrBps: bigint;
+  price: bigint;
+  createdAt: number;
+  status: ListingStatus;
+}
+
 export interface CoFundingRound {
   invoiceId: bigint;
   token: string;
