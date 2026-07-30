@@ -4475,7 +4475,8 @@ impl FundingPool {
     /// through the two-step proposal flow (`propose_operation` → wait →
     /// `execute_operation`). Calling it directly is rejected with
     /// `OperationRequiresProposal`.
-    pub fn seize_collateral(env: Env, admin: Address, _invoice_id: u64) -> Result<(), PoolError> {
+    pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) -> Result<(), PoolError> {
+        let _ = invoice_id;
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
