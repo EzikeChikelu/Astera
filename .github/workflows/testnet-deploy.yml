@@ -22,7 +22,7 @@ jobs:
         run: cargo install --locked stellar-cli@22.6.0
 
       - name: Build contracts
-        run: cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share -p governance
+        run: cargo build --locked --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share -p governance
 
       - name: Deploy contracts to testnet
         run: |

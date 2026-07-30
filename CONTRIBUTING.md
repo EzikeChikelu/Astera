@@ -72,6 +72,11 @@ git remote add upstream https://github.com/astera-hq/Astera.git
 git checkout -b feat/your-feature-name
 ```
 
+> **Cargo.lock**: The workspace `Cargo.lock` is committed to the repository for
+> reproducible builds and security audits. If you update any contract dependency
+> (via `cargo add`, `cargo update`, or editing `Cargo.toml`), commit the resulting
+> `Cargo.lock` changes alongside your code changes.
+
 ### Step 4: Set up your environment
 
 Follow the **Development Environment Setup** section below to install Rust,
