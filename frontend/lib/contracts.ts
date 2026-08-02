@@ -453,6 +453,65 @@ export async function getPoolBalance(token: string): Promise<bigint> {
   return BigInt(String(scValToNative(result!.retval) ?? 0));
 }
 
+/**
+ * #807: pool treasury address for protocol revenue withdrawals, or `null` when
+ * the pool has not been configured with one (`TreasuryNotConfigured`).
+ *
+ * Only `TreasuryNotConfigured` (a simulation error) and transport failures
+ * return `null`, letting the dashboard degrade gracefully (callers also
+ * `.catch(() => null)`).
+ */
+export async function getTreasuryAddress(): Promise<string | null> {
+  try {
+    const sim = await simulateTx(
+      POOL_CONTRACT_ID,
+      'get_treasury',
+      [],
+      'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+    );
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      return null;
+    }
+    const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+    if (!result?.retval) return null;
+    return scValToNative(result.retval) as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #807: unclaimed (pending) protocol fee revenue held in the pool contract for
+ * a token — the amount `withdraw_revenue` is allowed to move to the treasury.
+ */
+export async function getProtocolRevenue(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_protocol_revenue',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval) ?? 0));
+}
+
+/**
+ * #807: live on-chain balance of `address` in the given token contract, read
+ * directly from the token (used for the treasury address's balance).
+ */
+export async function getTokenBalanceOf(token: string, address: string): Promise<bigint> {
+  const sim = await simulateTx(
+    token,
+    'balance',
+    [new Address(address).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval) ?? 0));
+}
+
 export async function getTokenDepositCap(token: string): Promise<bigint> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
