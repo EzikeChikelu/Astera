@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, EnvTestConfig, Ledger},
-    Address, Env, String,
+    testutils::{Address as _, EnvTestConfig, Events as _, Ledger},
+    Address, Env, String, Symbol, TryFromVal, Val,
 };
 use std::panic;
 
@@ -88,17 +88,6 @@ fn advance_past_operation_delay(env: &Env, pool_client: &pool::Client<'_>) {
     env.ledger().with_mut(|l| l.timestamp += delay + 1);
 }
 
-fn propose_and_execute(
-    env: &Env,
-    pool_client: &pool::Client<'_>,
-    admin: &Address,
-    operation: pool::AdminOperation,
-) {
-    let proposal_id = pool_client.propose_operation(admin, &operation);
-    advance_past_operation_delay(env, pool_client);
-    pool_client.execute_operation(admin, &proposal_id);
-}
-
 fn propose_and_execute_set_collateral_config(
     env: &Env,
     pool_client: &pool::Client<'_>,
@@ -164,7 +153,13 @@ fn test_complete_invoice_lifecycle() {
         &String::from_str(&env, "Pool Shares"),
         &String::from_str(&env, "POOL"),
     );
-    initialize_pool(&pool_client, &actors.admin, &usdc_id, &share_id, &invoice_id);
+    initialize_pool(
+        &pool_client,
+        &actors.admin,
+        &usdc_id,
+        &share_id,
+        &invoice_id,
+    );
     credit_client.initialize(&actors.admin, &invoice_id, &pool_id);
 
     // Mint tokens to investor and SME
@@ -174,29 +169,38 @@ fn test_complete_invoice_lifecycle() {
         .mint(&actors.sme, &10_000_000_000i128);
 
     // Step 1: Investor deposits into pool
-    pool_client.deposit(&actors.investor, &usdc_id, &5_000_000_000i128);
-    let totals = pool_client.get_token_totals(&usdc_id);
-    assert_eq!(totals.pool_value, 5_000_000_000i128);
-    // Assert deposit event includes depositor and token
+    pool_client.deposit(&actors.investor, &usdc_id, &5_000_000_000i128, &None);
+    // Assert deposit event includes depositor and token. env.events().all()
+    // only returns events from the most recent invocation, so this must be
+    // checked before any other call (e.g. get_token_totals) intervenes.
     let events = env.events().all();
     let deposit_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("POOL"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("deposit"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("pool"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("deposit"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(!deposit_events.is_empty(), "deposit event must be emitted");
     assert!(
-        deposit_events[0].1.len() >= 5,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &deposit_events[0].2)
+            .unwrap()
+            .len()
+            >= 5,
         "deposit event must include (investor, token, amount, shares, timestamp)"
     );
+    let totals = pool_client.get_token_totals(&usdc_id);
+    assert_eq!(totals.pool_value, 5_000_000_000i128);
 
     // Step 2: SME creates invoice
     let due_date = env.ledger().timestamp() + 30 * 86_400; // 30 days
@@ -220,31 +224,38 @@ fn test_complete_invoice_lifecycle() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
-    let invoice = invoice_client.get_invoice(&inv_id);
-    assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
-
-    // Assert invoice funded event includes pool address
+    // Assert invoice funded event includes pool address. Checked before any
+    // other call (e.g. get_invoice) so the most-recent-invocation event
+    // buffer still reflects mark_funded.
     let events = env.events().all();
     let funded_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("INVOICE"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("funded"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("invoice"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("funded"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(!funded_events.is_empty(), "funded event must be emitted");
     assert!(
-        funded_events[0].1.len() >= 2,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &funded_events[0].2)
+            .unwrap()
+            .len()
+            >= 2,
         "funded event must include (id, pool, timestamp)"
     );
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
 
     // Verify pool state
     let totals = pool_client.get_token_totals(&usdc_id);
@@ -260,46 +271,61 @@ fn test_complete_invoice_lifecycle() {
     let repaid_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("POOL"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("repaid"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("pool"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("repaid"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(!repaid_events.is_empty(), "repaid event must be emitted");
     assert!(
-        repaid_events[0].1.len() >= 5,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &repaid_events[0].2)
+            .unwrap()
+            .len()
+            >= 5,
         "repaid event must include (invoice_id, payer, principal, interest, timestamp)"
     );
 
     // Step 5: Verify invoice is marked as paid
     invoice_client.mark_paid(&inv_id, &pool_id);
-    let invoice = invoice_client.get_invoice(&inv_id);
-    assert_eq!(invoice.status, invoice::InvoiceStatus::Paid);
-    // Assert paid event includes pool address
+    // Assert paid event includes pool address. Checked before get_invoice so
+    // the most-recent-invocation event buffer still reflects mark_paid.
     let events = env.events().all();
     let paid_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("INVOICE"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("paid"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("invoice"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("paid"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(!paid_events.is_empty(), "paid event must be emitted");
     assert!(
-        paid_events[0].1.len() >= 3,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &paid_events[0].2)
+            .unwrap()
+            .len()
+            >= 3,
         "paid event must include (id, pool, timestamp)"
     );
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Paid);
 
     // Step 6: Record payment in credit score
     credit_client.record_payment(
@@ -316,19 +342,26 @@ fn test_complete_invoice_lifecycle() {
     let payment_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("CREDIT"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("payment"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("credit"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("payment"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(!payment_events.is_empty(), "payment event must be emitted");
     assert!(
-        payment_events[0].1.len() >= 6,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &payment_events[0].2)
+            .unwrap()
+            .len()
+            >= 6,
         "payment event must include (caller, sme, invoice_id, status, score, timestamp)"
     );
 
@@ -346,14 +379,18 @@ fn test_complete_invoice_lifecycle() {
     let withdraw_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            let topics = e.0.clone();
+            let topics = e.1.clone();
             topics.len() >= 2
-                && topics
-                    .get(0)
-                    .map_or(false, |s| s.to_string().contains("POOL"))
-                && topics
-                    .get(1)
-                    .map_or(false, |s| s.to_string().contains("withdraw"))
+                && topics.get(0).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("pool"))
+                        .unwrap_or(false)
+                })
+                && topics.get(1).map_or(false, |s| {
+                    Symbol::try_from_val(&env, &s)
+                        .map(|sym| sym.to_string().contains("withdraw"))
+                        .unwrap_or(false)
+                })
         })
         .collect();
     assert!(
@@ -361,7 +398,10 @@ fn test_complete_invoice_lifecycle() {
         "withdraw event must be emitted"
     );
     assert!(
-        withdraw_events[0].1.len() >= 5,
+        soroban_sdk::Vec::<Val>::try_from_val(&env, &withdraw_events[0].2)
+            .unwrap()
+            .len()
+            >= 5,
         "withdraw event must include (investor, token, amount, shares, timestamp)"
     );
 
@@ -459,12 +499,11 @@ fn test_full_borrower_lifecycle() {
     // Step 3: an investor supplies pool liquidity, then the pool funds the
     // invoice — the borrower receives the principal and pool liquidity drops
     // by the same amount.
-    pool_client.deposit(&investor, &usdc_id, &20_000i128);
+    pool_client.deposit(&investor, &usdc_id, &20_000i128, &None);
     let pool_available_before_funding = pool_client.available_liquidity(&usdc_id);
     let sme_before_funding = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
 
     pool_client.fund_invoice(&admin, &inv_id, &principal, &sme, &due_date, &usdc_id);
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,
@@ -495,7 +534,9 @@ fn test_full_borrower_lifecycle() {
     // borrower's collateral.
     let total_due = pool_client.estimate_repayment(&inv_id, &None);
     let sme_before_repay = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&sme);
-    let pool_value_before_repay = pool_client.get_token_totals(&usdc_id).pool_value;
+    let totals_before_repay = pool_client.get_token_totals(&usdc_id);
+    let pool_value_before_repay = totals_before_repay.pool_value;
+    let fee_revenue_before_repay = totals_before_repay.total_fee_revenue;
 
     pool_client.repay_invoice(&inv_id, &sme, &total_due);
     invoice_client.mark_paid(&inv_id, &pool_id);
@@ -506,9 +547,14 @@ fn test_full_borrower_lifecycle() {
     );
     let totals_after_repay = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals_after_repay.total_deployed, 0);
+    // pool_value only absorbs the interest portion of the repayment — the
+    // principal was already counted in NAV at funding time (it just moved
+    // from the "deployed" to "available" bucket), and the factoring fee
+    // portion goes to protocol_revenue/total_fee_revenue instead.
+    let factoring_fee = totals_after_repay.total_fee_revenue - fee_revenue_before_repay;
     assert_eq!(
         totals_after_repay.pool_value,
-        pool_value_before_repay + total_due
+        pool_value_before_repay + total_due - principal - factoring_fee
     );
     let collateral_after = pool_client.get_collateral_deposit(&inv_id).unwrap();
     assert!(collateral_after.settled);
@@ -579,7 +625,7 @@ fn test_default_with_grace_period() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&investor, &10_000_000_000i128);
 
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
@@ -600,7 +646,6 @@ fn test_default_with_grace_period() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Move past due date but within grace period
     env.ledger()
@@ -678,8 +723,8 @@ fn test_multiple_invoices_yield_distribution() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme2, &10_000_000_000i128);
 
     // Two investors deposit
-    pool_client.deposit(&investor1, &usdc_id, &6_000_000_000i128);
-    pool_client.deposit(&investor2, &usdc_id, &4_000_000_000i128);
+    pool_client.deposit(&investor1, &usdc_id, &6_000_000_000i128, &None);
+    pool_client.deposit(&investor2, &usdc_id, &4_000_000_000i128, &None);
 
     let totals = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals.pool_value, 10_000_000_000i128);
@@ -723,9 +768,6 @@ fn test_multiple_invoices_yield_distribution() {
         &due_date,
         &usdc_id,
     );
-
-    invoice_client.mark_funded(&inv1, &pool_id);
-    invoice_client.mark_funded(&inv2, &pool_id);
 
     // Both SMEs repay
     env.ledger().with_mut(|l| l.timestamp += 20 * 86_400);
@@ -820,7 +862,7 @@ fn test_state_consistency() {
         .mint(&investor, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
@@ -847,7 +889,6 @@ fn test_state_consistency() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Verify pool state consistency
     let totals = pool_client.get_token_totals(&usdc_id);
@@ -983,7 +1024,7 @@ fn test_collateral_post_and_release() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&sme, &(principal * 2 + required_col));
 
-    pool_client.deposit(&investor, &usdc_id, &10_000i128);
+    pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
 
     // SME posts collateral
     let sme_balance_before_collateral =
@@ -1073,7 +1114,7 @@ fn test_collateral_seize_on_default() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
 
-    pool_client.deposit(&investor, &usdc_id, &10_000i128);
+    pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
     pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
@@ -1088,7 +1129,6 @@ fn test_collateral_seize_on_default() {
     );
     assert_eq!(inv_id, 1);
     pool_client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
-    invoice_client.mark_funded(&1u64, &pool_id);
 
     // Advance past due date without repayment — mark as defaulted
     env.ledger()
@@ -1440,7 +1480,7 @@ fn test_collateral_not_required_below_threshold() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &(principal * 2));
 
-    pool_client.deposit(&investor, &usdc_id, &10_000i128);
+    pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
 
     // Fund without collateral — must succeed
     let due_date = env.ledger().timestamp() + 30 * 86_400;
@@ -1547,7 +1587,7 @@ fn test_partial_repayment_lifecycle() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &20_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &20_000i128);
 
-    pool_client.deposit(&investor, &usdc_id, &20_000i128);
+    pool_client.deposit(&investor, &usdc_id, &20_000i128, &None);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     pool_client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
@@ -1639,7 +1679,7 @@ fn test_within_grace_period_not_defaultable() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&investor, &10_000_000_000i128);
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
     pool_client.fund_invoice(
         &admin,
         &inv_id,
@@ -1648,7 +1688,6 @@ fn test_within_grace_period_not_defaultable() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Advance to just past due date but within grace period
     env.ledger()
@@ -1733,11 +1772,11 @@ fn test_multi_token_deposit_and_yield() {
         .mint(&investor_b, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
-    pool_client.deposit(&investor_a, &usdc_id, &1_000_000_000i128);
+    pool_client.deposit(&investor_a, &usdc_id, &1_000_000_000i128, &None);
     let totals_usdc = pool_client.get_token_totals(&usdc_id);
     assert_eq!(totals_usdc.pool_value, 1_000_000_000i128);
 
-    pool_client.deposit(&investor_b, &eurc_id, &1_000_000_000i128);
+    pool_client.deposit(&investor_b, &eurc_id, &1_000_000_000i128, &None);
     let totals_eurc = pool_client.get_token_totals(&eurc_id);
     assert_eq!(totals_eurc.pool_value, 1_080_000_000i128);
 
@@ -1760,7 +1799,6 @@ fn test_multi_token_deposit_and_yield() {
     );
 
     pool_client.fund_invoice(&admin, &inv_id, &500_000_000i128, &sme, &due_date, &usdc_id);
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     env.ledger().with_mut(|l| l.timestamp += 25 * 86_400);
     let amount_due = pool_client.estimate_repayment(&inv_id, &None);
@@ -1846,7 +1884,7 @@ fn test_token_removal_with_zero_balances() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
         .mint(&investor, &10_000_000_000i128);
-    pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
+    pool_client.deposit(&investor, &eurc_id, &100_000_000i128, &None);
     let eurc_shares = share::Client::new(&env, &share_eurc_id).balance(&investor);
     pool_client.withdraw(&investor, &eurc_id, &eurc_shares);
 
@@ -1915,7 +1953,7 @@ fn test_token_removal_blocked_with_active_deposits() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &eurc_id)
         .mint(&investor, &10_000_000_000i128);
-    pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
+    pool_client.deposit(&investor, &eurc_id, &100_000_000i128, &None);
 
     // #742: RemoveToken now requires the propose/execute timelock flow; the
     // active-balances check (error #27) happens at execute time, not propose time.
@@ -1978,7 +2016,7 @@ fn test_oracle_verified_funding_flow() {
         .mint(&investor, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr).mint(&sme, &10_000_000_000i128);
 
-    pool_client.deposit(&investor, &usdc_addr, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_addr, &5_000_000_000i128, &None);
 
     // Create invoice — starts in AwaitingVerification because oracle is configured
     let due_date = env.ledger().timestamp() + 30 * 86_400;
@@ -2024,7 +2062,6 @@ fn test_oracle_verified_funding_flow() {
         &due_date,
         &usdc_addr,
     );
-    invoice_client.mark_funded(&inv_id, &pool_addr);
 
     let invoice = invoice_client.get_invoice(&inv_id);
     assert_eq!(invoice.status, invoice::InvoiceStatus::Funded);
@@ -2051,7 +2088,7 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender2, &10_000_000_000i128);
 
     // Initial deposit from lender1
-    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128, &None);
     let initial_pool_value = pool_client.get_token_totals(&usdc_id).pool_value;
     assert_eq!(initial_pool_value, 5_000_000_000i128);
 
@@ -2060,7 +2097,7 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     // Transaction 2: lender1 withdraws 500 USDC worth of shares
 
     // Execute deposit first
-    pool_client.deposit(&lender2, &usdc_id, &1_000_000_000i128);
+    pool_client.deposit(&lender2, &usdc_id, &1_000_000_000i128, &None);
 
     // Same ledger - no sequence number increment
     // Execute withdrawal immediately after
@@ -2086,12 +2123,12 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     soroban_sdk::token::StellarAssetClient::new(&env2, &usdc_id2)
         .mint(&lender2_alt, &10_000_000_000i128);
 
-    pool_client2.deposit(&lender1_alt, &usdc_id2, &5_000_000_000i128);
+    pool_client2.deposit(&lender1_alt, &usdc_id2, &5_000_000_000i128, &None);
 
     // Reverse order: withdraw then deposit (same ledger)
     let shares_alt = share_client2.balance(&lender1_alt) / 10;
     pool_client2.withdraw(&lender1_alt, &usdc_id2, &shares_alt);
-    pool_client2.deposit(&lender2_alt, &usdc_id2, &1_000_000_000i128);
+    pool_client2.deposit(&lender2_alt, &usdc_id2, &1_000_000_000i128, &None);
 
     // Should have same final value regardless of ordering
     let final_totals2 = pool_client2.get_token_totals(&usdc_id2);
@@ -2144,7 +2181,7 @@ fn test_deposit_during_active_funding() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // Initial deposit from lender1
-    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128, &None);
     let shares_lender1_initial = share_client.balance(&lender1);
 
     // Create and fund invoice
@@ -2168,10 +2205,9 @@ fn test_deposit_during_active_funding() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // While invoice is active, lender2 deposits (same ledger)
-    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128);
+    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128, &None);
     let shares_lender2 = share_client.balance(&lender2);
 
     // Verify pool accounting
@@ -2271,7 +2307,7 @@ fn test_withdraw_during_repayment() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // Lender deposits
-    pool_client.deposit(&lender, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&lender, &usdc_id, &5_000_000_000i128, &None);
 
     // Create and fund invoice
     let due_date = env.ledger().timestamp() + 30 * 86_400;
@@ -2293,7 +2329,6 @@ fn test_withdraw_during_repayment() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Move time forward
     env.ledger().with_mut(|l| l.timestamp += 20 * 86_400);
@@ -2370,9 +2405,9 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // All lenders deposit equal amounts
-    pool_client.deposit(&lender1, &usdc_id, &3_000_000_000i128);
-    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128);
-    pool_client.deposit(&lender3, &usdc_id, &4_000_000_000i128);
+    pool_client.deposit(&lender1, &usdc_id, &3_000_000_000i128, &None);
+    pool_client.deposit(&lender2, &usdc_id, &3_000_000_000i128, &None);
+    pool_client.deposit(&lender3, &usdc_id, &4_000_000_000i128, &None);
 
     let total_pool = pool_client.get_token_totals(&usdc_id).pool_value;
     assert_eq!(total_pool, 10_000_000_000i128);
@@ -2397,7 +2432,6 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
 
     // Verify deployment
     let totals = pool_client.get_token_totals(&usdc_id);
@@ -2516,9 +2550,9 @@ fn test_withdrawal_queue_drains_across_multiple_investors_via_repayments() {
     let deposit1 = 2_000_000_000i128;
     let deposit2 = 3_000_000_000i128;
     let deposit3 = 5_000_000_000i128;
-    pool_client.deposit(&lender1, &usdc_id, &deposit1);
-    pool_client.deposit(&lender2, &usdc_id, &deposit2);
-    pool_client.deposit(&lender3, &usdc_id, &deposit3);
+    pool_client.deposit(&lender1, &usdc_id, &deposit1, &None);
+    pool_client.deposit(&lender2, &usdc_id, &deposit2, &None);
+    pool_client.deposit(&lender3, &usdc_id, &deposit3, &None);
     assert_eq!(
         pool_client.get_token_totals(&usdc_id).pool_value,
         deposit1 + deposit2 + deposit3
@@ -2543,7 +2577,6 @@ fn test_withdrawal_queue_drains_across_multiple_investors_via_repayments() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(pool_client.available_liquidity(&usdc_id), 1_000_000_000i128);
 
     // Lender1 and lender2 each request their *entire* position — both far exceed the
@@ -2651,7 +2684,7 @@ fn test_co_funding_round_end_to_end_with_credit_score() {
     for lender in [&lender1, &lender2, &lender3] {
         soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
             .mint(lender, &10_000_000_000i128);
-        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128);
+        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128, &None);
     }
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr).mint(&sme, &10_000_000_000i128);
 
@@ -2795,7 +2828,7 @@ fn test_co_funding_round_expires_and_refunds_then_pool_still_usable() {
     for lender in [&lender1, &lender2] {
         soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
             .mint(lender, &10_000_000_000i128);
-        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128);
+        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128, &None);
     }
 
     let inv_id = 42u64;
@@ -2839,7 +2872,7 @@ fn test_co_funding_round_expires_and_refunds_then_pool_still_usable() {
     // expired co-funding round — nothing should be left in a stuck state.
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
         .mint(&lender1, &5_000_000_000i128);
-    pool_client.deposit(&lender1, &usdc_addr, &5_000_000_000i128);
+    pool_client.deposit(&lender1, &usdc_addr, &5_000_000_000i128, &None);
     pool_client.fund_invoice(
         &admin,
         &43u64,
@@ -2932,7 +2965,7 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&investor, &10_000_000_000i128);
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
@@ -2998,7 +3031,6 @@ fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,
         invoice::InvoiceStatus::Funded
@@ -3050,7 +3082,7 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&investor, &10_000_000_000i128);
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
 
     invoice_client.set_oracle(&admin, &Address::generate(&env));
     registry_client.initialize(&admin, &usdc_id, &1_000i128);
@@ -3127,7 +3159,6 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,
         invoice::InvoiceStatus::Funded
@@ -3218,7 +3249,7 @@ fn test_credit_score_attestation_lifecycle_alongside_normal_pool_activity() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&investor, &10_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
-    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
 
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
@@ -3238,7 +3269,6 @@ fn test_credit_score_attestation_lifecycle_alongside_normal_pool_activity() {
         &due_date,
         &usdc_id,
     );
-    invoice_client.mark_funded(&inv_id, &pool_id);
     assert_eq!(
         invoice_client.get_invoice(&inv_id).status,
         invoice::InvoiceStatus::Funded

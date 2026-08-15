@@ -58,12 +58,7 @@ pub fn distribute_waterfall_repayment(
     (senior_amount, junior_amount)
 }
 
-pub fn allocate_loss(
-    env: &Env,
-    token: Address,
-    invoice_id: u64,
-    shortfall: i128,
-) {
+pub fn allocate_loss(env: &Env, token: Address, invoice_id: u64, shortfall: i128) {
     let mut pool: TranchePool = env
         .storage()
         .instance()

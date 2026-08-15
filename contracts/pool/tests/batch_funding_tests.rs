@@ -78,7 +78,7 @@ fn seed_liquidity(env: &Env, client: &FundingPoolClient<'_>, token: &Address, am
     for _ in 0..5 {
         let investor = Address::generate(env);
         token_client.mint(&investor, &amount);
-        client.deposit(&investor, token, &amount);
+        client.deposit(&investor, token, &amount, &None);
     }
 }
 
@@ -94,7 +94,7 @@ fn test_fund_multiple_invoices_duplicate_ids_accumulate_principal() {
     // Deposit enough for both fundings
     let token_client = token::StellarAssetClient::new(&env, &token);
     token_client.mint(&investor, &5_000_000);
-    client.deposit(&investor, &token, &5_000_000);
+    client.deposit(&investor, &token, &5_000_000, &None);
 
     // Create a batch with duplicate invoice IDs — partial funding
     let mut requests: Vec<FundingRequest> = Vec::new(&env);

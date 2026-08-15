@@ -107,18 +107,24 @@ fn test_screening_history_append_only_multi_step() {
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     let target = Address::generate(&env);
-    let expires = 1_000_000u64 + 86_400 * 30;
+    let interval = client.get_rescreening_interval();
 
-    // cleared → flagged → re-cleared
+    // cleared → flagged → re-cleared. Each step is a distinct rescreening of
+    // the same subject by the same caller, so time must advance past the
+    // rescreening cooldown between submissions (see
+    // `test_rescreening_interval_enforced` in screener_tests.rs).
+    let now = env.ledger().timestamp();
     client.submit_screening_result(
         &admin,
         &target,
         &ComplianceStatus::Cleared,
         &0u32,
         &RiskTier::Low,
-        &expires,
+        &(now + 86_400 * 30),
         &String::from_str(&env, "a"),
     );
+
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
     client.submit_screening_result(
         &admin,
         &target,
@@ -128,13 +134,16 @@ fn test_screening_history_append_only_multi_step() {
         &0u64,
         &String::from_str(&env, "b"),
     );
+
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
+    let now = env.ledger().timestamp();
     client.submit_screening_result(
         &admin,
         &target,
         &ComplianceStatus::Cleared,
         &0u32,
         &RiskTier::Medium,
-        &expires,
+        &(now + 86_400 * 30),
         &String::from_str(&env, "c"),
     );
 

@@ -2,7 +2,10 @@
 
 // #1025: secondary market for pool positions and co-funding shares.
 
-use pool::{FundingPool, FundingPoolClient, ListingKind, ListingStatus, OpenCoFundingRequest, PoolError};
+use pool::{
+    DataKey, FundingPool, FundingPoolClient, InvestorPosition, ListingKind, ListingStatus,
+    OpenCoFundingRequest, PoolError,
+};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -84,6 +87,19 @@ fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
     token::StellarAssetClient::new(env, token_id).mint(to, &amount);
 }
 
+fn available_of(env: &Env, pool_id: &Address, investor: &Address, token: &Address) -> i128 {
+    env.as_contract(pool_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, InvestorPosition>(&DataKey::InvestorPosition(
+                investor.clone(),
+                token.clone(),
+            ))
+            .map(|p| p.available)
+            .unwrap_or(0)
+    })
+}
+
 /// Helper: open + fill a co-funding round and return (round_id, investor, bps).
 fn setup_filled_cofund_round(
     env: &Env,
@@ -132,9 +148,13 @@ fn test_list_cofund_position_creates_listing() {
     let bps = client.get_co_fund_share(&invoice_id, &investor);
     assert!(bps > 0);
 
-    let listing_id = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &1_000i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &1_000i128,
+    );
 
     let listing = client.get_listing(&listing_id).unwrap();
     assert_eq!(listing.invoice_id, invoice_id);
@@ -176,7 +196,10 @@ fn test_list_position_zero_price_rejected() {
         &(bps as u64),
         &0i128,
     );
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::InvalidAmount.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::InvalidAmount.into()
+    );
 }
 
 #[test]
@@ -210,11 +233,15 @@ fn test_cancel_listing_by_seller_succeeds() {
     let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &500i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &500i128,
+    );
 
-    client.cancel_listing(&investor, &listing_id).unwrap();
+    client.cancel_listing(&investor, &listing_id);
 
     let listing = client.get_listing(&listing_id).unwrap();
     assert_eq!(listing.status, ListingStatus::Cancelled);
@@ -228,13 +255,20 @@ fn test_cancel_listing_by_non_seller_rejected() {
     let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &500i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &500i128,
+    );
 
     let stranger = Address::generate(&env);
     let result = client.try_cancel_listing(&stranger, &listing_id);
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::ListingNotSeller.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::ListingNotSeller.into()
+    );
 }
 
 #[test]
@@ -245,13 +279,20 @@ fn test_cancel_already_cancelled_listing_rejected() {
     let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &500i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &500i128,
+    );
 
-    client.cancel_listing(&investor, &listing_id).unwrap();
+    client.cancel_listing(&investor, &listing_id);
     let result = client.try_cancel_listing(&investor, &listing_id);
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::ListingNotOpen.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::ListingNotOpen.into()
+    );
 }
 
 // ── buy_listing ──────────────────────────────────────────────────────────────
@@ -266,19 +307,23 @@ fn test_buy_cofund_listing_transfers_share_and_price() {
     let seller_bps = client.get_co_fund_share(&invoice_id, &seller);
     let price = 800i128;
 
-    let listing_id = client
-        .list_position(&seller, &invoice_id, &ListingKind::CoFunding, &(seller_bps as u64), &price)
-        .unwrap();
+    let listing_id = client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(seller_bps as u64),
+        &price,
+    );
 
     // Buyer deposits funds so they have available balance.
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 2_000);
     client.deposit(&buyer, &usdc, &2_000i128, &None);
 
-    let buyer_pos_before = client.get_position(&buyer, &usdc).unwrap();
-    let seller_pos_before = client.get_position(&seller, &usdc).unwrap();
+    let buyer_available_before = available_of(&env, &client.address, &buyer, &usdc);
+    let seller_available_before = available_of(&env, &client.address, &seller, &usdc);
 
-    client.buy_listing(&buyer, &listing_id).unwrap();
+    client.buy_listing(&buyer, &listing_id);
 
     // Listing is now Filled.
     let listing = client.get_listing(&listing_id).unwrap();
@@ -291,10 +336,10 @@ fn test_buy_cofund_listing_transfers_share_and_price() {
     assert_eq!(seller_bps_after, 0);
 
     // Buyer's available balance decreased by price; seller's increased.
-    let buyer_pos_after = client.get_position(&buyer, &usdc).unwrap();
-    let seller_pos_after = client.get_position(&seller, &usdc).unwrap();
-    assert_eq!(buyer_pos_after.available, buyer_pos_before.available - price);
-    assert_eq!(seller_pos_after.available, seller_pos_before.available + price);
+    let buyer_available_after = available_of(&env, &client.address, &buyer, &usdc);
+    let seller_available_after = available_of(&env, &client.address, &seller, &usdc);
+    assert_eq!(buyer_available_after, buyer_available_before - price);
+    assert_eq!(seller_available_after, seller_available_before + price);
 }
 
 #[test]
@@ -305,17 +350,24 @@ fn test_buy_cancelled_listing_rejected() {
     let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &seller);
-    let listing_id = client
-        .list_position(&seller, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &500i128)
-        .unwrap();
-    client.cancel_listing(&seller, &listing_id).unwrap();
+    let listing_id = client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &500i128,
+    );
+    client.cancel_listing(&seller, &listing_id);
 
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 1_000);
     client.deposit(&buyer, &usdc, &1_000i128, &None);
 
     let result = client.try_buy_listing(&buyer, &listing_id);
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::ListingNotOpen.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::ListingNotOpen.into()
+    );
 }
 
 #[test]
@@ -326,9 +378,13 @@ fn test_seller_cannot_buy_own_listing() {
     let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &seller);
-    let listing_id = client
-        .list_position(&seller, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &500i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &500i128,
+    );
 
     let result = client.try_buy_listing(&seller, &listing_id);
     assert_eq!(result.unwrap_err().unwrap(), PoolError::Unauthorized.into());
@@ -343,16 +399,23 @@ fn test_buy_listing_insufficient_available_balance_rejected() {
 
     let bps = client.get_co_fund_share(&invoice_id, &seller);
     // Price is higher than buyer's available balance.
-    let listing_id = client
-        .list_position(&seller, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &99_999i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &99_999i128,
+    );
 
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 100);
     client.deposit(&buyer, &usdc, &100i128, &None);
 
     let result = client.try_buy_listing(&buyer, &listing_id);
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::InvalidAmount.into());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::InvalidAmount.into()
+    );
 }
 
 // ── index queries ────────────────────────────────────────────────────────────
@@ -365,12 +428,20 @@ fn test_list_listings_for_invoice_returns_all_ids() {
     let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let id1 = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64 / 2), &100i128)
-        .unwrap();
-    let id2 = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64 / 2), &200i128)
-        .unwrap();
+    let id1 = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64 / 2),
+        &100i128,
+    );
+    let id2 = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64 / 2),
+        &200i128,
+    );
 
     let ids = client.list_listings_for_invoice(&invoice_id);
     assert!(ids.contains(&id1));
@@ -385,9 +456,13 @@ fn test_list_listings_for_investor_returns_seller_ids() {
     let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
 
     let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client
-        .list_position(&investor, &invoice_id, &ListingKind::CoFunding, &(bps as u64), &300i128)
-        .unwrap();
+    let listing_id = client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(bps as u64),
+        &300i128,
+    );
 
     let ids = client.list_listings_for_investor(&investor);
     assert!(ids.contains(&listing_id));

@@ -162,11 +162,14 @@ impl ShareToken {
         let new_allowance = current
             .checked_add(added_amount)
             .expect("allowance overflow");
-        env.storage()
-            .persistent()
-            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &new_allowance);
-        env.events()
-            .publish((EVT, symbol_short!("incr_allow")), (owner, spender, new_allowance));
+        env.storage().persistent().set(
+            &DataKey::Allowance(owner.clone(), spender.clone()),
+            &new_allowance,
+        );
+        env.events().publish(
+            (EVT, symbol_short!("incrallow")),
+            (owner, spender, new_allowance),
+        );
     }
 
     pub fn decrease_allowance(env: Env, owner: Address, spender: Address, subtracted_amount: i128) {
@@ -179,11 +182,14 @@ impl ShareToken {
             panic!("allowance underflow");
         }
         let new_allowance = current - subtracted_amount;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &new_allowance);
-        env.events()
-            .publish((EVT, symbol_short!("decr_allow")), (owner, spender, new_allowance));
+        env.storage().persistent().set(
+            &DataKey::Allowance(owner.clone(), spender.clone()),
+            &new_allowance,
+        );
+        env.events().publish(
+            (EVT, symbol_short!("decrallow")),
+            (owner, spender, new_allowance),
+        );
     }
 
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {

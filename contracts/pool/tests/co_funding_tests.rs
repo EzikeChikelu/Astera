@@ -100,7 +100,7 @@ fn seed_investors(
     for _ in 0..n {
         let investor = Address::generate(env);
         mint(env, usdc_id, &investor, each);
-        client.deposit(&investor, usdc_id, &each);
+        client.deposit(&investor, usdc_id, &each, &None);
         investors.push(investor);
     }
     investors

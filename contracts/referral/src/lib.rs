@@ -172,7 +172,9 @@ fn update_leaderboard(env: &Env, referrer: &Address, new_count: u32) {
         board.remove(best_idx);
     }
 
-    env.storage().persistent().set(&DataKey::TopReferrers, &sorted);
+    env.storage()
+        .persistent()
+        .set(&DataKey::TopReferrers, &sorted);
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::TopReferrers, REGISTRY_TTL, REGISTRY_TTL);

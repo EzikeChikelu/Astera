@@ -2044,7 +2044,8 @@ impl CreditScoreContract {
             .get::<DataKey, SimulateScoreCacheEntry>(&DataKey::SimulateScoreCache(
                 sme.clone(),
                 cache_key,
-            )) {
+            ))
+        {
             if entry.cached_at.saturating_add(SIMULATE_CACHE_TTL_SECS) > now {
                 return entry.result;
             }

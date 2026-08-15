@@ -297,7 +297,8 @@ fn test_rescreening_interval_enforced() {
 
     // Advance time past the rescreening interval
     let interval = client.get_rescreening_interval();
-    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + interval + 1);
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + interval + 1);
 
     // Rescreening after interval succeeds
     client.submit_screening_result(
@@ -385,7 +386,8 @@ fn test_custom_rescreening_interval() {
     assert_eq!(too_soon, Err(Ok(ComplianceError::RescreeningTooSoon)));
 
     // Advance past custom interval
-    env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 3600 + 1);
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + 3600 + 1);
 
     // Rescreening succeeds
     client.submit_screening_result(

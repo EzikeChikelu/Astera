@@ -104,7 +104,7 @@ fn test_compliance_off_deposit_unaffected() {
 
     assert!(!pool.require_compliance_check());
     mint(&env, &token, &investor, 10_000);
-    pool.deposit(&investor, &token, &1_000i128);
+    pool.deposit(&investor, &token, &1_000i128, &None);
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn test_compliance_on_blocks_unscreened_deposit() {
     pool.set_require_compliance_check(&admin, &true);
     mint(&env, &token, &investor, 10_000);
 
-    let result = pool.try_deposit(&investor, &token, &1_000i128);
+    let result = pool.try_deposit(&investor, &token, &1_000i128, &None);
     assert_eq!(result, Err(Ok(PoolError::ComplianceNotCleared)));
 }
 
@@ -130,7 +130,7 @@ fn test_compliance_on_allows_cleared_deposit() {
     clear(&compliance, &admin, &investor, &env);
     mint(&env, &token, &investor, 10_000);
 
-    pool.deposit(&investor, &token, &1_000i128);
+    pool.deposit(&investor, &token, &1_000i128, &None);
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn test_compliance_on_blocks_blocked_investor_deposit() {
     );
     mint(&env, &token, &investor, 10_000);
 
-    let result = pool.try_deposit(&investor, &token, &1_000i128);
+    let result = pool.try_deposit(&investor, &token, &1_000i128, &None);
     assert_eq!(result, Err(Ok(PoolError::ComplianceNotCleared)));
 }
 
@@ -176,7 +176,7 @@ fn test_compliance_on_blocks_expired_clearance() {
     env.ledger().with_mut(|l| l.timestamp = expires + 1);
     mint(&env, &token, &investor, 10_000);
 
-    let result = pool.try_deposit(&investor, &token, &1_000i128);
+    let result = pool.try_deposit(&investor, &token, &1_000i128, &None);
     assert_eq!(result, Err(Ok(PoolError::ComplianceNotCleared)));
 }
 
@@ -187,7 +187,7 @@ fn test_compliance_on_blocks_withdraw() {
     let investor = Address::generate(&env);
 
     mint(&env, &token, &investor, 10_000);
-    pool.deposit(&investor, &token, &1_000i128);
+    pool.deposit(&investor, &token, &1_000i128, &None);
 
     pool.set_require_compliance_check(&admin, &true);
     let result = pool.try_withdraw(&investor, &token, &100i128);
@@ -204,7 +204,7 @@ fn test_compliance_on_blocks_request_withdrawal() {
     let investor = Address::generate(&env);
 
     mint(&env, &token, &investor, 10_000);
-    pool.deposit(&investor, &token, &1_000i128);
+    pool.deposit(&investor, &token, &1_000i128, &None);
 
     pool.set_require_compliance_check(&admin, &true);
     let result = pool.try_request_withdrawal(&investor, &token, &100i128);

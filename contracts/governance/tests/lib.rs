@@ -749,12 +749,27 @@ fn test_category_quorum_defaults_and_snapshot() {
     let proposer = Address::generate(&env);
     share.mint(&proposer, &1_000_000i128);
 
-    let param_id =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::ParameterChange);
-    let treasury_id =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Treasury);
-    let critical_id =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+    let param_id = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::ParameterChange,
+    );
+    let treasury_id = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::Treasury,
+    );
+    let critical_id = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::Critical,
+    );
 
     assert_eq!(gov.get_proposal(&param_id).unwrap().quorum_bps, QUORUM_BPS);
     assert_eq!(gov.get_proposal(&treasury_id).unwrap().quorum_bps, 2_000);
@@ -773,8 +788,13 @@ fn test_category_quorum_defaults_and_snapshot() {
         "in-flight proposal keeps creation-time quorum"
     );
 
-    let new_critical =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+    let new_critical = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::Critical,
+    );
     assert_eq!(gov.get_proposal(&new_critical).unwrap().quorum_bps, 8_000);
 }
 
@@ -793,10 +813,20 @@ fn test_critical_category_requires_higher_quorum() {
     share.mint(&proposer, &800_000i128);
     share.mint(&voter, &200_000i128);
 
-    let param_id =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::ParameterChange);
-    let critical_id =
-        make_proposal_with_category(&env, &gov, &proposer, &proposer, &ProposalCategory::Critical);
+    let param_id = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::ParameterChange,
+    );
+    let critical_id = make_proposal_with_category(
+        &env,
+        &gov,
+        &proposer,
+        &proposer,
+        &ProposalCategory::Critical,
+    );
 
     // 200k votes: enough for parameter (100k), not for critical (500k).
     gov.vote(&param_id, &voter, &true);

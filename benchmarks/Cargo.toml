@@ -13,6 +13,7 @@ criterion = { workspace = true }
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 invoice = { path = "../contracts/invoice" }
 pool = { path = "../contracts/pool" }
+share = { path = "../contracts/share" }
 
 [[bench]]
 name = "contract_benchmarks"

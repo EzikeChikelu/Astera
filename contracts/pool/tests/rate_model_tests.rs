@@ -351,7 +351,7 @@ fn test_invoices_lock_curve_rate_at_funding_time() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
     mint(&env, &usdc_id, &investor, 100_000);
-    client.deposit(&investor, &usdc_id, &100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
 
     enact_rate_model(&client, &admin, &usdc_id, &env);
 
@@ -395,7 +395,7 @@ fn test_repayment_uses_locked_rate_after_utilization_changes() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
     mint(&env, &usdc_id, &investor, 100_000);
-    client.deposit(&investor, &usdc_id, &100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
 
     enact_rate_model(&client, &admin, &usdc_id, &env);
 
@@ -434,7 +434,7 @@ fn test_funding_without_model_locks_static_yield() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
     mint(&env, &usdc_id, &investor, 100_000);
-    client.deposit(&investor, &usdc_id, &100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
 
     let due_date = env.ledger().timestamp() + 1_000_000;
     client.fund_invoice(&admin, &1u64, &10_000i128, &borrower, &due_date, &usdc_id);
@@ -465,7 +465,7 @@ fn test_curve_takes_precedence_over_static_yield_once_configured() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
     mint(&env, &usdc_id, &investor, 100_000);
-    client.deposit(&investor, &usdc_id, &100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
 
     enact_rate_model(&client, &admin, &usdc_id, &env);
 
@@ -495,7 +495,7 @@ fn test_rate_history_records_on_fund_and_repay_in_order() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
     mint(&env, &usdc_id, &investor, 100_000);
-    client.deposit(&investor, &usdc_id, &100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
 
     enact_rate_model(&client, &admin, &usdc_id, &env);
 

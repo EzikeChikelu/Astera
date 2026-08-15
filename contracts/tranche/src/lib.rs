@@ -1,25 +1,19 @@
 #![no_std]
 
+pub mod deposit;
 pub mod errors;
 pub mod events;
-pub mod math;
-pub mod state;
-pub mod deposit;
-pub mod withdraw;
 pub mod funding;
+pub mod math;
 pub mod repayment;
+pub mod state;
+pub mod withdraw;
 
 use errors::TrancheError;
 use events::{CONFIG, EVT};
 use state::{DataKey, TrancheAccounting, TrancheClass, TrancheConfig, TranchePool};
 
-use soroban_sdk::{
-    contract,
-    contractimpl,
-    panic_with_error,
-    Address,
-    Env,
-};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
 
 const REENTRANCY_GUARD: u64 = 1;
 
@@ -32,7 +26,9 @@ impl TrancheContract {
         if env.storage().instance().has(&DataKey::NonReentrantKey) {
             panic_with_error!(env, TrancheError::ReentrancyDetected);
         }
-        env.storage().instance().set(&DataKey::NonReentrantKey, &REENTRANCY_GUARD);
+        env.storage()
+            .instance()
+            .set(&DataKey::NonReentrantKey, &REENTRANCY_GUARD);
     }
 
     fn non_reentrant_end(env: &Env) {
@@ -44,9 +40,7 @@ impl TrancheContract {
         token: Address,
         senior_share_token: Address,
         junior_share_token: Address,
-        senior_target_yield_bps: u32,
-        senior_advance_rate_bps: u32,
-        junior_first_loss_bps: u32,
+        config: TrancheConfig,
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
@@ -55,12 +49,6 @@ impl TrancheContract {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-
-        let config = TrancheConfig {
-            senior_target_yield_bps,
-            senior_advance_rate_bps,
-            junior_first_loss_bps,
-        };
 
         let pool = TranchePool {
             token: token.clone(),
@@ -71,43 +59,26 @@ impl TrancheContract {
             junior: TrancheAccounting::default(),
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Pool(token), &pool);
+        env.storage().instance().set(&DataKey::Pool(token), &pool);
     }
 
-    pub fn get_pool(
-        env: Env,
-        token: Address,
-    ) -> TranchePool {
+    pub fn get_pool(env: Env, token: Address) -> TranchePool {
         env.storage()
             .instance()
             .get(&DataKey::Pool(token))
-            .unwrap_or_else(|| {
-                panic_with_error!(&env, TrancheError::PoolNotFound)
-            })
+            .unwrap_or_else(|| panic_with_error!(&env, TrancheError::PoolNotFound))
     }
 
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap()
+        env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
-    pub fn get_config(
-        env: Env,
-        token: Address,
-    ) -> TrancheConfig {
+    pub fn get_config(env: Env, token: Address) -> TrancheConfig {
         let pool = Self::get_pool(env, token);
         pool.config
     }
 
-    pub fn get_totals(
-        env: Env,
-        token: Address,
-        tranche: TrancheClass,
-    ) -> TrancheAccounting {
+    pub fn get_totals(env: Env, token: Address, tranche: TrancheClass) -> TrancheAccounting {
         let pool = Self::get_pool(env, token);
 
         match tranche {
@@ -124,13 +95,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::non_reentrant_start(&env);
-        deposit::deposit(
-            &env,
-            investor,
-            token,
-            tranche,
-            amount,
-        );
+        deposit::deposit(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
     }
 
@@ -142,13 +107,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::non_reentrant_start(&env);
-        withdraw::withdraw(
-            &env,
-            investor,
-            token,
-            tranche,
-            amount,
-        );
+        withdraw::withdraw(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
     }
 
@@ -160,11 +119,7 @@ impl TrancheContract {
     ) -> state::InvestorPosition {
         env.storage()
             .instance()
-            .get(&DataKey::Investor(
-                investor,
-                token,
-                tranche,
-            ))
+            .get(&DataKey::Investor(investor, token, tranche))
             .unwrap_or_default()
     }
 
@@ -196,7 +151,12 @@ impl TrancheContract {
 
         env.events().publish(
             (EVT, CONFIG),
-            (token, senior_target_yield_bps, senior_advance_rate_bps, junior_first_loss_bps),
+            (
+                token,
+                senior_target_yield_bps,
+                senior_advance_rate_bps,
+                junior_first_loss_bps,
+            ),
         );
     }
 
@@ -206,9 +166,7 @@ impl TrancheContract {
         token: Address,
         senior_share_token: Address,
         junior_share_token: Address,
-        senior_target_yield_bps: u32,
-        senior_advance_rate_bps: u32,
-        junior_first_loss_bps: u32,
+        config: TrancheConfig,
     ) {
         admin.require_auth();
 
@@ -217,15 +175,13 @@ impl TrancheContract {
             panic_with_error!(&env, TrancheError::Unauthorized);
         }
 
-        if env.storage().instance().has(&DataKey::TrancheEnabled(token.clone())) {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::TrancheEnabled(token.clone()))
+        {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
-
-        let config = TrancheConfig {
-            senior_target_yield_bps,
-            senior_advance_rate_bps,
-            junior_first_loss_bps,
-        };
 
         let pool = TranchePool {
             token: token.clone(),
@@ -245,7 +201,12 @@ impl TrancheContract {
 
         env.events().publish(
             (EVT, CONFIG),
-            (token, senior_target_yield_bps, senior_advance_rate_bps, junior_first_loss_bps),
+            (
+                token,
+                config.senior_target_yield_bps,
+                config.senior_advance_rate_bps,
+                config.junior_first_loss_bps,
+            ),
         );
     }
 
@@ -294,12 +255,7 @@ impl TrancheContract {
         result
     }
 
-    pub fn allocate_loss(
-        env: Env,
-        token: Address,
-        invoice_id: u64,
-        shortfall: i128,
-    ) {
+    pub fn allocate_loss(env: Env, token: Address, invoice_id: u64, shortfall: i128) {
         Self::non_reentrant_start(&env);
         repayment::allocate_loss(&env, token, invoice_id, shortfall);
         Self::non_reentrant_end(&env);
@@ -328,11 +284,7 @@ impl TrancheContract {
         )
     }
 
-    pub fn get_effective_apy(
-        env: Env,
-        token: Address,
-        tranche: TrancheClass,
-    ) -> u32 {
+    pub fn get_effective_apy(env: Env, token: Address, tranche: TrancheClass) -> u32 {
         let pool = Self::get_pool(env.clone(), token);
         let accounting = match tranche {
             TrancheClass::Senior => pool.senior,
@@ -354,5 +306,4 @@ impl TrancheContract {
         let return_bps = (total_return * 10_000) / accounting.deposited;
         return_bps as u32
     }
-
 }

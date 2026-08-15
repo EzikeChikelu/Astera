@@ -91,7 +91,7 @@ fn test_kyc_blocks_deposit_when_required() {
     client.set_kyc_required(&admin, &true);
     mint(&env, &usdc_id, &investor, 1_000);
 
-    let result = client.try_deposit(&investor, &usdc_id, &1_000);
+    let result = client.try_deposit(&investor, &usdc_id, &1_000, &None);
     assert_eq!(result, Err(Ok(PoolError::KycNotRequested)));
 }
 
@@ -106,7 +106,7 @@ fn test_kyc_allows_deposit_after_approval() {
     client.set_investor_kyc(&admin, &investor, &true);
     mint(&env, &usdc_id, &investor, 1_500);
 
-    client.deposit(&investor, &usdc_id, &1_500);
+    client.deposit(&investor, &usdc_id, &1_500, &None);
 
     let totals = client.get_token_totals(&usdc_id);
     assert_eq!(totals.pool_value, 1_500);
@@ -121,7 +121,7 @@ fn test_kyc_not_required_by_default() {
 
     assert!(!client.kyc_required());
     mint(&env, &usdc_id, &investor, 750);
-    client.deposit(&investor, &usdc_id, &750);
+    client.deposit(&investor, &usdc_id, &750, &None);
 
     let totals = client.get_token_totals(&usdc_id);
     assert_eq!(totals.pool_value, 750);
@@ -137,14 +137,14 @@ fn test_kyc_required_flag_toggle() {
     mint(&env, &usdc_id, &investor, 3_000);
 
     client.set_kyc_required(&admin, &true);
-    let blocked = client.try_deposit(&investor, &usdc_id, &1_000);
+    let blocked = client.try_deposit(&investor, &usdc_id, &1_000, &None);
     assert_eq!(blocked, Err(Ok(PoolError::KycNotRequested)));
 
     client.set_kyc_required(&admin, &false);
-    client.deposit(&investor, &usdc_id, &1_000);
+    client.deposit(&investor, &usdc_id, &1_000, &None);
 
     client.set_kyc_required(&admin, &true);
-    let blocked_again = client.try_deposit(&investor, &usdc_id, &1_000);
+    let blocked_again = client.try_deposit(&investor, &usdc_id, &1_000, &None);
     assert_eq!(blocked_again, Err(Ok(PoolError::KycNotRequested)));
 }
 
@@ -315,7 +315,7 @@ fn test_execute_remove_token_with_active_balances_fails() {
     let investor = Address::generate(&env);
 
     mint(&env, &usdc_id, &investor, 1_000);
-    client.deposit(&investor, &usdc_id, &1_000);
+    client.deposit(&investor, &usdc_id, &1_000, &None);
 
     let proposal_id =
         client.propose_operation(&admin, &pool::AdminOperation::RemoveToken(usdc_id.clone()));
@@ -554,7 +554,7 @@ fn test_full_borrower_lifecycle() {
     // fund_invoice's internal accounting (available_liquidity) sees funds,
     // not just the raw token balance.
     mint(&env, &usdc_id, &investor, 100_000);
-    pool_client.deposit(&investor, &usdc_id, &100_000);
+    pool_client.deposit(&investor, &usdc_id, &100_000, &None);
 
     let invoice_amount = 10_000i128;
     let due_date = env.ledger().timestamp() + 100_000;

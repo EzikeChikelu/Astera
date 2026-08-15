@@ -517,11 +517,7 @@ impl OracleRegistryContract {
         // #954: every slash must cite the specific verification round it's
         // punishing behavior from — otherwise a slash is an unaccountable
         // admin fiat with no on-chain trail to audit after the fact.
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::Round(round_id))
-        {
+        if !env.storage().persistent().has(&DataKey::Round(round_id)) {
             return Err(OracleRegistryError::SlashRoundNotFound);
         }
         let key = DataKey::Oracle(operator.clone());
@@ -871,7 +867,7 @@ impl OracleRegistryContract {
         out
     }
 
-    pub fn get_oracle_round_history(env: Env, oracle: Address) -> Vec<(u64, bool, i128)> {
+    pub fn get_oracle_round_history(env: Env, oracle: Address) -> Vec<(u64, bool, String)> {
         let key = DataKey::OracleRounds(oracle.clone());
         let ids: Vec<u64> = env
             .storage()
@@ -882,10 +878,10 @@ impl OracleRegistryContract {
         for i in 0..ids.len() {
             let invoice_id = ids.get(i).unwrap();
             let round: Option<VerificationRound> =
-                env.storage().persistent().get(&DataKey::Round(*invoice_id));
+                env.storage().persistent().get(&DataKey::Round(invoice_id));
             if let Some(r) = round {
                 if let Some(approved) = r.votes.get(oracle.clone()) {
-                    out.push_back((*invoice_id, approved, r.oracle_hash.clone()));
+                    out.push_back((invoice_id, approved, r.oracle_hash.clone()));
                 }
             }
         }
@@ -909,7 +905,7 @@ impl OracleRegistryContract {
             total_verifications: info.total_verifications,
             total_slashes: info.total_slashes,
             registered_at: info.registered_at,
-            rounds_participated: ids.len() as u32,
+            rounds_participated: ids.len(),
         })
     }
 
@@ -920,11 +916,12 @@ impl OracleRegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(env));
-        if !ids.contains(&invoice_id) {
+        if !ids.contains(invoice_id) {
             ids.push_back(invoice_id);
             env.storage().persistent().set(&key, &ids);
-            let ttl = env.storage().persistent().get_ttl(&key).unwrap_or(0);
-            env.storage().persistent().extend_ttl(&key, ttl, ttl);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, REGISTRY_TTL, REGISTRY_TTL);
         }
     }
 

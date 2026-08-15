@@ -297,16 +297,34 @@ fn test_get_top_referrers_ranks_by_referral_count_descending() {
     for _ in 0..3 {
         let referee = Address::generate(&env);
         client.register(&referee, &referrer_a);
-        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+        client.record_activity(
+            &pool,
+            &referee,
+            &Symbol::new(&env, "deposit"),
+            &0i128,
+            &token,
+        );
     }
     let referee_b = Address::generate(&env);
     client.register(&referee_b, &referrer_b);
-    client.record_activity(&pool, &referee_b, &Symbol::new(&env, "deposit"), &0i128, &token);
+    client.record_activity(
+        &pool,
+        &referee_b,
+        &Symbol::new(&env, "deposit"),
+        &0i128,
+        &token,
+    );
 
     for _ in 0..2 {
         let referee = Address::generate(&env);
         client.register(&referee, &referrer_c);
-        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+        client.record_activity(
+            &pool,
+            &referee,
+            &Symbol::new(&env, "deposit"),
+            &0i128,
+            &token,
+        );
     }
 
     let board = client.get_top_referrers(&0);
@@ -330,7 +348,13 @@ fn test_get_top_referrers_respects_limit() {
         let referrer = Address::generate(&env);
         let referee = Address::generate(&env);
         client.register(&referee, &referrer);
-        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+        client.record_activity(
+            &pool,
+            &referee,
+            &Symbol::new(&env, "deposit"),
+            &0i128,
+            &token,
+        );
     }
 
     assert_eq!(client.get_top_referrers(&2).len(), 2);
@@ -385,7 +409,13 @@ fn test_get_top_referrers_evicts_lowest_when_full() {
         for _ in 0..=i {
             let referee = Address::generate(&env);
             client.register(&referee, &referrer);
-            client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+            client.record_activity(
+                &pool,
+                &referee,
+                &Symbol::new(&env, "deposit"),
+                &0i128,
+                &token,
+            );
         }
         referrers.push(referrer);
     }
@@ -402,7 +432,13 @@ fn test_get_top_referrers_evicts_lowest_when_full() {
     for _ in 0..2 {
         let referee = Address::generate(&env);
         client.register(&referee, &challenger);
-        client.record_activity(&pool, &referee, &Symbol::new(&env, "deposit"), &0i128, &token);
+        client.record_activity(
+            &pool,
+            &referee,
+            &Symbol::new(&env, "deposit"),
+            &0i128,
+            &token,
+        );
     }
 
     let board = client.get_top_referrers(&0);

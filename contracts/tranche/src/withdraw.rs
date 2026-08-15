@@ -3,18 +3,10 @@ use soroban_sdk::{panic_with_error, Address, Env};
 use crate::{
     errors::TrancheError,
     events::{EVT, WITHDRAW},
-    state::{
-        DataKey, InvestorPosition, TrancheAccounting, TrancheClass, TranchePool,
-    },
+    state::{DataKey, InvestorPosition, TrancheAccounting, TrancheClass, TranchePool},
 };
 
-pub fn withdraw(
-    env: &Env,
-    investor: Address,
-    token: Address,
-    tranche: TrancheClass,
-    amount: i128,
-) {
+pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheClass, amount: i128) {
     if amount <= 0 {
         panic_with_error!(env, TrancheError::InvalidAmount);
     }
@@ -27,17 +19,9 @@ pub fn withdraw(
         .get(&DataKey::Pool(token.clone()))
         .unwrap_or_else(|| panic_with_error!(env, TrancheError::PoolNotFound));
 
-    let key = DataKey::Investor(
-        investor.clone(),
-        token.clone(),
-        tranche,
-    );
+    let key = DataKey::Investor(investor.clone(), token.clone(), tranche);
 
-    let mut position: InvestorPosition = env
-        .storage()
-        .instance()
-        .get(&key)
-        .unwrap_or_default();
+    let mut position: InvestorPosition = env.storage().instance().get(&key).unwrap_or_default();
 
     if position.shares < amount {
         panic_with_error!(env, TrancheError::InsufficientBalance);
@@ -60,17 +44,11 @@ pub fn withdraw(
         .instance()
         .set(&DataKey::Pool(token.clone()), &pool);
 
-    env.events().publish(
-        (EVT, WITHDRAW),
-        (investor, token, tranche, amount),
-    );
+    env.events()
+        .publish((EVT, WITHDRAW), (investor, token, tranche, amount));
 }
 
-fn update_accounting(
-    env: &Env,
-    accounting: &mut TrancheAccounting,
-    amount: i128,
-) {
+fn update_accounting(env: &Env, accounting: &mut TrancheAccounting, amount: i128) {
     if accounting.available < amount {
         panic_with_error!(env, TrancheError::InsufficientBalance);
     }

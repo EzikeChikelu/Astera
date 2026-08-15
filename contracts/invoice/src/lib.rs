@@ -659,7 +659,7 @@ fn add_invoice_to_debtor(env: &Env, debtor: &String, invoice_id: u64) {
         .persistent()
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
-    if !ids.contains(&invoice_id) {
+    if !ids.contains(invoice_id) {
         ids.push_back(invoice_id);
         env.storage().persistent().set(&key, &ids);
         env.storage()
@@ -2809,7 +2809,10 @@ impl InvoiceContract {
     /// interfaces don't need to share Rust types.
     pub fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128) {
         let invoice = load_invoice(&env, id);
-        (invoice.status == InvoiceStatus::AwaitingVerification, invoice.amount)
+        (
+            invoice.status == InvoiceStatus::AwaitingVerification,
+            invoice.amount,
+        )
     }
 
     pub fn get_funded_amount(env: Env, id: u64) -> i128 {
@@ -4406,7 +4409,9 @@ mod test {
         let (client, admin, _pool, _sme) = setup(&env);
 
         client.pause(&admin);
-        assert!(client.is_paused());
+        // env.events().all() only returns events from the most recent
+        // invocation, so this must be checked before any other call (e.g.
+        // is_paused) intervenes.
         let pause_ts = env.ledger().timestamp();
         let expected_paused: soroban_sdk::Vec<soroban_sdk::Val> =
             (EVT, symbol_short!("paused")).into_val(&env);
@@ -4419,6 +4424,7 @@ mod test {
         let (event_admin, event_ts): (Address, u64) = paused_event.2.into_val(&env);
         assert_eq!(event_admin, admin);
         assert_eq!(event_ts, pause_ts);
+        assert!(client.is_paused());
 
         client.unpause(&admin);
         assert!(!client.is_paused());

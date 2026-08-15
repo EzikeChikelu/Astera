@@ -143,7 +143,7 @@ proptest! {
         mint(&env, &usdc_id, &investor, deposit);
         mint(&env, &usdc_id, &sme, deposit * 2);
 
-        client.deposit(&investor, &usdc_id, &deposit);
+        client.deposit(&investor, &usdc_id, &deposit, &None);
 
         let principal = (deposit as u128 * fund_ratio as u128 / 100) as i128;
         if principal > 0 {
@@ -176,7 +176,7 @@ proptest! {
         mint(&env, &usdc_id, &investor, principal * 2);
         mint(&env, &usdc_id, &sme, principal * 2);
 
-        client.deposit(&investor, &usdc_id, &principal);
+        client.deposit(&investor, &usdc_id, &principal, &None);
         let due_date = env.ledger().timestamp() + t2_days * 86_400 + 1;
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
@@ -209,7 +209,7 @@ proptest! {
         mint(&env, &usdc_id, &investor, deposit);
         mint(&env, &usdc_id, &sme, deposit);
 
-        client.deposit(&investor, &usdc_id, &deposit);
+        client.deposit(&investor, &usdc_id, &deposit, &None);
 
         if fund_ratio > 0 {
             let principal = (deposit as u128 * fund_ratio as u128 / 100) as i128;
@@ -244,7 +244,7 @@ proptest! {
         mint(&env, &usdc_id, &investor, principal);
         mint(&env, &usdc_id, &sme, principal * 2);
 
-        client.deposit(&investor, &usdc_id, &principal);
+        client.deposit(&investor, &usdc_id, &principal, &None);
         let due_date = env.ledger().timestamp() + hold_days * 86_400 + 1;
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
@@ -268,7 +268,7 @@ proptest! {
         let investor = Address::generate(&env);
 
         mint(&env, &usdc_id, &investor, amount);
-        client.deposit(&investor, &usdc_id, &amount);
+        client.deposit(&investor, &usdc_id, &amount, &None);
 
         let totals = client.get_token_totals(&usdc_id);
         prop_assert_eq!(totals.pool_value, amount);
@@ -289,7 +289,7 @@ proptest! {
         mint(&env, &usdc_id, &investor, principal * 2);
         mint(&env, &usdc_id, &sme, principal * 2);
 
-        client.deposit(&investor, &usdc_id, &principal);
+        client.deposit(&investor, &usdc_id, &principal, &None);
 
         let due_date = env.ledger().timestamp() + (elapsed_days * 86_400);
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
@@ -330,7 +330,7 @@ proptest! {
         let investor = Address::generate(&env);
 
         mint(&env, &usdc_id, &investor, deposit_amount);
-        client.deposit(&investor, &usdc_id, &deposit_amount);
+        client.deposit(&investor, &usdc_id, &deposit_amount, &None);
 
         let shares: i128 = env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), soroban_sdk::vec![&env, investor.clone().into_val(&env)]);
         let withdraw_shares = (shares * withdraw_ratio as i128) / 100;
@@ -391,7 +391,7 @@ proptest! {
         // ── Step 1: deposit ──────────────────────────────────────────────────
         mint(&env, &usdc_id, &investor, deposit);
         mint(&env, &usdc_id, &sme, deposit * 2);
-        client.deposit(&investor, &usdc_id, &deposit);
+        client.deposit(&investor, &usdc_id, &deposit, &None);
 
         let tt = client.get_token_totals(&usdc_id);
         prop_assert!(tt.pool_value >= tt.total_deployed,
@@ -526,7 +526,7 @@ mod deterministic_fuzz {
             mint(&env, &usdc_id, &investor, principal * 2);
             mint(&env, &usdc_id, &sme, principal * 2);
 
-            client.deposit(&investor, &usdc_id, &principal);
+            client.deposit(&investor, &usdc_id, &principal, &None);
 
             let due_date = env.ledger().timestamp() + (days * 86_400);
             client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
@@ -563,7 +563,7 @@ mod deterministic_fuzz {
 
         let deposit = 5_000_000_000i128;
         mint(&env, &usdc_id, &investor, deposit);
-        client.deposit(&investor, &usdc_id, &deposit);
+        client.deposit(&investor, &usdc_id, &deposit, &None);
 
         // Fund invoices up to available liquidity
         let due_date = env.ledger().timestamp() + 86_400;
@@ -594,7 +594,7 @@ mod deterministic_fuzz {
         mint(&env, &usdc_id, &sme1, 10_000_000_000i128);
         mint(&env, &usdc_id, &sme2, 10_000_000_000i128);
 
-        client.deposit(&investor, &usdc_id, &10_000_000_000i128);
+        client.deposit(&investor, &usdc_id, &10_000_000_000i128, &None);
 
         let due_date = env.ledger().timestamp() + 86_400;
         let requests = soroban_sdk::vec![
@@ -647,7 +647,7 @@ mod deterministic_fuzz {
         mint(&env1, &usdc_id1, &sme1, principal * 2);
 
         client1.set_compound_interest(&admin1, &false);
-        client1.deposit(&investor1, &usdc_id1, &principal);
+        client1.deposit(&investor1, &usdc_id1, &principal, &None);
         client1.fund_invoice(
             &admin1,
             &1u64,
@@ -670,7 +670,7 @@ mod deterministic_fuzz {
         mint(&env2, &usdc_id2, &sme2, principal * 2);
 
         client2.set_compound_interest(&admin2, &true);
-        client2.deposit(&investor2, &usdc_id2, &principal);
+        client2.deposit(&investor2, &usdc_id2, &principal, &None);
         client2.fund_invoice(
             &admin2,
             &1u64,
@@ -719,7 +719,7 @@ mod deterministic_fuzz {
 
         // deposit should succeed without any KYC approval
         mint(&env, &usdc_id, &investor, 1_000_000);
-        client.deposit(&investor, &usdc_id, &1_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000, &None);
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.pool_value, 1_000_000);
     }
@@ -735,7 +735,7 @@ mod deterministic_fuzz {
         client.set_investor_kyc(&admin, &investor, &true);
 
         mint(&env, &usdc_id, &investor, 1_000_000);
-        client.deposit(&investor, &usdc_id, &1_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000, &None);
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.pool_value, 1_000_000);
     }
@@ -785,7 +785,7 @@ proptest! {
         for _ in 0..4 {
             let investor = Address::generate(&env);
             mint(&env, &usdc_id, &investor, 10_000);
-            client.deposit(&investor, &usdc_id, &10_000);
+            client.deposit(&investor, &usdc_id, &10_000, &None);
             investors.push(investor);
         }
 

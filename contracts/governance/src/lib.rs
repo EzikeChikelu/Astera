@@ -615,8 +615,10 @@ impl Governance {
             ProposalCategory::Critical => config.critical_quorum_bps = quorum_bps,
         }
         env.storage().instance().set(&DataKey::Config, &config);
-        env.events()
-            .publish((EVT, symbol_short!("cat_q")), (caller, category, quorum_bps));
+        env.events().publish(
+            (EVT, symbol_short!("cat_q")),
+            (caller, category, quorum_bps),
+        );
         Ok(())
     }
 

@@ -3,7 +3,6 @@
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Vec};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_DISCOUNT_BPS: u32 = 5_000; // 50% max discount
 const CREDIT_SCORE_MULTIPLIER: u32 = 10; // weight per credit-score point
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -98,7 +97,7 @@ pub fn clear_auction(
     credit_scores: Map<Address, u32>,
 ) -> Vec<Allocation> {
     let env = bids.env();
-    let mut result: Vec<Allocation> = Vec::new(&env);
+    let mut result: Vec<Allocation> = Vec::new(env);
 
     if available_liquidity <= 0 || bids.is_empty() {
         return result;
@@ -106,7 +105,7 @@ pub fn clear_auction(
 
     // Compute scores and create ranked list
     // Stores (composite_score, max_discount_bps, invoice_id, principal, sme)
-    let mut scored: Vec<(u128, u32, u64, i128, Address)> = Vec::new(&env);
+    let mut scored: Vec<(u128, u32, u64, i128, Address)> = Vec::new(env);
     for i in 0..bids.len() {
         let bid = bids.get(i).unwrap();
         let cs = credit_scores.get(bid.sme.clone()).unwrap_or(0);
@@ -121,7 +120,7 @@ pub fn clear_auction(
     }
 
     // Sort descending by score, tie-break by invoice_id ascending
-    let mut sorted: Vec<(u128, u32, u64, i128, Address)> = Vec::new(&env);
+    let mut sorted: Vec<(u128, u32, u64, i128, Address)> = Vec::new(env);
     let len = scored.len();
     for _ in 0..len {
         let mut best_idx = 0;
@@ -175,7 +174,7 @@ pub fn clear_auction(
     let uniform_discount = lowest_funded_discount;
 
     // Apply uniform discount to all allocations
-    let mut final_result: Vec<Allocation> = Vec::new(&env);
+    let mut final_result: Vec<Allocation> = Vec::new(env);
     for i in 0..result.len() {
         let alloc = result.get(i).unwrap();
         final_result.push_back(Allocation {
@@ -195,13 +194,13 @@ pub struct AuctionContract;
 
 #[contractimpl]
 impl AuctionContract {
-    pub fn version(env: Env) -> u32 {
+    pub fn version(_env: Env) -> u32 {
         1
     }
 
     /// Pure clearing algorithm exposed as a view function for frontend simulation.
     pub fn simulate_clearing(
-        env: Env,
+        _env: Env,
         bids: Vec<InvoiceBid>,
         available_liquidity: i128,
         credit_scores: Map<Address, u32>,
@@ -215,7 +214,7 @@ impl AuctionContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{vec, Env, Map};
+    use soroban_sdk::{testutils::Address as _, vec, Env, Map};
 
     fn test_env() -> Env {
         Env::default()
@@ -346,9 +345,9 @@ mod tests {
 
         let bids = vec![
             &env,
-            make_bid(&env, 1, sme1.clone(), 1000, 700, 0), // Highest discount
-            make_bid(&env, 2, sme2.clone(), 1000, 500, 0), // Middle
-            make_bid(&env, 3, sme3.clone(), 1000, 300, 0), // Lowest - marginal winner
+            make_bid(&env, 1, sme1.clone(), 1000, 700, 0), // Highest discount - wins first
+            make_bid(&env, 2, sme2.clone(), 1000, 500, 0), // Marginal winner
+            make_bid(&env, 3, sme3.clone(), 1000, 300, 0), // Lowest discount - loses, no liquidity left
         ];
         let scores = Map::new(&env);
 
@@ -356,9 +355,9 @@ mod tests {
         let result = clear_auction(bids, 2000, scores);
         assert_eq!(result.len(), 2);
 
-        // Both winners should pay the marginal winner's discount (300 bps)
-        assert_eq!(result.get(0).unwrap().clearing_discount_bps, 300);
-        assert_eq!(result.get(1).unwrap().clearing_discount_bps, 300);
+        // Both winners should pay the marginal winner's discount (500 bps)
+        assert_eq!(result.get(0).unwrap().clearing_discount_bps, 500);
+        assert_eq!(result.get(1).unwrap().clearing_discount_bps, 500);
     }
 
     #[test]
@@ -407,7 +406,7 @@ mod tests {
     fn test_simulate_clearing_contract_fn() {
         let env = test_env();
         let contract_id = env.register_contract(None, AuctionContract);
-        let client = crate::Client::new(&env, &contract_id);
+        let client = crate::AuctionContractClient::new(&env, &contract_id);
 
         let sme1 = Address::generate(&env);
         let sme2 = Address::generate(&env);

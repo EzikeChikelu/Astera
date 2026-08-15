@@ -9,9 +9,7 @@ pub fn calculate_waterfall_split(
 ) -> (i128, i128) {
     let yearly = 365u64 * 24 * 60 * 60;
 
-    let interest = senior_principal
-        * senior_target_yield_bps as i128
-        * elapsed_secs as i128
+    let interest = senior_principal * senior_target_yield_bps as i128 * elapsed_secs as i128
         / 10_000
         / yearly as i128;
 
@@ -28,16 +26,10 @@ pub fn calculate_waterfall_split(
     (senior_amount, junior_amount)
 }
 
-pub fn calculate_loss_allocation(
-    shortfall: i128,
-    junior_remaining: i128,
-) -> (i128, i128) {
+pub fn calculate_loss_allocation(shortfall: i128, junior_remaining: i128) -> (i128, i128) {
     if shortfall <= junior_remaining {
         (shortfall, 0)
     } else {
-        (
-            junior_remaining,
-            shortfall - junior_remaining,
-        )
+        (junior_remaining, shortfall - junior_remaining)
     }
 }

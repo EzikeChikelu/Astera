@@ -134,7 +134,7 @@ fn test_deposit_drains_withdrawal_queue_opportunistically() {
 
     mint(&env, &usdc_id, &investor, 10_000);
     mint(&env, &usdc_id, &sme, 10_000);
-    client.deposit(&investor, &usdc_id, &10_000);
+    client.deposit(&investor, &usdc_id, &10_000, &None);
     client.fund_invoice(
         &admin,
         &1u64,
@@ -152,7 +152,7 @@ fn test_deposit_drains_withdrawal_queue_opportunistically() {
     // A second investor's deposit brings in fresh liquidity. deposit() should now
     // opportunistically drain the queue without any repayment happening.
     mint(&env, &usdc_id, &new_capital, 10_000);
-    client.deposit(&new_capital, &usdc_id, &10_000);
+    client.deposit(&new_capital, &usdc_id, &10_000, &None);
 
     assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
     assert_eq!(share_balance(&env, &share_token, &investor), 0);
@@ -169,7 +169,7 @@ fn test_drain_withdrawal_queue_permissionless_entrypoint() {
 
     mint(&env, &usdc_id, &investor, 10_000);
     mint(&env, &usdc_id, &sme, 10_000);
-    client.deposit(&investor, &usdc_id, &10_000);
+    client.deposit(&investor, &usdc_id, &10_000, &None);
     client.fund_invoice(
         &admin,
         &1u64,
@@ -213,8 +213,8 @@ fn test_request_withdrawal_rejects_when_queue_full() {
     mint(&env, &usdc_id, &alice, 10_000);
     mint(&env, &usdc_id, &bob, 10_000);
     mint(&env, &usdc_id, &sme, 20_000);
-    client.deposit(&alice, &usdc_id, &10_000);
-    client.deposit(&bob, &usdc_id, &10_000);
+    client.deposit(&alice, &usdc_id, &10_000, &None);
+    client.deposit(&bob, &usdc_id, &10_000, &None);
     client.fund_invoice(
         &admin,
         &1u64,
@@ -253,8 +253,8 @@ fn test_process_withdrawal_queue_prioritizes_aged_requests() {
     mint(&env, &usdc_id, &alice, 10_000);
     mint(&env, &usdc_id, &bob, 10_000);
     mint(&env, &usdc_id, &sme, 20_500);
-    client.deposit(&alice, &usdc_id, &10_000);
-    client.deposit(&bob, &usdc_id, &10_000);
+    client.deposit(&alice, &usdc_id, &10_000, &None);
+    client.deposit(&bob, &usdc_id, &10_000, &None);
     client.fund_invoice(
         &admin,
         &1u64,
@@ -297,7 +297,7 @@ fn test_estimate_withdrawal_wait_front_of_queue_returns_minimum_estimate() {
 
     mint(&env, &usdc_id, &investor, 10_000);
     mint(&env, &usdc_id, &sme, 10_000);
-    client.deposit(&investor, &usdc_id, &10_000);
+    client.deposit(&investor, &usdc_id, &10_000, &None);
     client.fund_invoice(
         &admin,
         &1u64,
@@ -327,7 +327,7 @@ fn test_liquidity_forecast_reflects_known_invoice_due_dates() {
 
     mint(&env, &usdc_id, &investor, 1_000_000);
     mint(&env, &usdc_id, &sme, 1_000_000);
-    client.deposit(&investor, &usdc_id, &1_000_000);
+    client.deposit(&investor, &usdc_id, &1_000_000, &None);
 
     let principal_1: i128 = 100_000;
     let principal_2: i128 = 200_000;
@@ -412,7 +412,7 @@ proptest! {
 
         for d in deposits.iter() {
             mint(&env, &usdc_id, &investor, *d);
-            client.deposit(&investor, &usdc_id, d);
+            client.deposit(&investor, &usdc_id, d, &None);
         }
 
         prop_assert!(available_of(&env, &pool_id, &investor, &usdc_id) >= 0);
