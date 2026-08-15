@@ -112,61 +112,6 @@ export function initDb(dbPath: string): Database.Database {
   );
 }
 
-export function withDbReconnect<T>(
-  db: Database.Database,
-  operation: (db: Database.Database) => T,
-  dbPath: string,
-): T {
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 500;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return operation(db);
-    } catch (error: any) {
-      const isDbError =
-        error.message?.includes("database") ||
-        error.message?.includes("SQLITE") ||
-        error.code === "SQLITE_BUSY" ||
-        error.code === "SQLITE_LOCKED";
-
-      if (isDbError && attempt < MAX_RETRIES) {
-        console.error(
-          `[db] Database operation failed (attempt ${attempt}/${MAX_RETRIES}):`,
-          error.message,
-        );
-        console.log(`[db] Attempting to reconnect...`);
-
-        try {
-          db.close();
-        } catch (closeError) {
-          console.error("[db] Error closing database:", closeError);
-        }
-
-        const delay = RETRY_DELAY_MS * attempt;
-        const sleepUntil = Date.now() + delay;
-        while (Date.now() < sleepUntil) {
-          // Busy wait
-        }
-
-        try {
-          db = initDb(dbPath);
-          console.log("[db] Reconnected successfully");
-        } catch (reconnectError: any) {
-          console.error("[db] Reconnection failed:", reconnectError.message);
-          if (attempt === MAX_RETRIES) {
-            throw reconnectError;
-          }
-        }
-      } else {
-        throw error;
-      }
-    }
-  }
-
-  throw new Error("[db] Operation failed after all retry attempts");
-}
-
 export function storeEvents(
   db: Database.Database,
   events: IndexedEvent[],

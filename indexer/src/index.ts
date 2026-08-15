@@ -252,7 +252,6 @@ async function pollLoop(db: any, state: { lastProcessedLedger: string }) {
       if (response.records && response.records.length > 0) {
         const lastRecord = response.records[response.records.length - 1];
         cursor = lastRecord.paging_token || cursor;
-        // state.lastProcessedLedger = cursor;
       }
 
       consecutiveFailures = 0;
