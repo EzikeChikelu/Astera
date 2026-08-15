@@ -5,8 +5,7 @@ export const DASHBOARD_VIEW_MODES = {
   PIPELINE: 'pipeline',
 } as const;
 
-export type DashboardViewMode =
-  (typeof DASHBOARD_VIEW_MODES)[keyof typeof DASHBOARD_VIEW_MODES];
+export type DashboardViewMode = (typeof DASHBOARD_VIEW_MODES)[keyof typeof DASHBOARD_VIEW_MODES];
 
 export const DASHBOARD_VIEW_STORAGE_KEY = 'astera_dashboard_view_mode';
 
@@ -20,12 +19,7 @@ export type DashboardRowLike = {
   };
 };
 
-export type PipelineColumnKey =
-  | 'pending'
-  | 'awaitingVerification'
-  | 'verified'
-  | 'funded'
-  | 'paid';
+export type PipelineColumnKey = 'pending' | 'awaitingVerification' | 'verified' | 'funded' | 'paid';
 
 export type PipelineColumnDefinition = {
   key: PipelineColumnKey;
@@ -54,4 +48,3 @@ export function isOverdueInvoice(row: DashboardRowLike, nowUnix: number): boolea
 export function isAttentionInvoice(row: DashboardRowLike, nowUnix: number): boolean {
   return ATTENTION_STATUSES.includes(row.invoice.status) || isOverdueInvoice(row, nowUnix);
 }
-

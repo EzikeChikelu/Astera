@@ -14,9 +14,7 @@ async function injectAdminWallet(page: import('@playwright/test').Page) {
 test.describe('Admin liquidity dashboard', () => {
   test.skip(!!process.env.CI, 'Admin dashboard contract mocks need local Soroban stubs in CI.');
 
-  test('renders per-token liquidity stats, forecast chart, and pending queue', async ({
-    page,
-  }) => {
+  test('renders per-token liquidity stats, forecast chart, and pending queue', async ({ page }) => {
     await injectAdminWallet(page);
     await stubAdminDashboardContracts(page, MOCK_ADDRESS);
 

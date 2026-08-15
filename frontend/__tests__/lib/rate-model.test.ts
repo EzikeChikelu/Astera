@@ -4,11 +4,7 @@
  * tests in contracts/pool/tests/rate_model_tests.rs.
  */
 
-import {
-  computeCurrentRateBps,
-  sampleRateCurve,
-  validateRateModelConfig,
-} from '@/lib/rate-model';
+import { computeCurrentRateBps, sampleRateCurve, validateRateModelConfig } from '@/lib/rate-model';
 import type { RateModelConfig } from '@/lib/types';
 
 const standardModel: RateModelConfig = {

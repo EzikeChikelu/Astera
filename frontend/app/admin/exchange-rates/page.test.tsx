@@ -56,16 +56,19 @@ describe('AdminExchangeRatesPage', () => {
 
     render(<AdminExchangeRatesPage />);
 
-    await waitFor(() => expect(screen.getByText('Current Rates')).toBeInTheDocument());
+    // The next-intl mock (__mocks__/next-intl.js) returns translation keys
+    // verbatim (and ignores interpolation params), so assertions match the
+    // raw key strings rather than the rendered English copy.
+    await waitFor(() => expect(screen.getByText('currentRates')).toBeInTheDocument());
 
-    await user.type(screen.getByPlaceholderText('e.g. 100'), '108');
-    await user.click(screen.getByRole('button', { name: /set exchange rate/i }));
+    await user.type(screen.getByPlaceholderText('ratePlaceholder'), '108');
+    await user.click(screen.getByRole('button', { name: 'setRate' }));
 
-    expect(screen.getByText(/review exchange rate update/i)).toBeInTheDocument();
+    expect(screen.getByText('reviewTitle')).toBeInTheDocument();
     expect(mockBuildSetExchangeRateTx).not.toHaveBeenCalled();
     expect(mockSubmitTx).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole('button', { name: /confirm & submit/i }));
+    await user.click(screen.getByRole('button', { name: 'confirmSubmit' }));
 
     await waitFor(() =>
       expect(mockBuildSetExchangeRateTx).toHaveBeenCalledWith('GABC123', 'USDC', 10_800),

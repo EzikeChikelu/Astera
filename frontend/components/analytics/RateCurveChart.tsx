@@ -69,8 +69,8 @@ export function RateCurveChart({
         )}
       </div>
       <p className="text-xs text-brand-muted mb-4">
-        Kink at {(config.optimalUtilizationBps / 100).toFixed(0)}% utilization — rates rise
-        steeply beyond it to attract deposits and slow draw-downs.
+        Kink at {(config.optimalUtilizationBps / 100).toFixed(0)}% utilization — rates rise steeply
+        beyond it to attract deposits and slow draw-downs.
       </p>
       <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">

@@ -147,19 +147,6 @@ export function isInAppEnabled(alertType: AlertType): boolean {
   return value ?? true;
 }
 
-export function updateInAppPreference(
-  alertType: AlertType,
-  enabled: boolean,
-): NotificationPreferences {
-  const prefs = loadNotificationPreferences();
-  const next: NotificationPreferences = {
-    ...prefs,
-    inApp: { ...(prefs.inApp ?? {}), [alertType]: enabled },
-  };
-  saveNotificationPreferences(next);
-  return next;
-}
-
 export function isValidEmail(email: string): boolean {
   const trimmed = email.trim();
   if (!trimmed) return false;

@@ -57,9 +57,7 @@ export function LiquidityForecastChart({
           {title}
         </h4>
         {queuedDemand !== undefined && queuedDemand > 0n && (
-          <span className="text-xs text-brand-muted">
-            {formatUSDC(queuedDemand)} queued
-          </span>
+          <span className="text-xs text-brand-muted">{formatUSDC(queuedDemand)} queued</span>
         )}
       </div>
       <div className="h-40">
@@ -79,7 +77,9 @@ export function LiquidityForecastChart({
             />
             <YAxis
               tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 10 }}
-              tickFormatter={(v: number) => `$${v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v.toFixed(0)}`}
+              tickFormatter={(v: number) =>
+                `$${v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v.toFixed(0)}`
+              }
               width={44}
             />
             <Tooltip

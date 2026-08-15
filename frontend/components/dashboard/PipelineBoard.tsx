@@ -39,11 +39,7 @@ export default function PipelineBoard({ rows }: Props) {
       <div className="overflow-x-auto pb-2">
         <div className="flex min-w-max gap-4">
           {columnData.map((column) => (
-            <PipelineColumn
-              key={column.key}
-              title={t(column.labelKey)}
-              rows={column.rows}
-            />
+            <PipelineColumn key={column.key} title={t(column.labelKey)} rows={column.rows} />
           ))}
         </div>
       </div>
@@ -68,7 +64,9 @@ export default function PipelineBoard({ rows }: Props) {
                 className="rounded-xl border border-brand-border bg-brand-dark p-3 transition-colors hover:border-brand-gold/50"
               >
                 <p className="text-xs text-brand-muted">#{row.invoice.id}</p>
-                <p className="mt-1 line-clamp-1 text-sm font-medium text-white">{row.metadata.name}</p>
+                <p className="mt-1 line-clamp-1 text-sm font-medium text-white">
+                  {row.metadata.name}
+                </p>
                 <p className="mt-1 text-xs text-red-400">{row.invoice.status}</p>
               </Link>
             ))}
@@ -78,4 +76,3 @@ export default function PipelineBoard({ rows }: Props) {
     </div>
   );
 }
-

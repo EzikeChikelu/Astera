@@ -67,20 +67,22 @@ describe('AdminInvoicesPage batch funding', () => {
 
     render(<AdminInvoicesPage />);
 
-    expect(await screen.findByText('Verified Invoices Queue')).toBeInTheDocument();
+    // The next-intl mock (__mocks__/next-intl.js) returns translation keys
+    // verbatim (and ignores interpolation params), so assertions match the
+    // raw key strings rather than the rendered English copy.
+    expect(await screen.findByText('titleFunding')).toBeInTheDocument();
     expect(await screen.findByText('#123')).toBeInTheDocument();
 
-    const invoiceCheckbox = screen.getByRole('checkbox', { name: /Select invoice 123/i });
+    const invoiceCheckbox = screen.getByRole('checkbox', { name: 'selectInvoice' });
     await userEvent.click(invoiceCheckbox);
 
-    const batchButton = await screen.findByRole('button', { name: /Fund Selected \(1\)/i });
+    const batchButton = await screen.findByRole('button', { name: 'fundSelected' });
     expect(batchButton).toBeEnabled();
 
     await userEvent.click(batchButton);
-    expect(await screen.findByText('Fund 1 selected invoices')).toBeInTheDocument();
+    expect(await screen.findByText('batchConfirmTitle')).toBeInTheDocument();
 
-    const confirmButtons = screen.getAllByRole('button', { name: /Fund selected/i });
-    const confirmButton = confirmButtons[confirmButtons.length - 1]!;
+    const confirmButton = screen.getByRole('button', { name: 'batchConfirmLabel' });
     await userEvent.click(confirmButton);
 
     await waitFor(() => {

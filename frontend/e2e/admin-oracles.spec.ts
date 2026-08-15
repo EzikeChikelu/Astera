@@ -70,8 +70,8 @@ test.describe('Admin oracle network', () => {
     await page.getByPlaceholder('Invoice ID').fill('999999');
     await page.getByRole('button', { name: 'Look up' }).click();
 
-    await expect(
-      page.getByText('No verification round found for that invoice.'),
-    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('No verification round found for that invoice.')).toBeVisible({
+      timeout: 10_000,
+    });
   });
 });

@@ -67,9 +67,7 @@ export default function NotificationBell() {
       {/* Bell button */}
       <button
         onClick={handleOpen}
-        aria-label={
-          unreadCount > 0 ? t('buttonUnread', { count: unreadCount }) : t('button')
-        }
+        aria-label={unreadCount > 0 ? t('buttonUnread', { count: unreadCount }) : t('button')}
         aria-haspopup="true"
         aria-expanded={open}
         className="relative p-2 rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold"

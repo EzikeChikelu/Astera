@@ -15,8 +15,10 @@ export function loadInvoiceTemplates(): InvoiceTemplate[] {
   if (typeof window === 'undefined') return [];
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '[]');
-    return Array.isArray(value) ? value as InvoiceTemplate[] : [];
-  } catch { return []; }
+    return Array.isArray(value) ? (value as InvoiceTemplate[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 export function saveInvoiceTemplates(templates: InvoiceTemplate[]): void {

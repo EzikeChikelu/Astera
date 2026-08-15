@@ -24,6 +24,11 @@ import {
   getCollateralDeposit,
   buildDepositCollateralTx,
   buildTopUpCollateralTx,
+  isInvoicePrivate,
+  buildSetInvoicePrivateTx,
+  getFullCreditScore,
+  getCoFundingRound,
+  buildCommitToInvoiceTx,
   submitTx,
 } from '@/lib/contracts';
 import {
@@ -59,7 +64,6 @@ import type {
   CoFundingRound,
   FullCreditScore,
 } from '@/lib/types';
-import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
 
@@ -196,6 +200,13 @@ export default function InvoiceDetailPage() {
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
+  const [creditScore, setCreditScore] = useState<FullCreditScore | null>(null);
+  const [coFundingRound, setCoFundingRound] = useState<CoFundingRound | null>(null);
+  const [commitAmount, setCommitAmount] = useState<string>('');
+  const [commitLoading, setCommitLoading] = useState(false);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -453,7 +464,11 @@ export default function InvoiceDetailPage() {
       if (signError) throw new Error(signError.message || 'Signing rejected.');
 
       await submitTx(signedTxXdr);
-      toast.success(collateralDeposit ? 'Collateral topped up successfully!' : 'Collateral posted successfully!');
+      toast.success(
+        collateralDeposit
+          ? 'Collateral topped up successfully!'
+          : 'Collateral posted successfully!',
+      );
       setCollateralAmount('');
       setCollateralModalOpen(false);
       await loadInvoice();
@@ -904,15 +919,25 @@ export default function InvoiceDetailPage() {
 
                 if (collateralDeposit && !collateralDeposit.settled) {
                   const outstanding = fundedInvoice ? remainingDue : metadata.amount;
-                  const ratio = outstanding > 0n ? Number((collateralDeposit.amount * 10_000n) / outstanding) / 100 : 0;
+                  const ratio =
+                    outstanding > 0n
+                      ? Number((collateralDeposit.amount * 10_000n) / outstanding) / 100
+                      : 0;
                   const targetRatio = collateralConfig.collateralBps / 100;
                   const isAtRisk = ratio < targetRatio * 1.2;
                   return (
                     <div className="space-y-3 text-sm">
                       <div className="flex items-center justify-between">
                         <span className="text-brand-muted">Current ratio</span>
-                        <span className={isAtRisk ? 'font-semibold text-yellow-400' : 'font-semibold text-green-400'}>
-                          {ratio.toFixed(0)}% {isAtRisk ? '⚠' : '✓'} (target {targetRatio.toFixed(0)}%)
+                        <span
+                          className={
+                            isAtRisk
+                              ? 'font-semibold text-yellow-400'
+                              : 'font-semibold text-green-400'
+                          }
+                        >
+                          {ratio.toFixed(0)}% {isAtRisk ? '⚠' : '✓'} (target{' '}
+                          {targetRatio.toFixed(0)}%)
                         </span>
                       </div>
                       <div className="flex justify-between">
@@ -1047,13 +1072,27 @@ export default function InvoiceDetailPage() {
                 </p>
                 <WalletConnect />
               </div>
-              <div className="mt-5 flex gap-3">
-                <button onClick={() => setCollateralModalOpen(false)} disabled={collateralLoading} className="flex-1 rounded-xl border border-brand-border px-4 py-2 text-sm">Cancel</button>
-                <button onClick={() => void handleDepositCollateral()} disabled={collateralLoading || !collateralAmount} className="flex-1 rounded-xl bg-brand-gold px-4 py-2 text-sm font-semibold text-brand-dark disabled:opacity-60">
-                  {collateralLoading ? 'Signing...' : 'Confirm & Sign'}
+            ) : (
+              <div className="flex gap-3">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Amount (USDC)"
+                  value={commitAmount}
+                  onChange={(e) => setCommitAmount(e.target.value)}
+                  disabled={commitLoading}
+                  className="flex-1 bg-brand-dark border border-brand-border rounded-xl px-4 py-2.5 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-sm disabled:opacity-50"
+                />
+                <button
+                  onClick={() => void handleCommitToInvoice()}
+                  disabled={commitLoading || !commitAmount}
+                  className="px-5 py-2.5 bg-brand-gold text-brand-dark rounded-xl text-sm font-semibold hover:bg-brand-amber transition-colors disabled:opacity-50"
+                >
+                  {commitLoading ? 'Funding...' : 'Fund This Invoice'}
                 </button>
               </div>
-            </div>
+            )}
           </div>
         )}
 

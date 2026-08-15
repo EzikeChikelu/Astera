@@ -10,7 +10,6 @@ import { toStroops, nativeToScVal, Address, xdr, INVOICE_CONTRACT_ID } from '@/l
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
-import { toStroops } from '@/lib/stellar';
 import GlossaryTerm from '@/components/GlossaryTerm';
 import { getInvoiceTemplate, upsertInvoiceTemplate } from '@/lib/invoiceTemplates';
 

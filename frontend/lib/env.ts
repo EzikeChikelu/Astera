@@ -21,24 +21,6 @@ const REQUIRED_VARS = [
   'NEXT_PUBLIC_USDC_TOKEN_ID',
 ] as const;
 
-const NETWORK_CONFIGS = {
-  testnet: {
-    horizonUrl: 'https://horizon-testnet.stellar.org',
-    sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
-    networkPassphrase: 'Test SDF Network ; September 2015',
-  },
-  mainnet: {
-    horizonUrl: 'https://horizon.stellar.org',
-    sorobanRpcUrl: 'https://soroban.stellar.org',
-    networkPassphrase: 'Public Global Stellar Network ; September 2015',
-  },
-  standalone: {
-    horizonUrl: 'http://localhost:8000',
-    sorobanRpcUrl: 'http://localhost:8000/soroban/rpc',
-    networkPassphrase: 'Standalone Network ; February 2017',
-  },
-} as const;
-
 function validateContractId(value: string, name: string): EnvValidationError | null {
   if (!value || value.trim() === '') {
     return { variable: name, message: 'is required' };
@@ -129,18 +111,6 @@ export function getEnvConfig(): EnvConfig {
     NEXT_PUBLIC_NETWORK: network,
     NEXT_PUBLIC_HORIZON_URL: process.env.NEXT_PUBLIC_HORIZON_URL,
     NEXT_PUBLIC_SOROBAN_RPC_URL: process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
-  };
-}
-
-export function getNetworkConfig(network?: EnvConfig['NEXT_PUBLIC_NETWORK']) {
-  const targetNetwork = network || getEnvConfig().NEXT_PUBLIC_NETWORK;
-  const config = NETWORK_CONFIGS[targetNetwork];
-  const envConfig = getEnvConfig();
-
-  return {
-    ...config,
-    horizonUrl: envConfig.NEXT_PUBLIC_HORIZON_URL || config.horizonUrl,
-    sorobanRpcUrl: envConfig.NEXT_PUBLIC_SOROBAN_RPC_URL || config.sorobanRpcUrl,
   };
 }
 

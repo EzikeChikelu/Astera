@@ -29,7 +29,11 @@ function isDismissed(): boolean {
   return localStorage.getItem(DISMISSED_KEY) === 'true';
 }
 
-export default function SMEOnboardingChecklist({ walletConnected, invoiceCount, onDismiss }: Props) {
+export default function SMEOnboardingChecklist({
+  walletConnected,
+  invoiceCount,
+  onDismiss,
+}: Props) {
   const handleDismiss = useCallback(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem(DISMISSED_KEY, 'true');
@@ -75,7 +79,12 @@ export default function SMEOnboardingChecklist({ walletConnected, invoiceCount, 
               ) : done ? (
                 <span className="flex items-center gap-2 text-sm text-green-400">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M5 13l4 4L19 7"
+                    />
                   </svg>
                   {step.label}
                 </span>
