@@ -1,10 +1,12 @@
 #![cfg(test)]
 
-// #1025: secondary market for pool positions and co-funding shares.
+// #1025 / pool-split: secondary market for pool positions and co-funding
+// shares, now a satellite contract calling into `pool`'s trusted
+// `market_settle_listing` for the actual balance movement.
 
-use pool::{
-    DataKey, FundingPool, FundingPoolClient, InvestorPosition, ListingKind, ListingStatus,
-    OpenCoFundingRequest, PoolError,
+use pool::{DataKey, FundingPool, FundingPoolClient, InvestorPosition, OpenCoFundingRequest};
+use secondary_market::{
+    ListingKind, ListingStatus, MarketError, SecondaryMarket, SecondaryMarketClient,
 };
 use soroban_sdk::{
     contract, contractimpl,
@@ -66,21 +68,34 @@ impl DummyInvoice {
     pub fn record_funding(_env: Env, _id: u64, _amount: i128, _pool: Address) {}
 }
 
-fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address) {
+fn setup(
+    env: &Env,
+) -> (
+    FundingPoolClient<'_>,
+    SecondaryMarketClient<'_>,
+    Address,
+    Address,
+) {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
-    let contract_id = env.register(FundingPool, ());
-    let client = FundingPoolClient::new(env, &contract_id);
+    let pool_id = env.register(FundingPool, ());
+    let pool_client = FundingPoolClient::new(env, &pool_id);
     let admin = Address::generate(env);
     let token_admin = Address::generate(env);
     let usdc_id = env
         .register_stellar_asset_contract_v2(token_admin)
         .address();
     let invoice_contract = env.register(DummyInvoice, ());
-    DummyInvoiceClient::new(env, &invoice_contract).set_pool(&contract_id);
+    DummyInvoiceClient::new(env, &invoice_contract).set_pool(&pool_id);
     let share_token = env.register(DummyShare, ());
-    client.initialize(&admin, &usdc_id, &share_token, &invoice_contract);
-    client.set_max_investor_concentration(&admin, &10_000u32);
-    (client, admin, usdc_id)
+    pool_client.initialize(&admin, &usdc_id, &share_token, &invoice_contract);
+    pool_client.set_max_investor_concentration(&admin, &10_000u32);
+
+    let market_id = env.register(SecondaryMarket, ());
+    let market_client = SecondaryMarketClient::new(env, &market_id);
+    market_client.initialize(&admin, &pool_id);
+    pool_client.set_secondary_market_contract(&admin, &market_id);
+
+    (pool_client, market_client, admin, usdc_id)
 }
 
 fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
@@ -103,20 +118,20 @@ fn available_of(env: &Env, pool_id: &Address, investor: &Address, token: &Addres
 /// Helper: open + fill a co-funding round and return (round_id, investor, bps).
 fn setup_filled_cofund_round(
     env: &Env,
-    client: &FundingPoolClient<'_>,
+    pool_client: &FundingPoolClient<'_>,
     admin: &Address,
     usdc: &Address,
 ) -> (u64, Address) {
     let investor = Address::generate(env);
     mint(env, usdc, &investor, 10_000);
-    client.deposit(&investor, usdc, &10_000i128, &None);
+    pool_client.deposit(&investor, usdc, &10_000i128, &None);
 
     let invoice_id: u64 = 42;
     let sme = Address::generate(env);
     let due_date = env.ledger().timestamp() + 86_400;
     let deadline = env.ledger().timestamp() + 3_600;
 
-    client.open_co_funding(
+    pool_client.open_co_funding(
         admin,
         &OpenCoFundingRequest {
             invoice_id,
@@ -130,8 +145,8 @@ fn setup_filled_cofund_round(
         },
     );
 
-    client.commit_to_invoice(&investor, &invoice_id, &5_000i128);
-    client.finalize_co_funding(&investor, &invoice_id);
+    pool_client.commit_to_invoice(&investor, &invoice_id, &5_000i128);
+    pool_client.finalize_co_funding(&investor, &invoice_id);
 
     (invoice_id, investor)
 }
@@ -142,13 +157,13 @@ fn setup_filled_cofund_round(
 fn test_list_cofund_position_creates_listing() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
     assert!(bps > 0);
 
-    let listing_id = client.list_position(
+    let listing_id = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -156,7 +171,7 @@ fn test_list_cofund_position_creates_listing() {
         &1_000i128,
     );
 
-    let listing = client.get_listing(&listing_id).unwrap();
+    let listing = market_client.get_listing(&listing_id).unwrap();
     assert_eq!(listing.invoice_id, invoice_id);
     assert_eq!(listing.seller, investor);
     assert_eq!(listing.status, ListingStatus::Open);
@@ -168,59 +183,53 @@ fn test_list_cofund_position_creates_listing() {
 fn test_list_position_zero_amount_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let result = client.try_list_position(
+    let result = market_client.try_list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
         &0u64,
         &1_000i128,
     );
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::ZeroAmount.into());
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::ZeroAmount);
 }
 
 #[test]
 fn test_list_position_zero_price_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let result = client.try_list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let result = market_client.try_list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
         &(bps as u64),
         &0i128,
     );
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::InvalidAmount.into()
-    );
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
 }
 
 #[test]
 fn test_list_position_exceeds_share_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let result = client.try_list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let result = market_client.try_list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
         &(bps as u64 + 1),
         &1_000i128,
     );
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::InsufficientListingBalance.into()
-    );
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
 }
 
 // ── cancel_listing ───────────────────────────────────────────────────────────
@@ -229,11 +238,11 @@ fn test_list_position_exceeds_share_rejected() {
 fn test_cancel_listing_by_seller_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let listing_id = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -241,9 +250,9 @@ fn test_cancel_listing_by_seller_succeeds() {
         &500i128,
     );
 
-    client.cancel_listing(&investor, &listing_id);
+    market_client.cancel_listing(&investor, &listing_id);
 
-    let listing = client.get_listing(&listing_id).unwrap();
+    let listing = market_client.get_listing(&listing_id).unwrap();
     assert_eq!(listing.status, ListingStatus::Cancelled);
 }
 
@@ -251,11 +260,11 @@ fn test_cancel_listing_by_seller_succeeds() {
 fn test_cancel_listing_by_non_seller_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let listing_id = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -264,22 +273,19 @@ fn test_cancel_listing_by_non_seller_rejected() {
     );
 
     let stranger = Address::generate(&env);
-    let result = client.try_cancel_listing(&stranger, &listing_id);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::ListingNotSeller.into()
-    );
+    let result = market_client.try_cancel_listing(&stranger, &listing_id);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::ListingNotSeller);
 }
 
 #[test]
 fn test_cancel_already_cancelled_listing_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let listing_id = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -287,12 +293,9 @@ fn test_cancel_already_cancelled_listing_rejected() {
         &500i128,
     );
 
-    client.cancel_listing(&investor, &listing_id);
-    let result = client.try_cancel_listing(&investor, &listing_id);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::ListingNotOpen.into()
-    );
+    market_client.cancel_listing(&investor, &listing_id);
+    let result = market_client.try_cancel_listing(&investor, &listing_id);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::ListingNotOpen);
 }
 
 // ── buy_listing ──────────────────────────────────────────────────────────────
@@ -301,13 +304,13 @@ fn test_cancel_already_cancelled_listing_rejected() {
 fn test_buy_cofund_listing_transfers_share_and_price() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let seller_bps = client.get_co_fund_share(&invoice_id, &seller);
+    let seller_bps = pool_client.get_co_fund_share(&invoice_id, &seller);
     let price = 800i128;
 
-    let listing_id = client.list_position(
+    let listing_id = market_client.list_position(
         &seller,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -318,26 +321,26 @@ fn test_buy_cofund_listing_transfers_share_and_price() {
     // Buyer deposits funds so they have available balance.
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 2_000);
-    client.deposit(&buyer, &usdc, &2_000i128, &None);
+    pool_client.deposit(&buyer, &usdc, &2_000i128, &None);
 
-    let buyer_available_before = available_of(&env, &client.address, &buyer, &usdc);
-    let seller_available_before = available_of(&env, &client.address, &seller, &usdc);
+    let buyer_available_before = available_of(&env, &pool_client.address, &buyer, &usdc);
+    let seller_available_before = available_of(&env, &pool_client.address, &seller, &usdc);
 
-    client.buy_listing(&buyer, &listing_id);
+    market_client.buy_listing(&buyer, &listing_id);
 
     // Listing is now Filled.
-    let listing = client.get_listing(&listing_id).unwrap();
+    let listing = market_client.get_listing(&listing_id).unwrap();
     assert_eq!(listing.status, ListingStatus::Filled);
 
     // Buyer's CoFundShare increased; seller's decreased.
-    let buyer_bps_after = client.get_co_fund_share(&invoice_id, &buyer);
-    let seller_bps_after = client.get_co_fund_share(&invoice_id, &seller);
+    let buyer_bps_after = pool_client.get_co_fund_share(&invoice_id, &buyer);
+    let seller_bps_after = pool_client.get_co_fund_share(&invoice_id, &seller);
     assert_eq!(buyer_bps_after, seller_bps);
     assert_eq!(seller_bps_after, 0);
 
     // Buyer's available balance decreased by price; seller's increased.
-    let buyer_available_after = available_of(&env, &client.address, &buyer, &usdc);
-    let seller_available_after = available_of(&env, &client.address, &seller, &usdc);
+    let buyer_available_after = available_of(&env, &pool_client.address, &buyer, &usdc);
+    let seller_available_after = available_of(&env, &pool_client.address, &seller, &usdc);
     assert_eq!(buyer_available_after, buyer_available_before - price);
     assert_eq!(seller_available_after, seller_available_before + price);
 }
@@ -346,39 +349,36 @@ fn test_buy_cofund_listing_transfers_share_and_price() {
 fn test_buy_cancelled_listing_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &seller);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &seller);
+    let listing_id = market_client.list_position(
         &seller,
         &invoice_id,
         &ListingKind::CoFunding,
         &(bps as u64),
         &500i128,
     );
-    client.cancel_listing(&seller, &listing_id);
+    market_client.cancel_listing(&seller, &listing_id);
 
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 1_000);
-    client.deposit(&buyer, &usdc, &1_000i128, &None);
+    pool_client.deposit(&buyer, &usdc, &1_000i128, &None);
 
-    let result = client.try_buy_listing(&buyer, &listing_id);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::ListingNotOpen.into()
-    );
+    let result = market_client.try_buy_listing(&buyer, &listing_id);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::ListingNotOpen);
 }
 
 #[test]
 fn test_seller_cannot_buy_own_listing() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &seller);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &seller);
+    let listing_id = market_client.list_position(
         &seller,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -386,20 +386,20 @@ fn test_seller_cannot_buy_own_listing() {
         &500i128,
     );
 
-    let result = client.try_buy_listing(&seller, &listing_id);
-    assert_eq!(result.unwrap_err().unwrap(), PoolError::Unauthorized.into());
+    let result = market_client.try_buy_listing(&seller, &listing_id);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::Unauthorized);
 }
 
 #[test]
 fn test_buy_listing_insufficient_available_balance_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, seller) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &seller);
+    let bps = pool_client.get_co_fund_share(&invoice_id, &seller);
     // Price is higher than buyer's available balance.
-    let listing_id = client.list_position(
+    let listing_id = market_client.list_position(
         &seller,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -409,13 +409,13 @@ fn test_buy_listing_insufficient_available_balance_rejected() {
 
     let buyer = Address::generate(&env);
     mint(&env, &usdc, &buyer, 100);
-    client.deposit(&buyer, &usdc, &100i128, &None);
+    pool_client.deposit(&buyer, &usdc, &100i128, &None);
 
-    let result = client.try_buy_listing(&buyer, &listing_id);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        PoolError::InvalidAmount.into()
-    );
+    // Pool's own InvalidAmount check inside market_settle_listing fails;
+    // the market contract surfaces that as a generic settlement failure
+    // since it isn't in the business of re-exposing pool's error domain.
+    let result = market_client.try_buy_listing(&buyer, &listing_id);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::SettlementFailed);
 }
 
 // ── index queries ────────────────────────────────────────────────────────────
@@ -424,18 +424,18 @@ fn test_buy_listing_insufficient_available_balance_rejected() {
 fn test_list_listings_for_invoice_returns_all_ids() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let id1 = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let id1 = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
         &(bps as u64 / 2),
         &100i128,
     );
-    let id2 = client.list_position(
+    let id2 = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -443,20 +443,20 @@ fn test_list_listings_for_invoice_returns_all_ids() {
         &200i128,
     );
 
-    let ids = client.list_listings_for_invoice(&invoice_id);
-    assert!(ids.contains(&id1));
-    assert!(ids.contains(&id2));
+    let ids = market_client.list_listings_for_invoice(&invoice_id);
+    assert!(ids.contains(id1));
+    assert!(ids.contains(id2));
 }
 
 #[test]
 fn test_list_listings_for_investor_returns_seller_ids() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, usdc) = setup(&env);
-    let (invoice_id, investor) = setup_filled_cofund_round(&env, &client, &admin, &usdc);
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
 
-    let bps = client.get_co_fund_share(&invoice_id, &investor);
-    let listing_id = client.list_position(
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor);
+    let listing_id = market_client.list_position(
         &investor,
         &invoice_id,
         &ListingKind::CoFunding,
@@ -464,14 +464,14 @@ fn test_list_listings_for_investor_returns_seller_ids() {
         &300i128,
     );
 
-    let ids = client.list_listings_for_investor(&investor);
-    assert!(ids.contains(&listing_id));
+    let ids = market_client.list_listings_for_investor(&investor);
+    assert!(ids.contains(listing_id));
 }
 
 #[test]
 fn test_get_listing_nonexistent_returns_none() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _usdc) = setup(&env);
-    assert!(client.get_listing(&9999u64).is_none());
+    let (_pool_client, market_client, _admin, _usdc) = setup(&env);
+    assert!(market_client.get_listing(&9999u64).is_none());
 }

@@ -1590,6 +1590,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "secondary_market"
+version = "0.1.0"
+dependencies = [
+ "pool",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"

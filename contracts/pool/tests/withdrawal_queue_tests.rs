@@ -120,9 +120,6 @@ fn available_of(env: &Env, pool_id: &Address, investor: &Address, token: &Addres
     })
 }
 
-// Mirrors the contract's private MIN_WAIT_ESTIMATE_SECS constant (1 hour).
-const MIN_WAIT_ESTIMATE_SECS: u64 = 3_600;
-
 #[test]
 fn test_deposit_drains_withdrawal_queue_opportunistically() {
     let env = Env::default();
@@ -285,112 +282,6 @@ fn test_process_withdrawal_queue_prioritizes_aged_requests() {
     assert_eq!(queue.get(0).unwrap().shares, 10_000);
     assert_eq!(share_balance(&env, &share_token, &alice), 0);
     assert_eq!(share_balance(&env, &share_token, &bob), 10_000);
-}
-
-#[test]
-fn test_estimate_withdrawal_wait_front_of_queue_returns_minimum_estimate() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, usdc_id, _share_token) = setup(&env);
-    let investor = Address::generate(&env);
-    let sme = Address::generate(&env);
-
-    mint(&env, &usdc_id, &investor, 10_000);
-    mint(&env, &usdc_id, &sme, 10_000);
-    client.deposit(&investor, &usdc_id, &10_000, &None);
-    client.fund_invoice(
-        &admin,
-        &1u64,
-        &10_000,
-        &sme,
-        &(env.ledger().timestamp() + 86_400),
-        &usdc_id,
-    );
-    client.request_withdrawal(&investor, &usdc_id, &10_000);
-
-    // Alone at the front of the queue: capital_ahead == 0, so the predictive estimate
-    // clamps down to the minimum rather than reporting a nonsensical zero wait.
-    let estimate = client.estimate_withdrawal_wait(&investor, &usdc_id);
-    assert_eq!(estimate.queue_position, 1);
-    assert_eq!(estimate.capital_ahead, 0);
-    assert_eq!(estimate.estimated_wait_secs, MIN_WAIT_ESTIMATE_SECS);
-}
-
-#[test]
-fn test_liquidity_forecast_reflects_known_invoice_due_dates() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, usdc_id, _share_token) = setup(&env);
-    let investor = Address::generate(&env);
-    let sme = Address::generate(&env);
-    let now = env.ledger().timestamp();
-
-    mint(&env, &usdc_id, &investor, 1_000_000);
-    mint(&env, &usdc_id, &sme, 1_000_000);
-    client.deposit(&investor, &usdc_id, &1_000_000, &None);
-
-    let principal_1: i128 = 100_000;
-    let principal_2: i128 = 200_000;
-    client.fund_invoice(
-        &admin,
-        &1u64,
-        &principal_1,
-        &sme,
-        &(now + 10 * 86_400),
-        &usdc_id,
-    );
-    client.fund_invoice(
-        &admin,
-        &2u64,
-        &principal_2,
-        &sme,
-        &(now + 20 * 86_400),
-        &usdc_id,
-    );
-
-    let points = client.get_liquidity_forecast(&usdc_id, &30u32);
-    assert_eq!(points.len(), 30);
-    assert_eq!(points.get(0).unwrap().day, 1);
-    assert_eq!(points.get(29).unwrap().day, 30);
-
-    // Liquidity is monotonically non-decreasing over the horizon (repayments only
-    // add liquidity; the trailing inflow rate is never negative).
-    for i in 1..points.len() {
-        assert!(
-            points.get(i).unwrap().projected_available
-                >= points.get(i - 1).unwrap().projected_available
-        );
-    }
-
-    // Isolate the due-date contribution from the (unknown, constant-per-call) trailing
-    // inflow-rate term by differencing consecutive daily deltas: on the day an
-    // invoice's due_date is crossed, the delta jumps by exactly that invoice's
-    // principal relative to a non-crossing day.
-    let delta = |day_idx: usize| -> i128 {
-        points.get(day_idx as u32).unwrap().projected_available
-            - points
-                .get((day_idx - 1) as u32)
-                .unwrap()
-                .projected_available
-    };
-    // day index 9 = day 10 (0-indexed `points`), day index 10 = day 11 (non-crossing).
-    assert_eq!(delta(9) - delta(10), principal_1);
-    // day index 19 = day 20, day index 20 = day 21 (non-crossing).
-    assert_eq!(delta(19) - delta(20), principal_2);
-}
-
-#[test]
-fn test_liquidity_forecast_clamps_horizon() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _admin, usdc_id, _share_token) = setup(&env);
-
-    assert_eq!(client.get_liquidity_forecast(&usdc_id, &0u32).len(), 1);
-    // MAX_FORECAST_HORIZON_DAYS = 365.
-    assert_eq!(
-        client.get_liquidity_forecast(&usdc_id, &100_000u32).len(),
-        365
-    );
 }
 
 proptest! {
