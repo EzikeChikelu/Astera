@@ -12,6 +12,7 @@ import {
   REFERRAL_CONTRACT_ID,
   TRANCHE_CONTRACT_ID,
   ACCESS_CONTROL_CONTRACT_ID,
+  ARBITRATION_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -57,6 +58,13 @@ import type {
   Listing,
   ListingKind,
   ListingStatus,
+  DisputeRecord,
+  DisputeResolution,
+  DisputeCase,
+  EvidenceEntry,
+  JurorInfo,
+  JurorVoteStatus,
+  ArbitrationConfig,
 } from './types';
 import { ALL_ROLES } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
@@ -101,6 +109,9 @@ if (COMPLIANCE_CONTRACT_ID) {
 }
 if (REFERRAL_CONTRACT_ID) {
   validateContractId(REFERRAL_CONTRACT_ID, 'referral');
+}
+if (ARBITRATION_CONTRACT_ID) {
+  validateContractId(ARBITRATION_CONTRACT_ID, 'arbitration');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -2675,6 +2686,418 @@ export async function buildSlashOracleTx(params: {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #1043: structured multi-party dispute arbitration ----
+// ARBITRATION_CONTRACT_ID is optional — unset until the contract is deployed,
+// mirroring how ORACLE_REGISTRY_CONTRACT_ID is handled above. `raise_dispute`
+// itself lives on the invoice contract (it's what routes an above-threshold
+// dispute into arbitration); everything else here talks to the arbitration
+// contract directly.
+const ARBITRATION_SIM_SOURCE = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+
+/** Raises a dispute on a defaulted invoice. `respondent` represents the
+ * debtor's side of the case for arbitration purposes (see #1043's PR
+ * description for why this can't yet be the debtor's own address). */
+export async function buildRaiseDisputeTx(params: {
+  borrower: StellarAddress;
+  invoiceId: number;
+  evidenceHash: string;
+  respondent: StellarAddress;
+}): Promise<string> {
+  const account = await getRpcAccount(params.borrower);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'raise_dispute',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.borrower).toScVal(),
+        nativeToScVal(params.evidenceHash, { type: 'string' }),
+        new Address(params.respondent).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function getDispute(invoiceId: number): Promise<DisputeRecord | null> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'get_dispute',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    evidenceHash: r.evidence_hash as string,
+    filedAt: Number(r.filed_at),
+    resolvedAt: Number(r.resolved_at),
+    outcome: r.outcome as DisputeResolution,
+  };
+}
+
+function decodeArbitrationCase(raw: Record<string, unknown>): DisputeCase {
+  return {
+    id: Number(raw.id),
+    invoiceId: Number(raw.invoice_id),
+    claimant: raw.claimant as StellarAddress,
+    respondent: raw.respondent as StellarAddress,
+    amount: BigInt(String(raw.amount)),
+    openedAt: Number(raw.opened_at),
+    evidenceDeadline: Number(raw.evidence_deadline),
+    commitDeadline: Number(raw.commit_deadline),
+    revealDeadline: Number(raw.reveal_deadline),
+    jurors: (raw.jurors as StellarAddress[]) ?? [],
+    status: raw.status as DisputeCase['status'],
+    resolution: raw.resolution as DisputeResolution,
+    retryCount: Number(raw.retry_count),
+  };
+}
+
+export async function getArbitrationCase(caseId: number): Promise<DisputeCase | null> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_case',
+    [nativeToScVal(caseId, { type: 'u64' })],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return decodeArbitrationCase(raw as Record<string, unknown>);
+}
+
+/** Looks up the most recently opened case for an invoice — for callers that
+ * only know "this invoice is Disputed" and need to find the case to show. */
+export async function getArbitrationCaseByInvoice(invoiceId: number): Promise<DisputeCase | null> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_case_by_invoice',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return decodeArbitrationCase(raw as Record<string, unknown>);
+}
+
+export async function getArbitrationEvidence(caseId: number): Promise<EvidenceEntry[]> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_evidence',
+    [nativeToScVal(caseId, { type: 'u64' })],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = (scValToNative(result!.retval) as Record<string, unknown>[]) ?? [];
+  return raw.map((e) => ({
+    submitter: e.submitter as StellarAddress,
+    party: e.party as EvidenceEntry['party'],
+    evidenceHash: e.evidence_hash as string,
+    submittedAt: Number(e.submitted_at),
+  }));
+}
+
+export async function getJurorInfo(operator: string): Promise<JurorInfo | null> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_juror',
+    [new Address(operator).toScVal()],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const info = raw as Record<string, unknown>;
+  return {
+    address: info.address as StellarAddress,
+    stakeAmount: BigInt(String(info.stake_amount)),
+    stakeToken: info.stake_token as string,
+    isActive: Boolean(info.is_active),
+    casesServed: Number(info.cases_served),
+    timesSlashed: Number(info.times_slashed),
+    nonRevealStrikes: Number(info.non_reveal_strikes),
+    registeredAt: Number(info.registered_at),
+    deregisterRequestedAt:
+      info.deregister_requested_at !== undefined && info.deregister_requested_at !== null
+        ? Number(info.deregister_requested_at)
+        : null,
+  };
+}
+
+export async function listActiveJurors(): Promise<StellarAddress[]> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'list_active_jurors',
+    [],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return ((scValToNative(result!.retval) as unknown[]) ?? []) as StellarAddress[];
+}
+
+export async function getJurorCases(operator: string): Promise<number[]> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_juror_cases',
+    [new Address(operator).toScVal()],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = (scValToNative(result!.retval) as unknown[]) ?? [];
+  return raw.map((v) => Number(v));
+}
+
+export async function getJurorVoteStatus(
+  caseId: number,
+  juror: string,
+): Promise<JurorVoteStatus | null> {
+  const sim = await simulateTx(
+    ARBITRATION_CONTRACT_ID,
+    'get_vote',
+    [nativeToScVal(caseId, { type: 'u64' }), new Address(juror).toScVal()],
+    ARBITRATION_SIM_SOURCE,
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const v = raw as Record<string, unknown>;
+  return {
+    hasCommitted: v.commit_hash !== undefined && v.commit_hash !== null,
+    revealedVote:
+      v.revealed_vote !== undefined && v.revealed_vote !== null ? Boolean(v.revealed_vote) : null,
+  };
+}
+
+export async function getArbitrationConfig(): Promise<ArbitrationConfig> {
+  const sim = await simulateTx(ARBITRATION_CONTRACT_ID, 'get_config', [], ARBITRATION_SIM_SOURCE);
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    minStake: BigInt(String(raw.min_stake)),
+    stakeToken: raw.stake_token as string,
+    committeeSize: Number(raw.committee_size),
+    quorumFloor: Number(raw.quorum_floor),
+    evidenceWindowSecs: Number(raw.evidence_window_secs),
+    commitWindowSecs: Number(raw.commit_window_secs),
+    revealWindowSecs: Number(raw.reveal_window_secs),
+    deregisterCooldownSecs: Number(raw.deregister_cooldown_secs),
+    slashBps: Number(raw.slash_bps),
+    nonRevealSlashBps: Number(raw.non_reveal_slash_bps),
+    lopsidedConfidenceBps: Number(raw.lopsided_confidence_bps),
+    maxRetries: Number(raw.max_retries),
+  };
+}
+
+export async function buildSubmitEvidenceTx(params: {
+  submitter: StellarAddress;
+  caseId: number;
+  evidenceHash: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.submitter);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'submit_evidence',
+        nativeToScVal(params.caseId, { type: 'u64' }),
+        new Address(params.submitter).toScVal(),
+        nativeToScVal(params.evidenceHash, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildRegisterJurorTx(params: {
+  operator: StellarAddress;
+  stakeAmount: bigint;
+}): Promise<string> {
+  const account = await getRpcAccount(params.operator);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'register_juror',
+        new Address(params.operator).toScVal(),
+        nativeToScVal(params.stakeAmount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildDeregisterJurorTx(params: {
+  operator: StellarAddress;
+}): Promise<string> {
+  const account = await getRpcAccount(params.operator);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(contract.call('deregister_juror', new Address(params.operator).toScVal()))
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+/** Permissionless tick — `caller` just pays the fee, no special role required. */
+export async function buildSelectJurorsTx(params: {
+  caller: StellarAddress;
+  caseId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(contract.call('select_jurors', nativeToScVal(params.caseId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildCommitVoteTx(params: {
+  juror: StellarAddress;
+  caseId: number;
+  commitHash: Uint8Array;
+}): Promise<string> {
+  const account = await getRpcAccount(params.juror);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'commit_vote',
+        nativeToScVal(params.caseId, { type: 'u64' }),
+        new Address(params.juror).toScVal(),
+        nativeToScVal(Buffer.from(params.commitHash), { type: 'bytes' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildRevealVoteTx(params: {
+  juror: StellarAddress;
+  caseId: number;
+  voteChoice: boolean;
+  salt: Uint8Array;
+}): Promise<string> {
+  const account = await getRpcAccount(params.juror);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'reveal_vote',
+        nativeToScVal(params.caseId, { type: 'u64' }),
+        new Address(params.juror).toScVal(),
+        nativeToScVal(params.voteChoice, { type: 'bool' }),
+        nativeToScVal(Buffer.from(params.salt), { type: 'bytes' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+/** Permissionless tick, same caller-just-pays-fees shape as `buildSelectJurorsTx`. */
+export async function buildFinalizeCaseTx(params: {
+  caller: StellarAddress;
+  caseId: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(contract.call('finalize_case', nativeToScVal(params.caseId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildAdminResolveNoQuorumTx(params: {
+  admin: StellarAddress;
+  caseId: number;
+  resolution: 'InFavorOfSME' | 'InFavorOfDebtor';
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(ARBITRATION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'admin_resolve_no_quorum',
+        new Address(params.admin).toScVal(),
+        nativeToScVal(params.caseId, { type: 'u64' }),
+        xdr.ScVal.scvVec([nativeToScVal(params.resolution, { type: 'symbol' })]),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+/** Client-side commit-reveal helpers — `vote=true` means "in favor of the
+ * debtor" (mirrors arbitration::DisputeResolution::InFavorOfDebtor). */
+export async function computeArbitrationCommitHash(
+  vote: boolean,
+  salt: Uint8Array,
+): Promise<Uint8Array> {
+  const preimage = new Uint8Array(1 + salt.length);
+  preimage[0] = vote ? 1 : 0;
+  preimage.set(salt, 1);
+  const digest = await crypto.subtle.digest('SHA-256', preimage);
+  return new Uint8Array(digest);
+}
+
+export function generateArbitrationSalt(): Uint8Array {
+  const salt = new Uint8Array(32);
+  crypto.getRandomValues(salt);
+  return salt;
 }
 
 // ---- #867: Compliance registry ----

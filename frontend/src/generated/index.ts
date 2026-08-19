@@ -24,3 +24,11 @@ export * as SecondaryMarketContract from './secondary_market';
 // `./scripts/gen-bindings.sh` and the CI bindings job already include `pool`;
 // uncomment the line below once the contract build is fixed.
 // export * as PoolContract from './pool';
+
+// NOTE: #1043 arbitration bindings are also not generated here yet — same as
+// `oracle_registry`, this contract is driven entirely through hand-written
+// helpers in `frontend/lib/contracts.ts` rather than generated bindings.
+// `arbitration` isn't in `scripts/gen-bindings.sh`'s `DEFAULT_CONTRACTS`
+// either; pass it explicitly (`./scripts/gen-bindings.sh arbitration`) once
+// the contract has a real wasm build, then add
+// `export * as ArbitrationContract from './arbitration';` here.

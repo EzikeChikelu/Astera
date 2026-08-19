@@ -29,6 +29,22 @@ pub trait PoolContract {
     );
 }
 
+/// #1043: cross-contract interface to the arbitration contract. `invoice`
+/// calls `open_case` from `raise_dispute` once a dispute's value clears
+/// `DisputeValueThreshold`; `arbitration` calls back into this contract's
+/// `arbitration_resolve_dispute` once a case resolves.
+#[contractclient(name = "ArbitrationClient")]
+pub trait ArbitrationContract {
+    fn open_case(
+        env: Env,
+        invoice: Address,
+        invoice_id: u64,
+        claimant: Address,
+        respondent: Address,
+        amount: i128,
+    ) -> u64;
+}
+
 /// #867: cross-contract interface to the compliance registry.
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
@@ -67,6 +83,19 @@ const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const MAX_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 365 * 10; // 10 years
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
+// #1043: disputes at/above this invoice-currency amount must go through the
+// arbitration contract rather than the admin's unilateral fast path. 0 means
+// "arbitration required for every dispute" once an arbitration contract is
+// configured; there is no configured default value beyond "unset" (u64::MAX
+// sentinel below) because a sane default depends on the pool's own token
+// decimals, which this contract doesn't know.
+const DISPUTE_VALUE_THRESHOLD_UNSET: i128 = i128::MAX;
+// #1043: even if arbitration is configured and a dispute clears the value
+// threshold, the admin retains this deadman's-switch window (measured from
+// `disputed_at`, well beyond the normal `DisputeResolutionWindow`) as a last
+// resort — so a bug or pause in the arbitration contract can never leave an
+// invoice stuck in `Disputed` forever.
+const ARBITRATION_STALLED_OVERRIDE_SECS: u64 = SECS_PER_DAY * 90; // 90 days
 const MAX_DESCRIPTION_LEN: u32 = 256;
 const MAX_DEBTOR_LEN: u32 = 64;
 const MAX_VERIFICATION_HASH_LEN: u32 = 256;
@@ -182,6 +211,11 @@ pub enum InvoiceError {
     // create_invoice's #747 collision guard but missing from this enum on
     // `main`. Restored here so the crate builds; unrelated to #864.
     IDCollision = 46,
+    // #1043: structured multi-party dispute arbitration
+    ArbitrationNotConfigured = 47,
+    UnauthorizedArbitration = 48,
+    InvalidRespondent = 49,
+    ArbitrationRequired = 50,
 }
 
 #[contracttype]
@@ -357,6 +391,11 @@ const EVT: Symbol = symbol_short!("invoice");
 // (not a DataKey variant) so it can be added without touching DataKey's
 // discriminant layout.
 const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
+// #1043: arbitration contract address + dispute value threshold, same
+// Symbol-key workaround as ACCESS_CONTROL above — DataKey is already at
+// Soroban's 50-variant ceiling.
+const ARBITRATION_CONTRACT: Symbol = symbol_short!("arb_addr");
+const DISPUTE_VALUE_THRESHOLD: Symbol = symbol_short!("disp_thr");
 
 fn require_access_control(env: &Env, caller: &Address) {
     let configured: Option<Address> = env.storage().instance().get(&ACCESS_CONTROL);
@@ -2013,6 +2052,63 @@ impl InvoiceContract {
             .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW)
     }
 
+    /// #1043: configures the satellite arbitration contract that
+    /// above-threshold disputes get routed to. Mirrors `set_oracle_registry`'s
+    /// admin-only setter shape.
+    pub fn set_arbitration_contract(env: Env, admin: Address, arbitration: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&ARBITRATION_CONTRACT, &arbitration);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("arb_set")), (admin, arbitration));
+    }
+
+    pub fn get_arbitration_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ARBITRATION_CONTRACT)
+    }
+
+    /// #1043: disputes with `invoice.amount >= threshold` must go through the
+    /// configured arbitration contract rather than the admin's unilateral
+    /// fast path. Defaults to "unset" (every dispute stays on the fast path)
+    /// until an admin opts in.
+    pub fn set_dispute_value_threshold(env: Env, admin: Address, threshold: i128) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if threshold < 0 {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DISPUTE_VALUE_THRESHOLD, &threshold);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("thresh_up")), (admin, threshold));
+    }
+
+    pub fn get_dispute_value_threshold(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DISPUTE_VALUE_THRESHOLD)
+            .unwrap_or(DISPUTE_VALUE_THRESHOLD_UNSET)
+    }
+
     pub fn mark_funded(env: Env, id: u64, pool: Address) -> Result<(), InvoiceError> {
         pool.require_auth();
         require_not_paused(&env);
@@ -2346,7 +2442,20 @@ impl InvoiceContract {
         );
     }
 
-    pub fn raise_dispute(env: Env, id: u64, borrower: Address, evidence_hash: String) {
+    /// #1043: `respondent` is the admin/pool-designated address representing
+    /// the debtor's side of this dispute for arbitration purposes —
+    /// `invoice.debtor` is only a `String` today (no wallet), so it can't
+    /// itself submit evidence or be `require_auth`'d. Only consulted when the
+    /// dispute clears `DISPUTE_VALUE_THRESHOLD` and an arbitration contract
+    /// is configured; ignored otherwise (pass the admin address as a
+    /// placeholder for below-threshold disputes).
+    pub fn raise_dispute(
+        env: Env,
+        id: u64,
+        borrower: Address,
+        evidence_hash: String,
+        respondent: Address,
+    ) {
         borrower.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
@@ -2385,6 +2494,7 @@ impl InvoiceContract {
         }
 
         invoice.status = InvoiceStatus::Disputed;
+        invoice.disputed_at = now;
         let dispute_record = DisputeRecord {
             evidence_hash,
             filed_at: now,
@@ -2400,7 +2510,72 @@ impl InvoiceContract {
             .set(&DataKey::Dispute(id), &dispute_record);
 
         env.events()
-            .publish((EVT, symbol_short!("dispute")), (id, borrower, now));
+            .publish((EVT, symbol_short!("dispute")), (id, borrower.clone(), now));
+
+        // #1043: route above-threshold disputes to arbitration. Best-effort
+        // and non-fatal by design: if no arbitration contract is configured,
+        // or the cross-contract call itself fails (misconfiguration, paused
+        // arbitration contract, etc.), the dispute has already been filed
+        // above — the invoice still moves to `Disputed`, and
+        // `resolve_default_dispute`'s deadman's-switch override is what
+        // keeps it from being stuck if arbitration never picks the case up.
+        // A `raise_dispute` that could itself panic on a broken arbitration
+        // contract would defeat that safety net before it even applies.
+        let threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DISPUTE_VALUE_THRESHOLD)
+            .unwrap_or(DISPUTE_VALUE_THRESHOLD_UNSET);
+        if invoice.amount >= threshold {
+            if let Some(arbitration) = env.storage().instance().get::<Symbol, Address>(&ARBITRATION_CONTRACT) {
+                let client = ArbitrationClient::new(&env, &arbitration);
+                let _ = client.try_open_case(
+                    &env.current_contract_address(),
+                    &id,
+                    &borrower,
+                    &respondent,
+                    &invoice.amount,
+                );
+            }
+        }
+    }
+
+    /// Shared status-transition logic for both the admin fast path
+    /// (`resolve_default_dispute`) and the arbitration-originated path
+    /// (`arbitration_resolve_dispute`) — kept identical so a dispute resolves
+    /// the same way regardless of which path decided it.
+    fn apply_dispute_resolution(
+        env: &Env,
+        id: u64,
+        mut invoice: Invoice,
+        mut dispute_record: DisputeRecord,
+        outcome: DisputeResolution,
+        now: u64,
+    ) {
+        dispute_record.resolved_at = now;
+        dispute_record.outcome = outcome.clone();
+
+        match outcome {
+            DisputeResolution::InFavorOfDebtor => {
+                invoice.status = InvoiceStatus::Funded;
+                let grace_period_days = resolve_invoice_grace_period_days(env, &invoice);
+                let grace_secs = (grace_period_days as u64).saturating_mul(SECS_PER_DAY);
+                invoice.due_date = now.saturating_add(grace_secs);
+            }
+            DisputeResolution::InFavorOfSME => {
+                invoice.status = InvoiceStatus::Defaulted;
+            }
+            DisputeResolution::Pending => {
+                panic_with_error!(env, InvoiceError::InvalidStatusTransition);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(id), &dispute_record);
     }
 
     pub fn resolve_default_dispute(env: Env, id: u64, admin: Address, outcome: DisputeResolution) {
@@ -2417,7 +2592,7 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
 
-        let mut invoice: Invoice = env
+        let invoice: Invoice = env
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
@@ -2426,7 +2601,7 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
 
-        let mut dispute_record: DisputeRecord = env
+        let dispute_record: DisputeRecord = env
             .storage()
             .persistent()
             .get(&DataKey::Dispute(id))
@@ -2436,34 +2611,83 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::DisputeAlreadyResolved);
         }
 
-        let now = env.ledger().timestamp();
-        dispute_record.resolved_at = now;
-        dispute_record.outcome = outcome.clone();
-
-        match outcome {
-            DisputeResolution::InFavorOfDebtor => {
-                invoice.status = InvoiceStatus::Funded;
-                let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
-                let grace_secs = (grace_period_days as u64).saturating_mul(SECS_PER_DAY);
-                invoice.due_date = now.saturating_add(grace_secs);
-            }
-            DisputeResolution::InFavorOfSME => {
-                invoice.status = InvoiceStatus::Defaulted;
-            }
-            DisputeResolution::Pending => {
-                panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        // #1043: above-threshold disputes with arbitration configured must go
+        // through arbitration first — the admin only regains unilateral
+        // authority after ARBITRATION_STALLED_OVERRIDE_SECS have passed since
+        // the dispute was raised, as a deadman's switch (never a permanent
+        // block: a bug or pause in arbitration can never brick this invoice).
+        let threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DISPUTE_VALUE_THRESHOLD)
+            .unwrap_or(DISPUTE_VALUE_THRESHOLD_UNSET);
+        let arbitration_configured = env
+            .storage()
+            .instance()
+            .get::<Symbol, Address>(&ARBITRATION_CONTRACT)
+            .is_some();
+        if invoice.amount >= threshold && arbitration_configured {
+            let now = env.ledger().timestamp();
+            let override_at = invoice
+                .disputed_at
+                .saturating_add(ARBITRATION_STALLED_OVERRIDE_SECS);
+            if now < override_at {
+                panic_with_error!(&env, InvoiceError::ArbitrationRequired);
             }
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(id), &invoice);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Dispute(id), &dispute_record);
+        let now = env.ledger().timestamp();
+        Self::apply_dispute_resolution(&env, id, invoice, dispute_record, outcome.clone(), now);
 
         env.events()
             .publish((EVT, symbol_short!("resolved")), (id, admin, now));
+    }
+
+    /// #1043: called by the configured arbitration contract once a case
+    /// resolves. Mirrors `consensus_verify`'s auth-and-address-pinning shape.
+    pub fn arbitration_resolve_dispute(
+        env: Env,
+        arbitration: Address,
+        id: u64,
+        outcome: DisputeResolution,
+    ) -> Result<(), InvoiceError> {
+        arbitration.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let stored_arbitration: Address = env
+            .storage()
+            .instance()
+            .get::<Symbol, Address>(&ARBITRATION_CONTRACT)
+            .ok_or(InvoiceError::ArbitrationNotConfigured)?;
+        if arbitration != stored_arbitration {
+            return Err(InvoiceError::UnauthorizedArbitration);
+        }
+
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .ok_or(InvoiceError::InvoiceNotFound)?;
+        if invoice.status != InvoiceStatus::Disputed {
+            return Err(InvoiceError::InvalidStatusTransition);
+        }
+
+        let dispute_record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(id))
+            .ok_or(InvoiceError::DisputeNotFound)?;
+        if dispute_record.outcome != DisputeResolution::Pending {
+            return Err(InvoiceError::DisputeAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+        Self::apply_dispute_resolution(&env, id, invoice, dispute_record, outcome.clone(), now);
+
+        env.events()
+            .publish((EVT, symbol_short!("arb_res")), (id, arbitration, now));
+        Ok(())
     }
 
     pub fn get_dispute(env: Env, id: u64) -> Option<DisputeRecord> {
