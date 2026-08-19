@@ -481,6 +481,77 @@ fn test_invalid_collateral_config_rejected_at_proposal_time() {
 }
 
 #[test]
+fn test_propose_set_collateral_risk_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _usdc_id) = setup(&env);
+
+    let proposal_id = client.propose_operation(
+        &admin,
+        &pool::AdminOperation::SetCollateralRiskConfig(3_000, 86_400),
+    );
+
+    assert_eq!(proposal_id, 1);
+    let proposal = client.get_proposal(&proposal_id).unwrap();
+    assert!(!proposal.executed);
+    assert!(!proposal.cancelled);
+}
+
+#[test]
+fn test_execute_set_collateral_risk_config_after_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _usdc_id) = setup(&env);
+
+    let proposal_id = client.propose_operation(
+        &admin,
+        &pool::AdminOperation::SetCollateralRiskConfig(3_000, 86_400),
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 86_400);
+    client.execute_operation(&admin, &proposal_id);
+
+    let cfg = client.get_collateral_risk_config();
+    assert_eq!(cfg.danger_bps, 3_000);
+    assert_eq!(cfg.grace_period_secs, 86_400);
+}
+
+#[test]
+fn test_direct_set_collateral_risk_config_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _usdc_id) = setup(&env);
+
+    let result = client.try_set_collateral_risk_config(&admin, &3_000, &86_400);
+    assert_eq!(result, Err(Ok(PoolError::OperationRequiresProposal)));
+}
+
+#[test]
+fn test_invalid_collateral_risk_config_rejected_at_proposal_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _usdc_id) = setup(&env);
+
+    let result = client.try_propose_operation(
+        &admin,
+        &pool::AdminOperation::SetCollateralRiskConfig(0, 86_400),
+    );
+    assert_eq!(result, Err(Ok(PoolError::InvalidDangerConfig)));
+
+    let result = client.try_propose_operation(
+        &admin,
+        &pool::AdminOperation::SetCollateralRiskConfig(3_000, 0),
+    );
+    assert_eq!(result, Err(Ok(PoolError::InvalidDangerConfig)));
+
+    let result = client.try_propose_operation(
+        &admin,
+        &pool::AdminOperation::SetCollateralRiskConfig(11_000, 86_400),
+    );
+    assert_eq!(result, Err(Ok(PoolError::InvalidDangerConfig)));
+}
+
+#[test]
 fn test_set_operation_delay() {
     let env = Env::default();
     env.mock_all_auths();

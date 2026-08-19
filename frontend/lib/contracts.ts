@@ -35,6 +35,7 @@ import type {
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
+  CollateralRiskConfig,
   GovernanceConfig,
   GovernanceProposal,
   StellarAddress,
@@ -1810,6 +1811,41 @@ export async function getCollateralDeposit(invoiceId: number): Promise<Collatera
     token: r.token as string,
     amount: BigInt(String(r.amount)),
     settled: Boolean(r.settled),
+    postedAt: Number(r.posted_at),
+    releasedAt: Number(r.released_at),
+    seizedAt: Number(r.seized_at),
+    collateralBpsAtDeposit: Number(r.collateral_bps_at_deposit),
+    thresholdAtDeposit: BigInt(String(r.threshold_at_deposit)),
+    atRiskSince: r.at_risk_since != null ? Number(r.at_risk_since) : null,
+  };
+}
+
+// #1036: read-only — the live, oracle-priced collateral ratio (bps) for a
+// funded invoice's posted collateral. 10_000 = exactly covers the requirement
+// at today's prices. Requires the invoice to already be funded.
+export async function getLiveCollateralRatio(invoiceId: number): Promise<number> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_live_collateral_ratio',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+export async function getCollateralRiskConfig(): Promise<CollateralRiskConfig> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_collateral_risk_config',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    dangerBps: Number(raw.danger_bps),
+    gracePeriodSecs: Number(raw.grace_period_secs),
   };
 }
 
@@ -1865,6 +1901,56 @@ export async function buildTopUpCollateralTx(params: {
         new Address(params.token).toScVal(),
         nativeToScVal(params.amount, { type: 'i128' }),
       ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// #1036: permissionless keeper call — recomputes the live ratio and flips the
+// deposit's at-risk flag. `caller` is just the fee-paying source account; the
+// contract call itself takes no address argument.
+export async function buildCheckCollateralRiskTx(params: {
+  invoiceId: number;
+  caller: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call('check_collateral_risk', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// #1036: permissionless keeper call — seizes a deposit that's been at-risk
+// for at least the configured grace period and is still below the danger
+// threshold on a fresh price recheck.
+export async function buildLiquidateCollateralTx(params: {
+  invoiceId: number;
+  caller: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call('liquidate_collateral', nativeToScVal(params.invoiceId, { type: 'u64' })),
     )
     .setTimeout(30)
     .build();

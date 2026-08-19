@@ -22,6 +22,8 @@ import {
   buildDisputeTx,
   getCollateralConfig,
   getCollateralDeposit,
+  getLiveCollateralRatio,
+  getCollateralRiskConfig,
   buildDepositCollateralTx,
   buildTopUpCollateralTx,
   isInvoicePrivate,
@@ -61,6 +63,7 @@ import type {
   PoolConfig,
   CollateralConfig,
   CollateralDeposit,
+  CollateralRiskConfig,
   CoFundingRound,
   FullCreditScore,
 } from '@/lib/types';
@@ -197,6 +200,12 @@ export default function InvoiceDetailPage() {
   const [disputeReason, setDisputeReason] = useState('');
   const [collateralConfig, setCollateralConfig] = useState<CollateralConfig | null>(null);
   const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
+  // #1036: live, oracle-priced ratio (bps) and the risk config it's judged
+  // against — null when the invoice isn't funded yet or no oracle is configured.
+  const [liveCollateralRatioBps, setLiveCollateralRatioBps] = useState<number | null>(null);
+  const [collateralRiskConfig, setCollateralRiskConfig] = useState<CollateralRiskConfig | null>(
+    null,
+  );
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
@@ -262,6 +271,8 @@ export default function InvoiceDetailPage() {
         fundedResult,
         collateralConfigResult,
         collateralDepositResult,
+        liveRatioResult,
+        collateralRiskConfigResult,
         privateResult,
         creditScoreResult,
         coFundingResult,
@@ -270,6 +281,8 @@ export default function InvoiceDetailPage() {
         getFundedInvoice(numId),
         getCollateralConfig(),
         getCollateralDeposit(numId),
+        getLiveCollateralRatio(numId),
+        getCollateralRiskConfig(),
         isInvoicePrivate(numId),
         getFullCreditScore(inv.owner),
         getCoFundingRound(numId),
@@ -283,6 +296,16 @@ export default function InvoiceDetailPage() {
       const deposit =
         collateralDepositResult.status === 'fulfilled' ? collateralDepositResult.value : null;
       setCollateralDeposit(deposit);
+      // #1036: getLiveCollateralRatio reverts (e.g. no oracle configured, or the
+      // invoice isn't funded yet) far more often than it succeeds today — that's
+      // expected, not an error, so it's swallowed the same way the other
+      // best-effort reads above are.
+      setLiveCollateralRatioBps(
+        liveRatioResult.status === 'fulfilled' ? liveRatioResult.value : null,
+      );
+      setCollateralRiskConfig(
+        collateralRiskConfigResult.status === 'fulfilled' ? collateralRiskConfigResult.value : null,
+      );
       setIsPrivate(privateResult.status === 'fulfilled' ? privateResult.value : false);
       setCreditScore(creditScoreResult.status === 'fulfilled' ? creditScoreResult.value : null);
       setCoFundingRound(coFundingResult.status === 'fulfilled' ? coFundingResult.value : null);
@@ -925,8 +948,45 @@ export default function InvoiceDetailPage() {
                       : 0;
                   const targetRatio = collateralConfig.collateralBps / 100;
                   const isAtRisk = ratio < targetRatio * 1.2;
+
+                  // #1036: on-chain, oracle-priced ratio — the authoritative
+                  // signal (covers collateral posted in an asset other than the
+                  // invoice's funding token, unlike the client-side estimate
+                  // above which assumes a 1:1 same-token comparison). Only
+                  // available once the invoice is funded and an oracle is
+                  // configured for both tokens.
+                  const liveRatioPct =
+                    liveCollateralRatioBps != null ? liveCollateralRatioBps / 100 : null;
+                  const dangerPct = collateralRiskConfig
+                    ? collateralRiskConfig.dangerBps / 100
+                    : null;
+                  const onChainAtRisk = collateralDeposit.atRiskSince != null;
+                  const topUpDeadline =
+                    onChainAtRisk && collateralRiskConfig
+                      ? collateralDeposit.atRiskSince! + collateralRiskConfig.gracePeriodSecs
+                      : null;
+
                   return (
                     <div className="space-y-3 text-sm">
+                      {onChainAtRisk && (
+                        <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl">
+                          <p className="font-semibold text-red-400 mb-1">
+                            ⚠ Collateral at risk of liquidation
+                          </p>
+                          <p className="text-brand-muted text-xs">
+                            The oracle-priced value of your collateral has fallen below the danger
+                            threshold{dangerPct != null ? ` (${dangerPct.toFixed(0)}%)` : ''}.
+                            {topUpDeadline != null && (
+                              <>
+                                {' '}
+                                Top up before{' '}
+                                <span className="text-white">{formatDate(topUpDeadline)}</span> or
+                                it may be liquidated by any keeper.
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between">
                         <span className="text-brand-muted">Current ratio</span>
                         <span
@@ -940,6 +1000,20 @@ export default function InvoiceDetailPage() {
                           {targetRatio.toFixed(0)}%)
                         </span>
                       </div>
+                      {liveRatioPct != null && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-brand-muted">Live ratio (oracle-priced)</span>
+                          <span
+                            className={
+                              onChainAtRisk
+                                ? 'font-semibold text-red-400'
+                                : 'font-semibold text-green-400'
+                            }
+                          >
+                            {liveRatioPct.toFixed(0)}% {onChainAtRisk ? '⚠' : '✓'}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
@@ -957,9 +1031,13 @@ export default function InvoiceDetailPage() {
                       {isOwner && !fullyRepaid && (
                         <button
                           onClick={() => setCollateralModalOpen(true)}
-                          className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+                          className={
+                            onChainAtRisk
+                              ? 'w-full px-5 py-3 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-500 transition-colors'
+                              : 'w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors'
+                          }
                         >
-                          + Add Collateral
+                          {onChainAtRisk ? 'Top Up Now' : '+ Add Collateral'}
                         </button>
                       )}
                     </div>

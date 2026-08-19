@@ -110,6 +110,35 @@ export interface FundedInvoice {
 
 export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
 
+// #1036: multi-asset, oracle-priced collateral risk response
+export interface CollateralConfig {
+  threshold: bigint;
+  collateralBps: number;
+}
+
+export interface CollateralDeposit {
+  invoiceId: bigint;
+  depositor: string;
+  token: string;
+  amount: bigint;
+  settled: boolean;
+  postedAt: number;
+  releasedAt: number;
+  seizedAt: number;
+  collateralBpsAtDeposit: number;
+  thresholdAtDeposit: bigint;
+  /** Ledger timestamp the live oracle-priced ratio first dropped below the
+   * configured danger threshold, or undefined if not currently flagged. */
+  atRiskSince?: number;
+}
+
+export interface CollateralRiskConfig {
+  /** Live collateral ratio (bps) below which a position is flagged at-risk. */
+  dangerBps: number;
+  /** Seconds a depositor has to top up before liquidateCollateral is callable. */
+  gracePeriodSecs: number;
+}
+
 // #1025: secondary market
 export type ListingStatus = 'Open' | 'Filled' | 'Cancelled';
 export type ListingKind = 'CoFunding' | 'SingleFunded';

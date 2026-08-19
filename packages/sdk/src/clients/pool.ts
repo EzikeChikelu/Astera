@@ -16,6 +16,9 @@ import type {
   TransactionProgress,
   Listing,
   ListingKind,
+  CollateralConfig,
+  CollateralDeposit,
+  CollateralRiskConfig,
 } from '../types';
 import type { Signer } from '../types';
 
@@ -633,6 +636,147 @@ export class PoolClient extends BaseClient {
       totalPaidOut: BigInt(String(raw.total_paid_out)),
       totalFeeRevenue: BigInt(String(raw.total_fee_revenue)),
     };
+  }
+
+  // #1036: multi-asset, oracle-priced collateral risk response
+
+  async depositCollateral(params: {
+    signer: Signer;
+    invoiceId: bigint | number;
+    depositor: string;
+    token: string;
+    amount: bigint;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.depositor,
+      'deposit_collateral',
+      [
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.depositor).toScVal(),
+        new Address(params.token).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ],
+      params.onProgress,
+    );
+  }
+
+  async topUpCollateral(params: {
+    signer: Signer;
+    invoiceId: bigint | number;
+    depositor: string;
+    token: string;
+    amount: bigint;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.depositor,
+      'top_up_collateral',
+      [
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.depositor).toScVal(),
+        new Address(params.token).toScVal(),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ],
+      params.onProgress,
+    );
+  }
+
+  async getCollateralConfig(): Promise<CollateralConfig> {
+    const sim = await this.simulate('get_collateral_config', []);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+    return {
+      threshold: BigInt(String(raw.threshold)),
+      collateralBps: Number(raw.collateral_bps),
+    };
+  }
+
+  async getCollateralDeposit(invoiceId: bigint | number): Promise<CollateralDeposit | null> {
+    const sim = await this.simulate('get_collateral_deposit', [
+      nativeToScVal(invoiceId, { type: 'u64' }),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const raw = scValToNative(sim.result!.retval);
+    if (!raw) return null;
+    const r = raw as Record<string, unknown>;
+    return {
+      invoiceId: BigInt(String(r.invoice_id)),
+      depositor: r.depositor as string,
+      token: r.token as string,
+      amount: BigInt(String(r.amount)),
+      settled: Boolean(r.settled),
+      postedAt: Number(r.posted_at),
+      releasedAt: Number(r.released_at),
+      seizedAt: Number(r.seized_at),
+      collateralBpsAtDeposit: Number(r.collateral_bps_at_deposit),
+      thresholdAtDeposit: BigInt(String(r.threshold_at_deposit)),
+      atRiskSince: r.at_risk_since != null ? Number(r.at_risk_since) : undefined,
+    };
+  }
+
+  /** Read-only: the live, oracle-priced collateral ratio (bps) for a funded
+   * invoice's posted collateral — 10_000 = exactly covers the requirement at
+   * today's prices. Requires the invoice to already be funded. */
+  async getLiveCollateralRatio(invoiceId: bigint | number): Promise<number> {
+    const sim = await this.simulate('get_live_collateral_ratio', [
+      nativeToScVal(invoiceId, { type: 'u64' }),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    return Number(scValToNative(sim.result!.retval));
+  }
+
+  async getCollateralRiskConfig(): Promise<CollateralRiskConfig> {
+    const sim = await this.simulate('get_collateral_risk_config', []);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+    return {
+      dangerBps: Number(raw.danger_bps),
+      gracePeriodSecs: Number(raw.grace_period_secs),
+    };
+  }
+
+  /** Permissionless keeper call: recomputes the live ratio and flips the
+   * deposit's at-risk flag on or off. Returns the tx hash — read the updated
+   * state back via getCollateralDeposit. */
+  async checkCollateralRisk(params: {
+    signer: Signer;
+    caller: string;
+    invoiceId: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.caller,
+      'check_collateral_risk',
+      [nativeToScVal(params.invoiceId, { type: 'u64' })],
+      params.onProgress,
+    );
+  }
+
+  /** Permissionless keeper call: seizes a deposit that's been at-risk for at
+   * least the configured grace period and is still below the danger threshold
+   * on a fresh price recheck. Reverts with GracePeriodNotElapsed,
+   * CollateralNotAtRisk, or OraclePriceUnavailable if not yet eligible. */
+  async liquidateCollateral(params: {
+    signer: Signer;
+    caller: string;
+    invoiceId: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.caller,
+      'liquidate_collateral',
+      [nativeToScVal(params.invoiceId, { type: 'u64' })],
+      params.onProgress,
+    );
   }
 
   // #1025: secondary market

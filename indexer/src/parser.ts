@@ -251,6 +251,20 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         case 'col_dep':
           if (isStellarAddress(value[0])) return value[0];
           break;
+        // #1036: (invoice_id, depositor, token, amount, ...) — depositor is value[1]
+        case 'col_topup':
+        // (invoice_id, depositor, token, amount, ratio_bps, timestamp)
+        case 'col_liq':
+          if (isStellarAddress(value[1])) return value[1];
+          break;
+        // #1036: (admin, danger_bps, grace_period_secs) — admin is value[0]
+        case 'col_rcfg':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+        // #1036: (invoice_id, ratio_bps, ...) — system-triggered, no actor address
+        case 'col_risk':
+        case 'col_safe':
+          return null;
         // #1025: secondary market — seller is value[2], buyer is value[3]
         case 'lst_open':
         case 'lst_cncl':

@@ -32,6 +32,9 @@ export type {
   Listing,
   ListingStatus,
   ListingKind,
+  CollateralConfig,
+  CollateralDeposit,
+  CollateralRiskConfig,
 } from '../../packages/sdk/src/types';
 
 export * from './generated/tranche';

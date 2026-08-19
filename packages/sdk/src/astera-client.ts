@@ -39,6 +39,9 @@ import type {
   MultiSigConfig,
   Proposal,
   ActionPayload,
+  CollateralConfig,
+  CollateralDeposit,
+  CollateralRiskConfig,
 } from './types';
 
 export class AsteraClient {
@@ -279,6 +282,56 @@ export class AsteraClient {
 
     previewRateAtUtilization: (token: string, utilizationBps: number): Promise<number> =>
       this.poolClient.previewRateAtUtilization(token, utilizationBps),
+
+    // #1036: multi-asset, oracle-priced collateral risk response
+
+    depositCollateral: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      invoiceId: bigint | number;
+      depositor: string;
+      token: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.poolClient.depositCollateral(params),
+
+    topUpCollateral: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      invoiceId: bigint | number;
+      depositor: string;
+      token: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.poolClient.topUpCollateral(params),
+
+    getCollateralConfig: (): Promise<CollateralConfig> =>
+      this.poolClient.getCollateralConfig(),
+
+    getCollateralDeposit: (invoiceId: bigint | number): Promise<CollateralDeposit | null> =>
+      this.poolClient.getCollateralDeposit(invoiceId),
+
+    getLiveCollateralRatio: (invoiceId: bigint | number): Promise<number> =>
+      this.poolClient.getLiveCollateralRatio(invoiceId),
+
+    getCollateralRiskConfig: (): Promise<CollateralRiskConfig> =>
+      this.poolClient.getCollateralRiskConfig(),
+
+    checkCollateralRisk: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.poolClient.checkCollateralRisk(params),
+
+    liquidateCollateral: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.poolClient.liquidateCollateral(params),
   };
 
   public readonly creditScore = {
