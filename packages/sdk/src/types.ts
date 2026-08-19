@@ -155,6 +155,8 @@ export interface AsteraConfig {
   network: string;
   invoiceContractId: string;
   poolContractId: string;
+  /** #1044: secondary-market listing + withdrawal-wait/liquidity-forecast satellite contract. */
+  secondaryMarketContractId?: string;
   creditScoreContractId?: string;
   oracleRegistryContractId?: string;
   complianceContractId?: string;

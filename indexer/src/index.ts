@@ -27,12 +27,18 @@ const CREDIT_SCORE_CONTRACT_ID = (
 const ORACLE_REGISTRY_CONTRACT_ID = (
   process.env.ORACLE_REGISTRY_CONTRACT_ID || ""
 ).trim();
+// #1044: also watch the secondary_market contract, if deployed, so
+// lst_open/lst_cncl/lst_buy listing events are queryable off-chain.
+const SECONDARY_MARKET_CONTRACT_ID = (
+  process.env.SECONDARY_MARKET_CONTRACT_ID || ""
+).trim();
 const CONTRACT_IDS = Array.from(
   new Set(
     [
       ...INVOICE_POOL_CONTRACT_IDS,
       CREDIT_SCORE_CONTRACT_ID,
       ORACLE_REGISTRY_CONTRACT_ID,
+      SECONDARY_MARKET_CONTRACT_ID,
     ].filter(Boolean),
   ),
 );

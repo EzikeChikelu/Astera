@@ -76,6 +76,7 @@ services:
       # Contract IDs are written by the deployer; override here if needed.
       - NEXT_PUBLIC_INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
       - NEXT_PUBLIC_POOL_CONTRACT_ID=${POOL_CONTRACT_ID:-}
+      - NEXT_PUBLIC_SECONDARY_MARKET_CONTRACT_ID=${SECONDARY_MARKET_CONTRACT_ID:-}
       - NEXT_PUBLIC_USDC_TOKEN_ID=${USDC_TOKEN_ID:-}
 
   # ── Mock REST service (json-server) ───────────────────────────────────────
@@ -100,6 +101,7 @@ services:
     environment:
       - HORIZON_URL=http://stellar:8000
       - CONTRACT_IDS=${INVOICE_CONTRACT_ID:-},${POOL_CONTRACT_ID:-}
+      - SECONDARY_MARKET_CONTRACT_ID=${SECONDARY_MARKET_CONTRACT_ID:-}
       - POLLING_INTERVAL_MS=5000
       - API_PORT=3001
       - DB_PATH=/indexer/data/indexer.db

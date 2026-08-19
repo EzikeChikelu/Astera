@@ -32,6 +32,10 @@ export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 // Set these after deploying your contracts
 export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?? '';
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
+// #1044: secondary-market listings + withdrawal-wait/liquidity-forecast satellite
+// contract, split out of `pool` to clear the 200KB wasm deploy limit.
+export const SECONDARY_MARKET_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_SECONDARY_MARKET_CONTRACT_ID ?? '';
 export const CREDIT_SCORE_CONTRACT_ID = process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID ?? '';
 export const GOVERNANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID ?? '';
 // #861: N-of-M staked oracle consensus network — optional, unset until deployed.

@@ -4,6 +4,7 @@ import {
   rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
+  SECONDARY_MARKET_CONTRACT_ID,
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
@@ -342,7 +343,7 @@ export async function estimateWithdrawalWait(
   token: string,
 ): Promise<WaitEstimate | null> {
   const sim = await simulateTx(
-    POOL_CONTRACT_ID,
+    SECONDARY_MARKET_CONTRACT_ID,
     'estimate_withdrawal_wait',
     [new Address(investor).toScVal(), new Address(token).toScVal()],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
@@ -387,7 +388,7 @@ export async function getLiquidityForecast(
   horizonDays: number,
 ): Promise<LiquidityForecastPoint[]> {
   const sim = await simulateTx(
-    POOL_CONTRACT_ID,
+    SECONDARY_MARKET_CONTRACT_ID,
     'get_liquidity_forecast',
     [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
