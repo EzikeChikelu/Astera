@@ -187,6 +187,12 @@ pub enum PoolError {
     // #1036: liquidate_collateral called before grace_period_secs has
     // elapsed since the deposit was flagged at-risk
     GracePeriodNotElapsed = 99,
+    // #1036: settle_liquidation_sale called on a deposit with no auction
+    // sale pending (never routed through auction, or already reconciled)
+    NoPendingLiquidationSale = 100,
+    // #1036: settle_liquidation_sale called while the auction sale is still
+    // Open (no taker yet, and its window hasn't expired either)
+    LiquidationSaleNotSettled = 101,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -215,6 +221,14 @@ const DEFAULT_DANGER_BPS: u32 = 2_400;
 // #1036: default top-up grace window before a flagged at-risk position becomes
 // liquidatable via liquidate_collateral.
 const DEFAULT_GRACE_PERIOD_SECS: u64 = 3 * SECS_PER_DAY;
+// #1036: when routing a liquidation through the auction contract, the sale's
+// starting price is the oracle-derived fair value and decays down to this
+// fraction of it (50%) over LIQUIDATION_SALE_DURATION_SECS — a floor low
+// enough that a keeper is economically incentivized to take it well before
+// expiry, bounding how long the pool is exposed to an unsold position.
+const LIQUIDATION_SALE_FLOOR_BPS: u32 = 5_000;
+// #1036: 24h Dutch-auction window for a liquidated collateral sale.
+const LIQUIDATION_SALE_DURATION_SECS: u64 = SECS_PER_DAY;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
                                                // #227: yield timelock — 48 hours default delay for two-step yield change
@@ -610,6 +624,11 @@ pub struct CollateralDeposit {
     // check_collateral_risk; liquidate_collateral requires this to be Some and
     // grace_period_secs to have elapsed since.
     pub at_risk_since: Option<u64>,
+    // #1036: set when liquidate_collateral routed this deposit's seizure
+    // through the auction contract instead of crediting pool liquidity
+    // directly. Cleared once settle_liquidation_sale reconciles the sale's
+    // outcome (proceeds or a returned-unsold asset) into pool accounting.
+    pub auction_sale_id: Option<u64>,
 }
 
 #[contracttype]
@@ -735,6 +754,9 @@ const SECONDARY_MARKET_CONTRACT: Symbol = symbol_short!("mkt_ctrt");
 // key, not a DataKey variant — DataKey is at Soroban's 50-variant ceiling (see
 // #867/#777/#863/#866 above).
 const COLLATERAL_RISK_CFG: Symbol = symbol_short!("col_risk");
+// #1036: optional collateral-liquidation auction contract. Symbol key, not a
+// DataKey variant — DataKey is at Soroban's 50-variant ceiling.
+const AUCTION_CONTRACT: Symbol = symbol_short!("auction");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -772,6 +794,60 @@ pub struct ReflectorPriceData {
 #[contractclient(name = "ReflectorClient")]
 pub trait ReflectorContract {
     fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPriceData>;
+}
+
+// #1036: local mirror of contracts/auction's collateral-liquidation sale
+// types (same "decoded by field name" convention as ReflectorPriceData
+// above) — pool doesn't depend on the auction crate directly (see the
+// pool/secondary_market split's rationale: pulling in another contract's
+// compiled code collides on shared entrypoint names at link time).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaleStatus {
+    Open,
+    Settled,
+    Expired,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CollateralSale {
+    pub sale_id: u64,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub proceeds_token: Address,
+    pub proceeds_recipient: Address,
+    pub start_price: i128,
+    pub floor_price: i128,
+    pub opened_at: u64,
+    pub duration_secs: u64,
+    pub status: SaleStatus,
+    pub taker: Option<Address>,
+    pub settled_price: Option<i128>,
+}
+
+#[contractclient(name = "AuctionClient")]
+pub trait AuctionLiquidationContract {
+    // Bare `u64` return (not Result) — matches auction's real
+    // `open_collateral_sale` signature exactly, which deliberately panics on
+    // bad params rather than returning `Result`, so that this trait's mirror
+    // and the real implementation can't drift into a wire-incompatible
+    // shape. Callers that want to handle failure gracefully use
+    // `try_open_collateral_sale` (auto-generated regardless of the
+    // underlying function's return type).
+    fn open_collateral_sale(
+        env: Env,
+        seller: Address,
+        token: Address,
+        amount: i128,
+        proceeds_token: Address,
+        proceeds_recipient: Address,
+        start_price: i128,
+        floor_price: i128,
+        duration_secs: u64,
+    ) -> u64;
+    fn get_sale(env: Env, sale_id: u64) -> Option<CollateralSale>;
 }
 
 // Pre-existing build breakage found while working this branch: everything
@@ -1372,6 +1448,34 @@ fn live_collateral_ratio_bps(
         .and_then(|v| v.checked_div(required_value))
         .ok_or(PoolError::AmountOverflow)?;
     Ok(ratio.clamp(0, u32::MAX as i128) as u32)
+}
+
+// #1036: the oracle-priced value of `collateral_amount` of `collateral_token`,
+// expressed in `funding_token`'s own native units — used to set a fair
+// starting price when consigning seized collateral to the liquidation
+// auction. Same normalize-then-price approach as live_collateral_ratio_bps,
+// just returning a value instead of a ratio against a requirement.
+fn collateral_value_in_funding_token(
+    env: &Env,
+    collateral_token: &Address,
+    collateral_amount: i128,
+    funding_token: &Address,
+) -> PoolResult<i128> {
+    let collateral_decimals = get_token_config(env, collateral_token)?.decimals;
+    let funding_decimals = get_token_config(env, funding_token)?.decimals;
+    let collateral_amount_norm = normalize_to_stroops(collateral_amount, collateral_decimals);
+
+    let collateral_price = FundingPool::get_asset_price(env.clone(), collateral_token.clone())?;
+    let funding_price = FundingPool::get_asset_price(env.clone(), funding_token.clone())?;
+    if funding_price <= 0 {
+        return Err(PoolError::OraclePriceUnavailable);
+    }
+
+    let value_norm = collateral_amount_norm
+        .checked_mul(collateral_price)
+        .and_then(|v| v.checked_div(funding_price))
+        .ok_or(PoolError::AmountOverflow)?;
+    Ok(denormalize_from_stroops(value_norm, funding_decimals))
 }
 
 fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
@@ -3692,6 +3796,7 @@ impl FundingPool {
                 collateral_bps_at_deposit: collateral_cfg.collateral_bps,
                 threshold_at_deposit: collateral_cfg.threshold,
                 at_risk_since: None,
+                auction_sale_id: None,
             };
             env.storage()
                 .persistent()
@@ -3703,6 +3808,13 @@ impl FundingPool {
                 ACTIVE_INVOICE_TTL,
             );
 
+            // #1036: best-effort price snapshot for the indexer's audit/history
+            // trail — deposit_collateral itself has no oracle dependency (the
+            // funding-gate sufficiency check is what actually requires a price,
+            // and only for cross-asset deposits), so a missing/unconfigured
+            // oracle here must not fail the deposit.
+            let price_snapshot = Self::get_asset_price(env.clone(), token.clone()).ok();
+
             env.events().publish(
                 (EVT, symbol_short!("col_dep")),
                 (
@@ -3712,6 +3824,7 @@ impl FundingPool {
                     amount,
                     depositor,
                     env.ledger().timestamp(),
+                    price_snapshot,
                 ),
             );
             Ok(())
@@ -3757,9 +3870,11 @@ impl FundingPool {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, ACTIVE_INVOICE_TTL, ACTIVE_INVOICE_TTL);
+            // #1036: best-effort price snapshot, same rationale as deposit_collateral.
+            let price_snapshot = Self::get_asset_price(env.clone(), token.clone()).ok();
             env.events().publish(
                 (EVT, symbol_short!("col_topup")),
-                (invoice_id, depositor, token, amount, record.amount),
+                (invoice_id, depositor, token, amount, record.amount, price_snapshot),
             );
             Ok(())
         })
@@ -3881,29 +3996,82 @@ impl FundingPool {
             // get_asset_price enforces a bounded staleness window on both the
             // live Reflector reading and the admin fallback price — refuses to
             // liquidate at all if no price within that window is available.
+            //
+            // Soroban invocations are atomic (a declared error return rolls
+            // back every write made during it, same as a panic), so there is
+            // no way to persist "the flag cleared, but liquidation didn't
+            // happen" from this single call — recovery is only observable via
+            // a separate check_collateral_risk call, which is the function
+            // actually responsible for clearing at_risk_since.
             let ratio_bps =
                 live_collateral_ratio_bps(&env, &deposit, &record.token, record.principal)?;
             if ratio_bps >= risk_cfg.danger_bps {
-                deposit.at_risk_since = None;
-                env.storage().persistent().set(&key, &deposit);
                 return Err(PoolError::CollateralNotAtRisk);
             }
 
-            let token_totals_key = DataKey::TokenTotals(deposit.token.clone());
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.pool_value = tt
-                .pool_value
-                .checked_add(deposit.amount)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&token_totals_key, &tt);
+            // #1036: raw price snapshot alongside the derived ratio — guaranteed
+            // available here since live_collateral_ratio_bps above just used it
+            // successfully (nothing between there and here can invalidate it).
+            let price_snapshot = Self::get_asset_price(env.clone(), deposit.token.clone()).ok();
+
+            // If an auction contract is configured, route the seized collateral
+            // through its Dutch-auction sale so it converts at a real,
+            // keeper-discovered price instead of being valued solely by the
+            // oracle reading. Falls back to the direct-credit path below if no
+            // auction is configured, or the hand-off fails for any reason
+            // (decimals/price lookup issue, sale rejected, etc.) — liquidation
+            // must not get stuck just because the optional auction integration
+            // hiccups.
+            let auction_sale_id = Self::get_auction_contract(env.clone()).and_then(|auction_addr| {
+                let fair_value = collateral_value_in_funding_token(
+                    &env,
+                    &deposit.token,
+                    deposit.amount,
+                    &record.token,
+                )
+                .ok()?;
+                if fair_value <= 0 {
+                    return None;
+                }
+                let floor_price = fair_value
+                    .checked_mul(LIQUIDATION_SALE_FLOOR_BPS as i128)?
+                    .checked_div(BPS_DENOM as i128)?;
+                let auction_client = AuctionClient::new(&env, &auction_addr);
+                match auction_client.try_open_collateral_sale(
+                    &env.current_contract_address(),
+                    &deposit.token,
+                    &deposit.amount,
+                    &record.token,
+                    &env.current_contract_address(),
+                    &fair_value,
+                    &floor_price,
+                    &LIQUIDATION_SALE_DURATION_SECS,
+                ) {
+                    Ok(Ok(sale_id)) => Some(sale_id),
+                    _ => None,
+                }
+            });
+
+            if auction_sale_id.is_none() {
+                // Fallback: credit the seized asset directly into that token's
+                // own pool liquidity.
+                let token_totals_key = DataKey::TokenTotals(deposit.token.clone());
+                let mut tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&token_totals_key)
+                    .unwrap_or_default();
+                tt.pool_value = tt
+                    .pool_value
+                    .checked_add(deposit.amount)
+                    .ok_or(PoolError::AmountOverflow)?;
+                env.storage().instance().set(&token_totals_key, &tt);
+            }
 
             deposit.settled = true;
             deposit.seized_at = now;
             deposit.at_risk_since = None;
+            deposit.auction_sale_id = auction_sale_id;
             env.storage().persistent().set(&key, &deposit);
             // Use SETTLEMENT_COLLATERAL_TTL (90 days) so the liquidation record
             // remains queryable for the full post-settlement audit window.
@@ -3921,7 +4089,9 @@ impl FundingPool {
                     deposit.token.clone(),
                     deposit.amount,
                     ratio_bps,
+                    price_snapshot,
                     now,
+                    auction_sale_id,
                 ),
             );
             Ok(())
@@ -5793,6 +5963,90 @@ impl FundingPool {
         env.events()
             .publish((EVT, symbol_short!("set_orcl")), (admin, oracle));
         Ok(())
+    }
+
+    // #1036: optional — when unset, liquidate_collateral falls back to
+    // crediting seized collateral directly into pool liquidity instead of
+    // consigning it to an auction sale.
+    pub fn set_auction_contract(env: Env, admin: Address, auction: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&AUCTION_CONTRACT, &auction);
+        env.events()
+            .publish((EVT, symbol_short!("set_auct")), (admin, auction));
+        Ok(())
+    }
+
+    pub fn get_auction_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&AUCTION_CONTRACT)
+    }
+
+    /// Permissionless follow-up: reconciles a settled or expired auction sale
+    /// back into pool accounting. Settled → the funding-token proceeds
+    /// (already sitting in pool's raw balance, transferred there directly by
+    /// the auction's `take_collateral_sale`) are credited to that token's
+    /// pool_value. Expired with no taker → the collateral asset itself was
+    /// already returned to pool's raw balance by `reclaim_expired_sale`, so
+    /// it's credited the same way the no-auction fallback path always has
+    /// been. Idempotent: clears `auction_sale_id` so a second call finds
+    /// nothing pending rather than double-crediting.
+    pub fn settle_liquidation_sale(env: Env, invoice_id: u64) -> Result<(), PoolError> {
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        non_reentrant!(&env, {
+            let key = DataKey::CollateralDeposit(invoice_id);
+            let mut deposit: CollateralDeposit =
+                env.storage().persistent().get(&key).ok_or(PoolError::CollateralNotFound)?;
+            let sale_id = deposit
+                .auction_sale_id
+                .ok_or(PoolError::NoPendingLiquidationSale)?;
+            let auction_addr =
+                Self::get_auction_contract(env.clone()).ok_or(PoolError::NoPendingLiquidationSale)?;
+            let sale: CollateralSale = AuctionClient::new(&env, &auction_addr)
+                .get_sale(&sale_id)
+                .ok_or(PoolError::NoPendingLiquidationSale)?;
+
+            match sale.status {
+                SaleStatus::Open => return Err(PoolError::LiquidationSaleNotSettled),
+                SaleStatus::Settled => {
+                    let proceeds = sale.settled_price.ok_or(PoolError::LiquidationSaleNotSettled)?;
+                    let token_totals_key = DataKey::TokenTotals(sale.proceeds_token.clone());
+                    let mut tt: PoolTokenTotals = env
+                        .storage()
+                        .instance()
+                        .get(&token_totals_key)
+                        .unwrap_or_default();
+                    tt.pool_value = tt
+                        .pool_value
+                        .checked_add(proceeds)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    env.storage().instance().set(&token_totals_key, &tt);
+                }
+                SaleStatus::Expired => {
+                    let token_totals_key = DataKey::TokenTotals(sale.token.clone());
+                    let mut tt: PoolTokenTotals = env
+                        .storage()
+                        .instance()
+                        .get(&token_totals_key)
+                        .unwrap_or_default();
+                    tt.pool_value = tt
+                        .pool_value
+                        .checked_add(sale.amount)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    env.storage().instance().set(&token_totals_key, &tt);
+                }
+            }
+
+            deposit.auction_sale_id = None;
+            env.storage().persistent().set(&key, &deposit);
+
+            env.events()
+                .publish((EVT, symbol_short!("col_stl")), (invoice_id, sale_id));
+            Ok(())
+        })
     }
 
     pub fn get_oracle_contract(env: Env) -> Option<Address> {
@@ -8288,10 +8542,15 @@ mod test {
         let result = client.try_liquidate_collateral(&1u64);
         assert_eq!(result, Err(Ok(PoolError::CollateralNotAtRisk)));
 
-        // The recheck also clears the stale at-risk flag.
+        // Soroban invocations are atomic: since this call returned an error,
+        // every write it made (if any) is rolled back — there is no way to
+        // "partially succeed" and clear the flag while also erroring. The
+        // flag is unchanged; a separate check_collateral_risk call is what
+        // actually clears it on recovery (covered by
+        // test_check_collateral_risk_flags_and_clears above).
         let deposit = client.get_collateral_deposit(&1u64).unwrap();
         assert!(!deposit.settled);
-        assert!(deposit.at_risk_since.is_none());
+        assert_eq!(deposit.at_risk_since, Some(100_000));
     }
 
     #[test]

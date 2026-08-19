@@ -1,9 +1,18 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Env, Map, Symbol, Vec,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CREDIT_SCORE_MULTIPLIER: u32 = 10; // weight per credit-score point
+// #1036: collateral-liquidation Dutch auction. Kept in this contract (rather
+// than a new satellite) since it's conceptually the same "clear an asset
+// against available demand" role the invoice-funding auction already plays,
+// and its footprint is small — no shared state with the bid-clearing logic
+// above, just its own `DataKey::Sale`/`NextSaleId` storage.
+const EVT: Symbol = symbol_short!("auction");
 
 // ── Data Types ────────────────────────────────────────────────────────────────
 
@@ -46,6 +55,43 @@ pub struct Allocation {
     pub clearing_discount_bps: u32,
 }
 
+// #1036: a seized collateral asset up for sale. Price decays linearly from
+// `start_price` down to `floor_price` (both denominated in `proceeds_token`)
+// over `duration_secs` — a classic Dutch/declining-price liquidation auction:
+// the first taker to accept the current price wins, so there's no per-bid
+// escrow/refund bookkeeping to get wrong, just one atomic swap on `take`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaleStatus {
+    Open,
+    Settled,
+    Expired,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CollateralSale {
+    pub sale_id: u64,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub proceeds_token: Address,
+    pub proceeds_recipient: Address,
+    pub start_price: i128,
+    pub floor_price: i128,
+    pub opened_at: u64,
+    pub duration_secs: u64,
+    pub status: SaleStatus,
+    pub taker: Option<Address>,
+    pub settled_price: Option<i128>,
+}
+
+#[contracttype]
+pub enum DataKey {
+    NextSaleId,
+    Sale(u64),
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -65,6 +111,12 @@ pub enum AuctionError {
     AllocationOverflow = 12,
     RoundNotClearing = 13,
     PoolCallFailed = 14,
+    // #1036: collateral-liquidation sale errors
+    InvalidSaleParams = 15,
+    SaleNotFound = 16,
+    SaleNotOpen = 17,
+    SaleExpired = 18,
+    SaleNotExpired = 19,
 }
 
 // ── Clearing Algorithm (pure function) ────────────────────────────────────────
@@ -207,6 +259,165 @@ impl AuctionContract {
     ) -> Vec<Allocation> {
         clear_auction(bids, available_liquidity, credit_scores)
     }
+
+    // ── #1036: collateral-liquidation Dutch auction ─────────────────────────
+
+    /// Consigns `amount` of `token` for sale, decaying in price from
+    /// `start_price` to `floor_price` (in `proceeds_token`) over
+    /// `duration_secs`. `seller` must already hold and authorize the
+    /// transfer — no separate trusted-caller registry is needed since
+    /// consigning your own tokens carries no elevated privilege.
+    ///
+    /// Bare `u64` return (panics on bad params, via `panic_with_error!`)
+    /// rather than `Result`, matching this codebase's convention for
+    /// cross-contract entrypoints another contract's `#[contractclient]`
+    /// mirror trait calls directly (see `ReflectorClient`/`InvoiceContractClient`
+    /// in `contracts/pool/src/lib.rs`) — callers that want to handle failure
+    /// gracefully use the SDK-generated `try_open_collateral_sale` instead.
+    pub fn open_collateral_sale(
+        env: Env,
+        seller: Address,
+        token: Address,
+        amount: i128,
+        proceeds_token: Address,
+        proceeds_recipient: Address,
+        start_price: i128,
+        floor_price: i128,
+        duration_secs: u64,
+    ) -> u64 {
+        seller.require_auth();
+        if amount <= 0
+            || start_price <= 0
+            || floor_price < 0
+            || floor_price > start_price
+            || duration_secs == 0
+        {
+            panic_with_error!(&env, AuctionError::InvalidSaleParams);
+        }
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&seller, &env.current_contract_address(), &amount);
+
+        let sale_id: u64 = env.storage().instance().get(&DataKey::NextSaleId).unwrap_or(1);
+        env.storage().instance().set(&DataKey::NextSaleId, &(sale_id + 1));
+
+        let sale = CollateralSale {
+            sale_id,
+            seller: seller.clone(),
+            token: token.clone(),
+            amount,
+            proceeds_token,
+            proceeds_recipient,
+            start_price,
+            floor_price,
+            opened_at: env.ledger().timestamp(),
+            duration_secs,
+            status: SaleStatus::Open,
+            taker: None,
+            settled_price: None,
+        };
+        env.storage().persistent().set(&DataKey::Sale(sale_id), &sale);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Sale(sale_id),
+            duration_secs as u32,
+            duration_secs as u32,
+        );
+
+        env.events()
+            .publish((EVT, symbol_short!("sale_open")), (sale_id, seller, token, amount));
+        sale_id
+    }
+
+    pub fn get_sale(env: Env, sale_id: u64) -> Option<CollateralSale> {
+        env.storage().persistent().get(&DataKey::Sale(sale_id))
+    }
+
+    /// Read-only: the current price (in `proceeds_token`), linearly
+    /// interpolated between `start_price` (at `opened_at`) and `floor_price`
+    /// (at `opened_at + duration_secs`), clamped once the window elapses.
+    pub fn current_sale_price(env: Env, sale_id: u64) -> Result<i128, AuctionError> {
+        let sale: CollateralSale = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Sale(sale_id))
+            .ok_or(AuctionError::SaleNotFound)?;
+        Self::price_at(&sale, env.ledger().timestamp())
+    }
+
+    fn price_at(sale: &CollateralSale, now: u64) -> Result<i128, AuctionError> {
+        let elapsed = now.saturating_sub(sale.opened_at).min(sale.duration_secs);
+        let decay = (sale.start_price - sale.floor_price)
+            .checked_mul(elapsed as i128)
+            .and_then(|v| v.checked_div(sale.duration_secs as i128))
+            .ok_or(AuctionError::InvalidSaleParams)?;
+        Ok(sale.start_price - decay)
+    }
+
+    /// Permissionless: takes an open, unexpired sale at its current decayed
+    /// price. One atomic swap — `taker` pays `proceeds_recipient` directly
+    /// (no escrow), and receives the consigned asset in the same call.
+    pub fn take_collateral_sale(env: Env, taker: Address, sale_id: u64) -> Result<(), AuctionError> {
+        taker.require_auth();
+        let mut sale: CollateralSale = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Sale(sale_id))
+            .ok_or(AuctionError::SaleNotFound)?;
+        if sale.status != SaleStatus::Open {
+            return Err(AuctionError::SaleNotOpen);
+        }
+        let now = env.ledger().timestamp();
+        if now > sale.opened_at.saturating_add(sale.duration_secs) {
+            return Err(AuctionError::SaleExpired);
+        }
+        let price = Self::price_at(&sale, now)?;
+
+        let proceeds_client = token::Client::new(&env, &sale.proceeds_token);
+        proceeds_client.transfer(&taker, &sale.proceeds_recipient, &price);
+        let token_client = token::Client::new(&env, &sale.token);
+        token_client.transfer(&env.current_contract_address(), &taker, &sale.amount);
+
+        sale.status = SaleStatus::Settled;
+        sale.taker = Some(taker.clone());
+        sale.settled_price = Some(price);
+        env.storage().persistent().set(&DataKey::Sale(sale_id), &sale);
+
+        env.events()
+            .publish((EVT, symbol_short!("sale_take")), (sale_id, taker, price));
+        Ok(())
+    }
+
+    /// Permissionless: once a sale's window has passed with no taker, returns
+    /// the consigned asset to the original seller so it isn't stranded in the
+    /// auction contract. Anyone may call this — proceeds only ever flow to
+    /// `seller`, so there's nothing to gain by calling it early or for
+    /// someone else's sale (and `SaleExpired`'s timestamp check prevents that
+    /// anyway).
+    pub fn reclaim_expired_sale(env: Env, caller: Address, sale_id: u64) -> Result<(), AuctionError> {
+        caller.require_auth();
+        let mut sale: CollateralSale = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Sale(sale_id))
+            .ok_or(AuctionError::SaleNotFound)?;
+        if sale.status != SaleStatus::Open {
+            return Err(AuctionError::SaleNotOpen);
+        }
+        let now = env.ledger().timestamp();
+        if now <= sale.opened_at.saturating_add(sale.duration_secs) {
+            return Err(AuctionError::SaleNotExpired);
+        }
+
+        let token_client = token::Client::new(&env, &sale.token);
+        token_client.transfer(&env.current_contract_address(), &sale.seller, &sale.amount);
+
+        sale.status = SaleStatus::Expired;
+        env.storage().persistent().set(&DataKey::Sale(sale_id), &sale);
+
+        env.events()
+            .publish((EVT, symbol_short!("sale_exp")), (sale_id, caller));
+        Ok(())
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -214,7 +425,10 @@ impl AuctionContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, vec, Env, Map};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token, vec, Env, Map,
+    };
 
     fn test_env() -> Env {
         Env::default()
@@ -420,5 +634,176 @@ mod tests {
 
         let result = client.simulate_clearing(&bids, &3000, &scores);
         assert_eq!(result.len(), 2);
+    }
+
+    // #1036: collateral-liquidation Dutch auction
+
+    fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
+        token::StellarAssetClient::new(env, token_id).mint(to, &amount);
+    }
+
+    fn setup_sale(
+        env: &Env,
+    ) -> (AuctionContractClient<'_>, Address, Address, Address, Address) {
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, AuctionContract);
+        let client = AuctionContractClient::new(env, &contract_id);
+
+        let seized_admin = Address::generate(env);
+        let seized_token = env
+            .register_stellar_asset_contract_v2(seized_admin)
+            .address();
+        let proceeds_admin = Address::generate(env);
+        let proceeds_token = env
+            .register_stellar_asset_contract_v2(proceeds_admin)
+            .address();
+        let seller = Address::generate(env);
+        let recipient = Address::generate(env);
+
+        (client, seized_token, proceeds_token, seller, recipient)
+    }
+
+    #[test]
+    fn test_take_collateral_sale_at_open_pays_start_price() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+        let taker = Address::generate(&env);
+
+        mint(&env, &seized_token, &seller, 1_000);
+        mint(&env, &proceeds_token, &taker, 10_000);
+
+        let sale_id = client.open_collateral_sale(
+            &seller,
+            &seized_token,
+            &1_000i128,
+            &proceeds_token,
+            &recipient,
+            &900i128, // start_price
+            &500i128, // floor_price
+            &3_600u64,
+        );
+
+        // Seized asset moved into the auction contract's custody immediately.
+        let seized_client = token::Client::new(&env, &seized_token);
+        assert_eq!(seized_client.balance(&client.address), 1_000);
+        assert_eq!(seized_client.balance(&seller), 0);
+
+        // Taking immediately (elapsed = 0) pays the full start_price.
+        assert_eq!(client.current_sale_price(&sale_id), 900);
+        client.take_collateral_sale(&taker, &sale_id);
+
+        let proceeds_client = token::Client::new(&env, &proceeds_token);
+        assert_eq!(proceeds_client.balance(&recipient), 900);
+        assert_eq!(proceeds_client.balance(&taker), 10_000 - 900);
+        assert_eq!(seized_client.balance(&taker), 1_000);
+        assert_eq!(seized_client.balance(&client.address), 0);
+
+        let sale = client.get_sale(&sale_id).unwrap();
+        assert_eq!(sale.status, SaleStatus::Settled);
+        assert_eq!(sale.taker, Some(taker));
+        assert_eq!(sale.settled_price, Some(900));
+    }
+
+    #[test]
+    fn test_sale_price_decays_linearly_toward_floor() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+
+        mint(&env, &seized_token, &seller, 1_000);
+
+        let sale_id = client.open_collateral_sale(
+            &seller,
+            &seized_token,
+            &1_000i128,
+            &proceeds_token,
+            &recipient,
+            &1_000i128,
+            &0i128,
+            &1_000u64,
+        );
+
+        assert_eq!(client.current_sale_price(&sale_id), 1_000);
+        env.ledger().with_mut(|l| l.timestamp += 500);
+        assert_eq!(client.current_sale_price(&sale_id), 500);
+        env.ledger().with_mut(|l| l.timestamp += 500);
+        assert_eq!(client.current_sale_price(&sale_id), 0);
+        // Past the window, price stays clamped at the floor.
+        env.ledger().with_mut(|l| l.timestamp += 1_000);
+        assert_eq!(client.current_sale_price(&sale_id), 0);
+    }
+
+    #[test]
+    fn test_take_collateral_sale_after_expiry_rejected() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+        let taker = Address::generate(&env);
+
+        mint(&env, &seized_token, &seller, 1_000);
+        mint(&env, &proceeds_token, &taker, 10_000);
+
+        let sale_id = client.open_collateral_sale(
+            &seller, &seized_token, &1_000i128, &proceeds_token, &recipient, &900i128, &500i128,
+            &3_600u64,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 3_601);
+        let result = client.try_take_collateral_sale(&taker, &sale_id);
+        assert_eq!(result, Err(Ok(AuctionError::SaleExpired)));
+    }
+
+    #[test]
+    fn test_reclaim_expired_sale_returns_asset_to_seller() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+        let keeper = Address::generate(&env);
+
+        mint(&env, &seized_token, &seller, 1_000);
+
+        let sale_id = client.open_collateral_sale(
+            &seller, &seized_token, &1_000i128, &proceeds_token, &recipient, &900i128, &500i128,
+            &3_600u64,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 3_601);
+        client.reclaim_expired_sale(&keeper, &sale_id);
+
+        let seized_client = token::Client::new(&env, &seized_token);
+        assert_eq!(seized_client.balance(&seller), 1_000);
+        assert_eq!(seized_client.balance(&client.address), 0);
+
+        let sale = client.get_sale(&sale_id).unwrap();
+        assert_eq!(sale.status, SaleStatus::Expired);
+    }
+
+    #[test]
+    fn test_reclaim_before_expiry_rejected() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+        let keeper = Address::generate(&env);
+
+        mint(&env, &seized_token, &seller, 1_000);
+
+        let sale_id = client.open_collateral_sale(
+            &seller, &seized_token, &1_000i128, &proceeds_token, &recipient, &900i128, &500i128,
+            &3_600u64,
+        );
+
+        let result = client.try_reclaim_expired_sale(&keeper, &sale_id);
+        assert_eq!(result, Err(Ok(AuctionError::SaleNotExpired)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #15)")]
+    fn test_open_collateral_sale_invalid_params_panics() {
+        let env = test_env();
+        let (client, seized_token, proceeds_token, seller, recipient) = setup_sale(&env);
+        mint(&env, &seized_token, &seller, 1_000);
+
+        // floor_price > start_price is invalid.
+        client.open_collateral_sale(
+            &seller, &seized_token, &1_000i128, &proceeds_token, &recipient, &500i128, &900i128,
+            &3_600u64,
+        );
     }
 }

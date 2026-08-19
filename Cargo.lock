@@ -1254,6 +1254,7 @@ name = "pool"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "auction",
  "compliance",
  "proptest",
  "referral",

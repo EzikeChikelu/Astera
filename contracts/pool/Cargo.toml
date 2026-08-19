@@ -15,6 +15,11 @@ proptest = "1.4"
 compliance = { path = "../compliance" }
 referral = { path = "../referral" }
 access_control = { path = "../access_control" }
+auction = { path = "../auction" }
+
+[[test]]
+name = "auction_liquidation_tests"
+path = "tests/auction_liquidation_tests.rs"
 
 [[test]]
 name = "fuzz_tests"

@@ -87,6 +87,8 @@ export const Errors = {
   97: { message: 'InvalidDangerConfig' },
   98: { message: 'CollateralNotAtRisk' },
   99: { message: 'GracePeriodNotElapsed' },
+  100: { message: 'NoPendingLiquidationSale' },
+  101: { message: 'LiquidationSaleNotSettled' },
 } as const;
 
 export type PoolErrorCode = keyof typeof Errors;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
@@ -24,6 +24,8 @@ import {
   getCollateralDeposit,
   getLiveCollateralRatio,
   getCollateralRiskConfig,
+  getAcceptedTokens,
+  getAssetPrice,
   buildDepositCollateralTx,
   buildTopUpCollateralTx,
   isInvoicePrivate,
@@ -49,6 +51,8 @@ import {
   Address,
   scValToNative,
   xdr,
+  stablecoinLabel,
+  fromStroops,
 } from '@/lib/stellar';
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
@@ -209,6 +213,13 @@ export default function InvoiceDetailPage() {
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
+  // #1036: which accepted token the SME is posting as collateral — may differ
+  // from the invoice's funding token (assumed USDC throughout this page, same
+  // as every other amount already rendered via formatUSDC).
+  const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
+  const [collateralToken, setCollateralToken] = useState<string>(USDC_TOKEN_ID);
+  const [crossAssetRequiredAmount, setCrossAssetRequiredAmount] = useState<bigint | null>(null);
+  const [crossAssetPriceLoading, setCrossAssetPriceLoading] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
   const [privacyLoading, setPrivacyLoading] = useState(false);
@@ -216,6 +227,51 @@ export default function InvoiceDetailPage() {
   const [coFundingRound, setCoFundingRound] = useState<CoFundingRound | null>(null);
   const [commitAmount, setCommitAmount] = useState<string>('');
   const [commitLoading, setCommitLoading] = useState(false);
+
+  // #1036: required collateral in the invoice's funding token (assumed USDC —
+  // see the comment on `collateralToken` above), independent of which asset
+  // is actually being posted.
+  const requiredCollateralAmount = useMemo(() => {
+    if (!collateralConfig || !metadata) return null;
+    return (metadata.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
+  }, [collateralConfig, metadata]);
+
+  // #1036: when the SME picks a collateral asset other than the funding
+  // token, convert the funding-token-denominated requirement into that
+  // asset's native amount via live oracle prices, so the form can show/submit
+  // a sensible default instead of forcing manual price math.
+  useEffect(() => {
+    if (!requiredCollateralAmount || requiredCollateralAmount <= 0n) {
+      setCrossAssetRequiredAmount(null);
+      return;
+    }
+    if (!collateralToken || !USDC_TOKEN_ID || collateralToken === USDC_TOKEN_ID) {
+      setCrossAssetRequiredAmount(null);
+      return;
+    }
+    let cancelled = false;
+    setCrossAssetPriceLoading(true);
+    (async () => {
+      try {
+        const [fundingPrice, assetPrice] = await Promise.all([
+          getAssetPrice(USDC_TOKEN_ID),
+          getAssetPrice(collateralToken),
+        ]);
+        if (cancelled) return;
+        setCrossAssetRequiredAmount(
+          assetPrice > 0n ? (requiredCollateralAmount * fundingPrice) / assetPrice : null,
+        );
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setCrossAssetRequiredAmount(null);
+      } finally {
+        if (!cancelled) setCrossAssetPriceLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [collateralToken, requiredCollateralAmount]);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -273,6 +329,7 @@ export default function InvoiceDetailPage() {
         collateralDepositResult,
         liveRatioResult,
         collateralRiskConfigResult,
+        acceptedTokensResult,
         privateResult,
         creditScoreResult,
         coFundingResult,
@@ -283,6 +340,7 @@ export default function InvoiceDetailPage() {
         getCollateralDeposit(numId),
         getLiveCollateralRatio(numId),
         getCollateralRiskConfig(),
+        getAcceptedTokens(),
         isInvoicePrivate(numId),
         getFullCreditScore(inv.owner),
         getCoFundingRound(numId),
@@ -306,6 +364,12 @@ export default function InvoiceDetailPage() {
       setCollateralRiskConfig(
         collateralRiskConfigResult.status === 'fulfilled' ? collateralRiskConfigResult.value : null,
       );
+      const tokens = acceptedTokensResult.status === 'fulfilled' ? acceptedTokensResult.value : [];
+      setAcceptedTokens(tokens);
+      setCollateralToken((prev) => {
+        if (prev && tokens.includes(prev)) return prev;
+        return USDC_TOKEN_ID && tokens.includes(USDC_TOKEN_ID) ? USDC_TOKEN_ID : (tokens[0] ?? '');
+      });
       setIsPrivate(privateResult.status === 'fulfilled' ? privateResult.value : false);
       setCreditScore(creditScoreResult.status === 'fulfilled' ? creditScoreResult.value : null);
       setCoFundingRound(coFundingResult.status === 'fulfilled' ? coFundingResult.value : null);
@@ -454,16 +518,22 @@ export default function InvoiceDetailPage() {
   async function handleDepositCollateral() {
     if (!wallet.address || !invoice || !collateralConfig) return;
 
-    const requiredAmount = (metadata!.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
-    const amount = collateralAmount ? BigInt(collateralAmount) : requiredAmount;
-    if (amount <= 0n) {
-      toast.error('Please enter a valid collateral amount.');
+    // #1036: a top-up must match the asset already posted (the contract
+    // enforces this); only a fresh deposit lets the SME pick which accepted
+    // asset to post via the selector below.
+    const token = collateralDeposit ? collateralDeposit.token : collateralToken;
+    if (!token) {
+      toast.error('No accepted token configured.');
       return;
     }
 
-    const token = USDC_TOKEN_ID;
-    if (!token) {
-      toast.error('No accepted token configured. Check NEXT_PUBLIC_USDC_TOKEN_ID.');
+    const defaultAmount =
+      !collateralDeposit && token !== USDC_TOKEN_ID && crossAssetRequiredAmount != null
+        ? crossAssetRequiredAmount
+        : (requiredCollateralAmount ?? 0n);
+    const amount = collateralAmount ? BigInt(collateralAmount) : defaultAmount;
+    if (amount <= 0n) {
+      toast.error('Please enter a valid collateral amount.');
       return;
     }
 
@@ -920,14 +990,33 @@ export default function InvoiceDetailPage() {
                 );
 
                 if (collateralDeposit && collateralDeposit.settled) {
-                  if (metadata.status === 'Defaulted') {
+                  // #1036: releasedAt/seizedAt are the authoritative signal for
+                  // which outcome happened — metadata.status === 'Defaulted'
+                  // only covers the admin default-seizure path, not a
+                  // price-triggered liquidate_collateral call (which doesn't
+                  // touch the invoice's own status at all).
+                  if (collateralDeposit.seizedAt > 0) {
+                    const wasPriceLiquidated = metadata.status !== 'Defaulted';
                     return (
                       <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-sm">
-                        <p className="font-semibold text-red-400 mb-1">Collateral Seized</p>
+                        <p className="font-semibold text-red-400 mb-1">
+                          {wasPriceLiquidated ? 'Collateral Liquidated' : 'Collateral Seized'}
+                        </p>
                         <p className="text-brand-muted">
-                          Your collateral of {formatUSDC(collateralDeposit.amount)} was seized
-                          because this invoice was not repaid. The funds were redistributed to pool
-                          investors to offset the default loss.
+                          {wasPriceLiquidated ? (
+                            <>
+                              Your collateral of {formatUSDC(collateralDeposit.amount)} was
+                              liquidated on {formatDate(collateralDeposit.seizedAt)} after its
+                              oracle-priced value fell below the danger threshold and wasn&apos;t
+                              topped up in time.
+                            </>
+                          ) : (
+                            <>
+                              Your collateral of {formatUSDC(collateralDeposit.amount)} was seized
+                              because this invoice was not repaid. The funds were redistributed to
+                              pool investors to offset the default loss.
+                            </>
+                          )}
                         </p>
                       </div>
                     );
@@ -1056,6 +1145,13 @@ export default function InvoiceDetailPage() {
                   );
                 }
 
+                const isCrossAsset = collateralToken !== USDC_TOKEN_ID;
+                const crossAssetPlaceholder = crossAssetPriceLoading
+                  ? 'Fetching live price...'
+                  : crossAssetRequiredAmount != null
+                    ? `Required: ~${fromStroops(crossAssetRequiredAmount).toLocaleString()} ${stablecoinLabel(collateralToken)}`
+                    : 'Enter amount';
+
                 return (
                   <div className="space-y-4">
                     <div className="flex justify-between text-sm">
@@ -1065,15 +1161,45 @@ export default function InvoiceDetailPage() {
                       </span>
                       <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                     </div>
+                    {acceptedTokens.length > 1 && (
+                      <div>
+                        <label className="block text-xs text-brand-muted mb-1">
+                          Collateral Asset
+                        </label>
+                        <select
+                          value={collateralToken}
+                          onChange={(e) => {
+                            setCollateralToken(e.target.value);
+                            setCollateralAmount('');
+                          }}
+                          disabled={collateralLoading}
+                          className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white focus:border-brand-gold focus:outline-none disabled:opacity-60"
+                        >
+                          {acceptedTokens.map((tok) => (
+                            <option key={tok} value={tok}>
+                              {stablecoinLabel(tok)}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-brand-muted mt-1">
+                          Posting an asset other than the invoice&apos;s funding token is priced via
+                          the pool&apos;s oracle — the required amount updates live with its price.
+                        </p>
+                      </div>
+                    )}
                     <div>
                       <label className="block text-xs text-brand-muted mb-1">
-                        Collateral Amount (USDC)
+                        Collateral Amount ({stablecoinLabel(collateralToken)})
                       </label>
                       <input
                         type="text"
                         value={collateralAmount}
                         onChange={(e) => setCollateralAmount(e.target.value)}
-                        placeholder={`Required: ${formatUSDC(requiredAmount)}`}
+                        placeholder={
+                          isCrossAsset
+                            ? crossAssetPlaceholder
+                            : `Required: ${formatUSDC(requiredAmount)}`
+                        }
                         disabled={collateralLoading}
                         className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
                       />

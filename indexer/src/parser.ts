@@ -261,9 +261,11 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         case 'col_rcfg':
           if (isStellarAddress(value[0])) return value[0];
           break;
-        // #1036: (invoice_id, ratio_bps, ...) — system-triggered, no actor address
+        // #1036: (invoice_id, ratio_bps, ...) / (invoice_id, sale_id) —
+        // system-triggered, no actor address
         case 'col_risk':
         case 'col_safe':
+        case 'col_stl':
           return null;
         // #1025: secondary market — seller is value[2], buyer is value[3]
         case 'lst_open':

@@ -417,6 +417,22 @@ export async function getAcceptedTokens(): Promise<string[]> {
   return Array.isArray(raw) ? raw : [];
 }
 
+// #1036: read-only Reflector-oracle price lookup for a single accepted token
+// (same scale/precision as every other call to this contract fn — only ratios
+// between two calls' results are meaningful, not the raw magnitude). Used by
+// the collateral-asset selector to convert "value required in the funding
+// token" into "how much of the asset I actually pick do I need to post."
+export async function getAssetPrice(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_asset_price',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval)));
+}
+
 export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
