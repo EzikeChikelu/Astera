@@ -83,12 +83,12 @@ const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const MAX_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 365 * 10; // 10 years
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
-// #1043: disputes at/above this invoice-currency amount must go through the
-// arbitration contract rather than the admin's unilateral fast path. 0 means
-// "arbitration required for every dispute" once an arbitration contract is
-// configured; there is no configured default value beyond "unset" (u64::MAX
-// sentinel below) because a sane default depends on the pool's own token
-// decimals, which this contract doesn't know.
+                                                                  // #1043: disputes at/above this invoice-currency amount must go through the
+                                                                  // arbitration contract rather than the admin's unilateral fast path. 0 means
+                                                                  // "arbitration required for every dispute" once an arbitration contract is
+                                                                  // configured; there is no configured default value beyond "unset" (u64::MAX
+                                                                  // sentinel below) because a sane default depends on the pool's own token
+                                                                  // decimals, which this contract doesn't know.
 const DISPUTE_VALUE_THRESHOLD_UNSET: i128 = i128::MAX;
 // #1043: even if arbitration is configured and a dispute clears the value
 // threshold, the admin retains this deadman's-switch window (measured from
@@ -211,11 +211,17 @@ pub enum InvoiceError {
     // create_invoice's #747 collision guard but missing from this enum on
     // `main`. Restored here so the crate builds; unrelated to #864.
     IDCollision = 46,
-    // #1043: structured multi-party dispute arbitration
-    ArbitrationNotConfigured = 47,
-    UnauthorizedArbitration = 48,
-    InvalidRespondent = 49,
-    ArbitrationRequired = 50,
+    // #1043: structured multi-party dispute arbitration. Soroban's
+    // contract-spec error enums cap out at 50 cases (this enum was already
+    // at 47/50 before this feature — see `pool`'s `PoolError`, already over
+    // this same limit, for what happens past it), so `ArbitrationNotConfigured`
+    // and `UnauthorizedArbitration` are deliberately folded into one variant
+    // rather than kept separate like `OracleRegistryNotConfigured`/
+    // `UnauthorizedRegistry` above — both cases mean the same thing to a
+    // caller: "you are not the trusted arbitration contract."
+    UnauthorizedArbitration = 47,
+    InvalidRespondent = 48,
+    ArbitrationRequired = 49,
 }
 
 #[contracttype]
@@ -2442,13 +2448,27 @@ impl InvoiceContract {
         );
     }
 
-    /// #1043: `respondent` is the admin/pool-designated address representing
-    /// the debtor's side of this dispute for arbitration purposes —
-    /// `invoice.debtor` is only a `String` today (no wallet), so it can't
-    /// itself submit evidence or be `require_auth`'d. Only consulted when the
-    /// dispute clears `DISPUTE_VALUE_THRESHOLD` and an arbitration contract
-    /// is configured; ignored otherwise (pass the admin address as a
-    /// placeholder for below-threshold disputes).
+    /// #1043: `respondent` represents the debtor's side of this dispute for
+    /// arbitration purposes — `invoice.debtor` is only a `String` today (no
+    /// wallet), so it can't itself submit evidence or be `require_auth`'d.
+    /// Only consulted when the dispute clears `DISPUTE_VALUE_THRESHOLD` and
+    /// an arbitration contract is configured; ignored otherwise (pass the
+    /// admin address as a placeholder for below-threshold disputes).
+    ///
+    /// **Trust caveat**: `respondent` is supplied by `borrower` (the SME)
+    /// itself, not independently verified as actually representing the
+    /// debtor's interest — that's not something this contract can check on-
+    /// chain given `invoice.debtor` has no wallet. The one guard enforced
+    /// here is `respondent != borrower`, which blocks the most direct form
+    /// of self-dealing (the SME naming itself, or being the address
+    /// authoring both sides' evidence under one identity); it does not and
+    /// cannot stop a disputing SME from nominating a second wallet it also
+    /// controls. The actual backstop against that is juror judgment on
+    /// evidence quality (a puppet respondent that simply concedes is a
+    /// visible red flag, not a way to extract more value than a case with no
+    /// meaningful opposing evidence already would), not respondent-identity
+    /// verification. A future iteration with real debtor wallets/identity
+    /// should replace this with real, independently-verified respondents.
     pub fn raise_dispute(
         env: Env,
         id: u64,
@@ -2470,6 +2490,9 @@ impl InvoiceContract {
         }
         if invoice.owner != borrower {
             panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        if respondent == borrower {
+            panic_with_error!(&env, InvoiceError::InvalidRespondent);
         }
 
         let dispute_window: u64 = env
@@ -2527,7 +2550,11 @@ impl InvoiceContract {
             .get(&DISPUTE_VALUE_THRESHOLD)
             .unwrap_or(DISPUTE_VALUE_THRESHOLD_UNSET);
         if invoice.amount >= threshold {
-            if let Some(arbitration) = env.storage().instance().get::<Symbol, Address>(&ARBITRATION_CONTRACT) {
+            if let Some(arbitration) = env
+                .storage()
+                .instance()
+                .get::<Symbol, Address>(&ARBITRATION_CONTRACT)
+            {
                 let client = ArbitrationClient::new(&env, &arbitration);
                 let _ = client.try_open_case(
                     &env.current_contract_address(),
@@ -2659,7 +2686,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get::<Symbol, Address>(&ARBITRATION_CONTRACT)
-            .ok_or(InvoiceError::ArbitrationNotConfigured)?;
+            .ok_or(InvoiceError::UnauthorizedArbitration)?;
         if arbitration != stored_arbitration {
             return Err(InvoiceError::UnauthorizedArbitration);
         }
@@ -5376,6 +5403,43 @@ mod test {
         let new_window = SECS_PER_DAY * 14;
         client.set_dispute_window(&admin, &new_window);
         assert_eq!(client.get_dispute_window(), new_window);
+    }
+
+    // ── #1043: arbitration_resolve_dispute authorization ─────────────────────
+
+    #[test]
+    fn test_arbitration_resolve_dispute_rejects_caller_that_is_not_the_configured_arbitration_contract(
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        let real_arbitration = Address::generate(&env);
+        client.set_arbitration_contract(&admin, &real_arbitration);
+
+        // The authorization check happens before any invoice lookup, so this
+        // is testable without a real disputed invoice in play.
+        let impostor = Address::generate(&env);
+        let result = client.try_arbitration_resolve_dispute(
+            &impostor,
+            &1u64,
+            &DisputeResolution::InFavorOfDebtor,
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::UnauthorizedArbitration)));
+    }
+
+    #[test]
+    fn test_arbitration_resolve_dispute_rejects_when_no_arbitration_contract_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+
+        let caller = Address::generate(&env);
+        let result = client.try_arbitration_resolve_dispute(
+            &caller,
+            &1u64,
+            &DisputeResolution::InFavorOfDebtor,
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::UnauthorizedArbitration)));
     }
 
     // ── #406: per-invoice metadata URL tests ─────────────────────────────────

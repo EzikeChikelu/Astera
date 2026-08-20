@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use arbitration::{
-    ArbitrationContract, ArbitrationContractClient, ArbitrationError, CaseStatus, DisputeResolution,
-    PartyRole,
+    ArbitrationContract, ArbitrationContractClient, ArbitrationError, CaseStatus,
+    DisputeResolution, PartyRole,
 };
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
@@ -42,7 +42,15 @@ impl DummyInvoice {
     }
 }
 
-fn setup(env: &Env) -> (ArbitrationContractClient<'_>, Address, Address, Address, i128) {
+fn setup(
+    env: &Env,
+) -> (
+    ArbitrationContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    i128,
+) {
     env.ledger().with_mut(|l| l.timestamp = 1_000_000);
     let contract_id = env.register(ArbitrationContract, ());
     let client = ArbitrationContractClient::new(env, &contract_id);
@@ -113,7 +121,11 @@ fn test_full_dispute_lifecycle_resolves_and_settles_jurors() {
     assert_eq!(case.status, CaseStatus::EvidenceWindow);
 
     // Both parties submit evidence.
-    client.submit_evidence(&case_id, &claimant, &String::from_str(&env, "invoice-scan.pdf#hash"));
+    client.submit_evidence(
+        &case_id,
+        &claimant,
+        &String::from_str(&env, "invoice-scan.pdf#hash"),
+    );
     client.submit_evidence(
         &case_id,
         &respondent,

@@ -27,3 +27,7 @@ path = "tests/secrecy_tests.rs"
 [[test]]
 name = "quorum_timeout_tests"
 path = "tests/quorum_timeout_tests.rs"
+
+[[test]]
+name = "authorization_tests"
+path = "tests/authorization_tests.rs"

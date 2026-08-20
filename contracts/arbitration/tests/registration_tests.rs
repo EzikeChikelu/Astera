@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use arbitration::{ArbitrationContract, ArbitrationContractClient, ArbitrationError, DisputeResolution};
+use arbitration::{
+    ArbitrationContract, ArbitrationContractClient, ArbitrationError, DisputeResolution,
+};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -116,7 +118,10 @@ fn test_deregister_requires_cooldown_before_returning_stake() {
 
     // Calling again before the cooldown elapses is rejected.
     let too_soon = client.try_deregister_juror(&operator);
-    assert_eq!(too_soon, Err(Ok(ArbitrationError::DeregisterCooldownActive)));
+    assert_eq!(
+        too_soon,
+        Err(Ok(ArbitrationError::DeregisterCooldownActive))
+    );
 
     // Advance past the default 7-day cooldown.
     env.ledger()

@@ -75,17 +75,17 @@ const DEFAULT_REVEAL_WINDOW_SECS: u64 = 2 * 24 * 60 * 60;
 const DEFAULT_DEREGISTER_COOLDOWN_SECS: u64 = 7 * 24 * 60 * 60;
 // Minority-on-a-lopsided-vote slash, in bps of stake.
 const DEFAULT_SLASH_BPS: u32 = 1_000; // 10%
-// Committed-but-never-revealed penalty, in bps of stake — smaller than the
-// lopsided-minority slash since non-reveal is presumed carelessness, not
-// necessarily bad-faith voting, but must still cost something or a juror
-// could commit to every case and simply ghost the ones going against them.
+                                      // Committed-but-never-revealed penalty, in bps of stake — smaller than the
+                                      // lopsided-minority slash since non-reveal is presumed carelessness, not
+                                      // necessarily bad-faith voting, but must still cost something or a juror
+                                      // could commit to every case and simply ghost the ones going against them.
 const DEFAULT_NON_REVEAL_SLASH_BPS: u32 = 300; // 3%
-// The winning side's share of *revealed* votes must clear this bps for the
-// result to count as "reasonable confidence" and trigger minority slashing —
-// a bare majority isn't punished, a landslide is.
+                                               // The winning side's share of *revealed* votes must clear this bps for the
+                                               // result to count as "reasonable confidence" and trigger minority slashing —
+                                               // a bare majority isn't punished, a landslide is.
 const DEFAULT_LOPSIDED_CONFIDENCE_BPS: u32 = 6_600; // two-thirds
-// Number of committee re-draws allowed after the first, before a case must
-// be escalated to `admin_resolve_no_quorum`.
+                                                    // Number of committee re-draws allowed after the first, before a case must
+                                                    // be escalated to `admin_resolve_no_quorum`.
 const DEFAULT_MAX_RETRIES: u32 = 1;
 
 #[contracterror]
@@ -345,51 +345,39 @@ impl ArbitrationContract {
     }
 
     /// Replaces the arbitration parameters wholesale (mirrors
-    /// `oracle_registry::set_registry_config`'s validate-then-overwrite shape).
-    #[allow(clippy::too_many_arguments)]
+    /// `oracle_registry::set_registry_config`'s validate-then-overwrite
+    /// shape) — takes the full `ArbitrationConfig` as one struct argument
+    /// rather than one parameter per field: with 12 tunable fields, a
+    /// flattened signature would have exceeded Soroban's 10-parameter cap
+    /// on contract functions. `stake_token` is preserved from the existing
+    /// config regardless of what's passed in `new_config` — swapping the
+    /// stake currency out from under already-staked jurors via a config
+    /// update would silently orphan their locked balances.
     pub fn set_config(
         env: Env,
         admin: Address,
-        min_stake: i128,
-        committee_size: u32,
-        quorum_floor: u32,
-        evidence_window_secs: u64,
-        commit_window_secs: u64,
-        reveal_window_secs: u64,
-        deregister_cooldown_secs: u64,
-        slash_bps: u32,
-        non_reveal_slash_bps: u32,
-        lopsided_confidence_bps: u32,
-        max_retries: u32,
+        new_config: ArbitrationConfig,
     ) -> Result<(), ArbitrationError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        if min_stake <= 0
-            || committee_size == 0
-            || quorum_floor == 0
-            || quorum_floor > committee_size
-            || evidence_window_secs == 0
-            || commit_window_secs == 0
-            || reveal_window_secs == 0
-            || slash_bps > 10_000
-            || non_reveal_slash_bps > 10_000
-            || lopsided_confidence_bps == 0
-            || lopsided_confidence_bps > 10_000
+        if new_config.min_stake <= 0
+            || new_config.committee_size == 0
+            || new_config.quorum_floor == 0
+            || new_config.quorum_floor > new_config.committee_size
+            || new_config.evidence_window_secs == 0
+            || new_config.commit_window_secs == 0
+            || new_config.reveal_window_secs == 0
+            || new_config.slash_bps > 10_000
+            || new_config.non_reveal_slash_bps > 10_000
+            || new_config.lopsided_confidence_bps == 0
+            || new_config.lopsided_confidence_bps > 10_000
         {
             return Err(ArbitrationError::InvalidConfig);
         }
         let mut config = Self::load_config(&env)?;
-        config.min_stake = min_stake;
-        config.committee_size = committee_size;
-        config.quorum_floor = quorum_floor;
-        config.evidence_window_secs = evidence_window_secs;
-        config.commit_window_secs = commit_window_secs;
-        config.reveal_window_secs = reveal_window_secs;
-        config.deregister_cooldown_secs = deregister_cooldown_secs;
-        config.slash_bps = slash_bps;
-        config.non_reveal_slash_bps = non_reveal_slash_bps;
-        config.lopsided_confidence_bps = lopsided_confidence_bps;
-        config.max_retries = max_retries;
+        let stake_token = config.stake_token.clone();
+        config = new_config;
+        config.stake_token = stake_token;
         env.storage().instance().set(&DataKey::Config, &config);
         env.events().publish((EVT, symbol_short!("cfg_upd")), admin);
         Ok(())
@@ -528,12 +516,12 @@ impl ArbitrationContract {
                 if now < requested_at.saturating_add(config.deregister_cooldown_secs) {
                     return Err(ArbitrationError::DeregisterCooldownActive);
                 }
-                let token_client = token::Client::new(&env, &config.stake_token);
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &operator,
-                    &info.stake_amount,
-                );
+                // Checks-effects-interactions: commit the record removal and
+                // index update (effects) before the external token transfer
+                // (interaction), so this juror can never be double-refunded
+                // by re-entering before its own record is gone.
+                let stake_amount = info.stake_amount;
+                let stake_token = config.stake_token.clone();
                 env.storage().persistent().remove(&key);
 
                 let mut ids: Vec<Address> = env
@@ -545,6 +533,9 @@ impl ArbitrationContract {
                     ids.remove(idx);
                     env.storage().instance().set(&DataKey::JurorIds, &ids);
                 }
+
+                let token_client = token::Client::new(&env, &stake_token);
+                token_client.transfer(&env.current_contract_address(), &operator, &stake_amount);
 
                 env.events()
                     .publish((EVT, symbol_short!("dreg_done")), operator);
@@ -587,9 +578,7 @@ impl ArbitrationContract {
             .instance()
             .get(&DataKey::CaseCount)
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::CaseCount, &(id + 1));
+        env.storage().instance().set(&DataKey::CaseCount, &(id + 1));
 
         let case = DisputeCase {
             id,
@@ -735,9 +724,13 @@ impl ArbitrationContract {
         case.jurors = committee.clone();
         case.status = CaseStatus::CommitReveal;
         case.commit_deadline = now.saturating_add(config.commit_window_secs);
-        case.reveal_deadline = case.commit_deadline.saturating_add(config.reveal_window_secs);
+        case.reveal_deadline = case
+            .commit_deadline
+            .saturating_add(config.reveal_window_secs);
         case.retry_count += 1;
-        env.storage().persistent().set(&DataKey::Case(case_id), &case);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Case(case_id), &case);
 
         for juror in committee.iter() {
             env.storage().persistent().set(
@@ -836,7 +829,10 @@ impl ArbitrationContract {
             .persistent()
             .get(&vote_key)
             .ok_or(ArbitrationError::NotSelectedJuror)?;
-        let commit_hash = vote.commit_hash.clone().ok_or(ArbitrationError::NotCommitted)?;
+        let commit_hash = vote
+            .commit_hash
+            .clone()
+            .ok_or(ArbitrationError::NotCommitted)?;
         if vote.revealed_vote.is_some() {
             return Err(ArbitrationError::AlreadyRevealed);
         }
@@ -907,13 +903,18 @@ impl ArbitrationContract {
 
         // Every non-revealer pays a small penalty regardless of whether this
         // round reaches quorum — ghosting a committed vote is never free.
-        let mut settlement_pool = Self::apply_non_reveal_penalties(&env, &non_revealers, &config, case_id);
+        let mut settlement_pool =
+            Self::apply_non_reveal_penalties(&env, &non_revealers, &config, case_id);
 
         if reveal_count < config.quorum_floor {
             case.status = CaseStatus::NoQuorumEscalated;
-            env.storage().persistent().set(&DataKey::Case(case_id), &case);
-            env.events()
-                .publish((EVT, symbol_short!("noquorum")), (case_id, case.retry_count));
+            env.storage()
+                .persistent()
+                .set(&DataKey::Case(case_id), &case);
+            env.events().publish(
+                (EVT, symbol_short!("noquorum")),
+                (case_id, case.retry_count),
+            );
             return Ok(());
         }
 
@@ -924,8 +925,12 @@ impl ArbitrationContract {
             DisputeResolution::InFavorOfSME
         };
 
-        let winning_count = if outcome_favor_debtor { favor_debtor } else { favor_sme };
-        let winning_bps = (winning_count * 10_000) / (reveal_count as u32);
+        let winning_count = if outcome_favor_debtor {
+            favor_debtor
+        } else {
+            favor_sme
+        };
+        let winning_bps = (winning_count * 10_000) / reveal_count;
         let lopsided = winning_bps >= config.lopsided_confidence_bps;
 
         let mut majority: Vec<Address> = Vec::new(&env);
@@ -941,13 +946,17 @@ impl ArbitrationContract {
 
         case.status = CaseStatus::Resolved;
         case.resolution = resolution.clone();
-        env.storage().persistent().set(&DataKey::Case(case_id), &case);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Case(case_id), &case);
 
-        Self::call_invoice_resolve(&env, case.invoice_id, resolution)?;
+        // Best-effort — see `call_invoice_resolve`'s doc comment for why a
+        // failed sync must never unwind the settlement above.
+        let synced = Self::call_invoice_resolve(&env, case.invoice_id, resolution);
 
         env.events().publish(
             (EVT, symbol_short!("resolved")),
-            (case_id, case.invoice_id, outcome_favor_debtor),
+            (case_id, case.invoice_id, outcome_favor_debtor, synced),
         );
         Ok(())
     }
@@ -984,12 +993,15 @@ impl ArbitrationContract {
 
         case.status = CaseStatus::Resolved;
         case.resolution = resolution.clone();
-        env.storage().persistent().set(&DataKey::Case(case_id), &case);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Case(case_id), &case);
 
-        Self::call_invoice_resolve(&env, case.invoice_id, resolution)?;
+        // Best-effort — see `call_invoice_resolve`'s doc comment.
+        let synced = Self::call_invoice_resolve(&env, case.invoice_id, resolution);
 
         env.events()
-            .publish((EVT, symbol_short!("adminres")), (case_id, admin));
+            .publish((EVT, symbol_short!("adminres")), (case_id, admin, synced));
         Ok(())
     }
 
@@ -1016,7 +1028,9 @@ impl ArbitrationContract {
     }
 
     pub fn get_vote(env: Env, case_id: u64, juror: Address) -> Option<JurorVote> {
-        env.storage().persistent().get(&DataKey::Vote(case_id, juror))
+        env.storage()
+            .persistent()
+            .get(&DataKey::Vote(case_id, juror))
     }
 
     pub fn get_juror(env: Env, operator: Address) -> Option<JurorInfo> {
@@ -1124,7 +1138,11 @@ impl ArbitrationContract {
         }
         let mut total_stake: i128 = 0;
         for juror in majority.iter() {
-            if let Some(info) = env.storage().persistent().get::<DataKey, JurorInfo>(&DataKey::Juror(juror.clone())) {
+            if let Some(info) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, JurorInfo>(&DataKey::Juror(juror.clone()))
+            {
                 total_stake += info.stake_amount;
             }
         }
@@ -1141,22 +1159,38 @@ impl ArbitrationContract {
         }
     }
 
-    fn call_invoice_resolve(
-        env: &Env,
-        invoice_id: u64,
-        resolution: DisputeResolution,
-    ) -> Result<(), ArbitrationError> {
-        let invoice_contract: Address = env
+    /// Best-effort callback into `invoice` — deliberately does NOT propagate
+    /// failure up to the caller. `invoice`'s own `resolve_default_dispute`
+    /// has an independent deadman's-switch override that can resolve an
+    /// above-threshold dispute unilaterally if arbitration stalls; if that
+    /// fires *while this case is still in flight*, `invoice` will reject
+    /// this callback (`DisputeAlreadyResolved`) once the case does finalize.
+    /// If that rejection aborted this whole function (as it did before this
+    /// fix, via `?`), `finalize_case`/`admin_resolve_no_quorum` would revert
+    /// entirely — including the `case.status = Resolved` write — leaving the
+    /// case stuck in `CommitReveal` forever and its jurors permanently
+    /// unable to `deregister_juror` (which blocks while a case they're on is
+    /// still `CommitReveal`). Settling the case locally regardless of
+    /// whether `invoice` accepted the sync keeps arbitration's own
+    /// bookkeeping (and juror stake liquidity) from ever depending on
+    /// invoice-side state it doesn't control. Returns whether the sync
+    /// actually landed, for the emitted event.
+    fn call_invoice_resolve(env: &Env, invoice_id: u64, resolution: DisputeResolution) -> bool {
+        let Some(invoice_contract) = env
             .storage()
             .instance()
-            .get(&DataKey::InvoiceContract)
-            .ok_or(ArbitrationError::InvoiceContractNotSet)?;
+            .get::<DataKey, Address>(&DataKey::InvoiceContract)
+        else {
+            return false;
+        };
         let client = InvoiceContractClient::new(env, &invoice_contract);
         client
-            .try_arbitration_resolve_dispute(&env.current_contract_address(), &invoice_id, &resolution)
-            .map_err(|_| ArbitrationError::InvoiceCallFailed)?
-            .map_err(|_| ArbitrationError::InvoiceCallFailed)?;
-        Ok(())
+            .try_arbitration_resolve_dispute(
+                &env.current_contract_address(),
+                &invoice_id,
+                &resolution,
+            )
+            .is_ok_and(|inner| inner.is_ok())
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), ArbitrationError> {

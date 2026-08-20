@@ -8,7 +8,9 @@
 // writes `revealed_vote`. These tests are a regression guard on that
 // invariant, not a test of the hash function's cryptographic properties.
 
-use arbitration::{ArbitrationContract, ArbitrationContractClient, ArbitrationError, CaseStatus, DisputeResolution};
+use arbitration::{
+    ArbitrationContract, ArbitrationContractClient, ArbitrationError, CaseStatus, DisputeResolution,
+};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -175,5 +177,8 @@ fn test_committee_member_only_may_commit() {
 
     // Sanity: the case is genuinely in the commit/reveal phase, not just
     // rejecting for some unrelated status reason.
-    assert_eq!(client.get_case(&case_id).unwrap().status, CaseStatus::CommitReveal);
+    assert_eq!(
+        client.get_case(&case_id).unwrap().status,
+        CaseStatus::CommitReveal
+    );
 }

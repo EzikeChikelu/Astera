@@ -131,14 +131,14 @@ fn test_no_quorum_escalates_retries_then_falls_back_to_admin() {
     assert_eq!(case.status, CaseStatus::NoQuorumEscalated);
     assert_eq!(case.resolution, DisputeResolution::Pending);
     // Nothing was written back to invoice yet.
-    assert_eq!(invoice_client.get_last(), (0u64, DisputeResolution::Pending));
+    assert_eq!(
+        invoice_client.get_last(),
+        (0u64, DisputeResolution::Pending)
+    );
 
     // Admin can't shortcut yet — one committee re-draw is still available.
-    let premature = client.try_admin_resolve_no_quorum(
-        &admin,
-        &case_id,
-        &DisputeResolution::InFavorOfDebtor,
-    );
+    let premature =
+        client.try_admin_resolve_no_quorum(&admin, &case_id, &DisputeResolution::InFavorOfDebtor);
     assert_eq!(premature, Err(Ok(ArbitrationError::RetriesNotExhausted)));
 
     // Round 2 (the one allowed retry): same story, still below quorum.
@@ -187,10 +187,7 @@ fn test_no_quorum_escalates_retries_then_falls_back_to_admin() {
     );
 
     // A resolved case can't be admin-resolved again.
-    let already_done = client.try_admin_resolve_no_quorum(
-        &admin,
-        &case_id,
-        &DisputeResolution::InFavorOfDebtor,
-    );
+    let already_done =
+        client.try_admin_resolve_no_quorum(&admin, &case_id, &DisputeResolution::InFavorOfDebtor);
     assert_eq!(already_done, Err(Ok(ArbitrationError::CaseNotEscalated)));
 }

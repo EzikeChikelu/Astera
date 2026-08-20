@@ -33,7 +33,7 @@ jobs:
       # files, so these must exist before ANY `cargo test` invocation that
       # touches the full workspace — including the unqualified one below.
       - name: Build contracts for integration tests
-        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
+        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry -p arbitration
       - run: cargo test --locked
         timeout-minutes: 10
       - name: Run fuzz tests (short)
@@ -131,7 +131,7 @@ jobs:
           workspaces: .
 
       - name: Build contracts
-        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
+        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry -p arbitration
 
       - name: Run cross-contract integration tests
         working-directory: .

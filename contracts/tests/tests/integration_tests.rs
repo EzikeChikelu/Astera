@@ -3330,7 +3330,11 @@ fn test_credit_score_attestation_lifecycle_alongside_normal_pool_activity() {
     assert!(investor_balance > 5_000_000_000i128);
 }
 
-fn arbitration_commit_hash(env: &Env, vote: bool, salt: &soroban_sdk::BytesN<32>) -> soroban_sdk::BytesN<32> {
+fn arbitration_commit_hash(
+    env: &Env,
+    vote: bool,
+    salt: &soroban_sdk::BytesN<32>,
+) -> soroban_sdk::BytesN<32> {
     let mut preimage = soroban_sdk::Bytes::new(env);
     preimage.push_back(if vote { 1u8 } else { 0u8 });
     preimage.append(&soroban_sdk::Bytes::from(salt.clone()));
@@ -3451,8 +3455,8 @@ fn test_arbitration_full_dispute_lifecycle_resolves_invoice_and_settles_jurors()
     // The admin can't shortcut this above-threshold dispute while
     // arbitration is live and within its deadman's-switch window.
     let blocked = invoice_client.try_resolve_default_dispute(
-        &admin,
         &inv_id,
+        &admin,
         &invoice::DisputeResolution::InFavorOfDebtor,
     );
     assert!(blocked.is_err());
@@ -3696,4 +3700,178 @@ fn test_arbitration_no_quorum_escalates_to_admin_fallback() {
     assert_eq!(invoice.status, invoice::InvoiceStatus::Defaulted);
     let dispute = invoice_client.get_dispute(&inv_id).unwrap();
     assert_eq!(dispute.outcome, invoice::DisputeResolution::InFavorOfSME);
+}
+
+/// Maintainer-review follow-up: the race between `invoice`'s own admin
+/// deadman's-switch override (`resolve_default_dispute`, usable once
+/// `ARBITRATION_STALLED_OVERRIDE_SECS` — 90 days — have passed since the
+/// dispute was raised, regardless of what arbitration is doing) and a
+/// still-in-flight arbitration case for the *same* dispute. Before this fix,
+/// `arbitration::finalize_case`'s cross-contract callback into
+/// `invoice::arbitration_resolve_dispute` propagated a hard error when
+/// invoice had already resolved the dispute itself, which reverted the
+/// *entire* `finalize_case` call (Soroban rolls back all storage writes on
+/// an `Err` return) — including the `case.status = Resolved` write. That
+/// left the case stuck in `CommitReveal` forever, which in turn permanently
+/// blocked every juror on it from ever calling `deregister_juror` (it
+/// refuses while the juror has a case still in `CommitReveal`). This test
+/// drives exactly that race and asserts the case still settles locally and
+/// its jurors are still released, proving the fix holds.
+#[test]
+fn test_admin_deadman_switch_does_not_strand_a_still_live_arbitration_case() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let respondent = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let arbitration_id = env.register_contract_wasm(None, arbitration::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let arbitration_client = arbitration::Client::new(&env, &arbitration_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+    credit_client.initialize(&admin, &invoice_id, &pool_id);
+
+    let grace_period = invoice_client.get_grace_period() as u64;
+    let grace_secs = grace_period * 86_400;
+
+    arbitration_client.initialize(&admin, &invoice_id, &usdc_id, &1_000i128);
+    invoice_client.set_arbitration_contract(&admin, &arbitration_id);
+    invoice_client.set_dispute_value_threshold(&admin, &1_000_000_000i128);
+
+    let mut jurors = std::vec::Vec::new();
+    for _ in 0..5 {
+        let op = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&op, &1_000i128);
+        arbitration_client.register_juror(&op, &1_000i128);
+        jurors.push(op);
+    }
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128, &None);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    env.ledger()
+        .with_mut(|l| l.timestamp = due_date + grace_secs + 1);
+    invoice_client.mark_defaulted(&inv_id, &pool_id);
+
+    invoice_client.raise_dispute(
+        &inv_id,
+        &sme,
+        &String::from_str(&env, "wrongful-default-evidence-hash"),
+        &respondent,
+    );
+    let case_id = 0u64;
+    let disputed_at = env.ledger().timestamp();
+
+    // The arbitration case is left live and untouched — evidence window
+    // still open, no committee drawn yet — while 90+ days pass.
+    env.ledger()
+        .with_mut(|l| l.timestamp = disputed_at + 90 * 86_400 + 1);
+
+    // Admin's deadman's switch fires directly on invoice, independent of
+    // arbitration's own state.
+    invoice_client.resolve_default_dispute(
+        &inv_id,
+        &admin,
+        &invoice::DisputeResolution::InFavorOfSME,
+    );
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Defaulted
+    );
+
+    // The arbitration case is still fully live and unaware of any of this —
+    // drive it all the way through to finalization normally.
+    arbitration_client.select_jurors(&case_id);
+    let case = arbitration_client.get_case(&case_id).unwrap();
+    assert_eq!(case.jurors.len(), 5);
+    let mut salts = std::vec::Vec::new();
+    for (i, juror) in case.jurors.iter().enumerate() {
+        let salt = soroban_sdk::BytesN::from_array(&env, &[(i as u8) + 1; 32]);
+        let hash = arbitration_commit_hash(&env, true, &salt);
+        arbitration_client.commit_vote(&case_id, &juror, &hash);
+        salts.push(salt);
+    }
+    env.ledger()
+        .with_mut(|l| l.timestamp += 2 * 24 * 60 * 60 + 1);
+    for (i, juror) in case.jurors.iter().enumerate() {
+        arbitration_client.reveal_vote(&case_id, &juror, &true, &salts[i]);
+    }
+    env.ledger()
+        .with_mut(|l| l.timestamp += 2 * 24 * 60 * 60 + 1);
+
+    // This must NOT panic/revert even though invoice will reject the
+    // callback (DisputeAlreadyResolved) — finalize_case settles the case
+    // locally regardless.
+    arbitration_client.finalize_case(&case_id);
+    let case = arbitration_client.get_case(&case_id).unwrap();
+    assert_eq!(case.status, arbitration::CaseStatus::Resolved);
+
+    // invoice's state was NOT clobbered by arbitration's (rejected) sync —
+    // it still reflects the admin's earlier decision.
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Defaulted
+    );
+
+    // The real regression this test guards: every juror on the case is now
+    // actually able to deregister and get their stake back, not stuck
+    // forever behind a case that could never leave CommitReveal.
+    for juror in jurors.iter() {
+        arbitration_client.deregister_juror(juror);
+    }
+    env.ledger()
+        .with_mut(|l| l.timestamp += 7 * 24 * 60 * 60 + 1);
+    let token_client = soroban_sdk::token::Client::new(&env, &usdc_id);
+    for juror in jurors.iter() {
+        arbitration_client.deregister_juror(juror);
+        assert!(token_client.balance(juror) > 0);
+    }
 }
