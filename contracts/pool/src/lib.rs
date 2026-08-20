@@ -214,13 +214,27 @@ const DEFAULT_MAX_UTILIZATION_BPS: u32 = 10_000;
 const DEFAULT_UTILIZATION_WARNING_BPS: u32 = 8_000;
 const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
-// #1036: default live-ratio danger threshold — 24% (1.2x DEFAULT_COLLATERAL_BPS's 20%),
-// mirroring the frontend's existing `ratio < targetRatio * 1.2` at-risk heuristic
-// (frontend/app/invoice/[id]/page.tsx).
-const DEFAULT_DANGER_BPS: u32 = 2_400;
+// #1036: default live-ratio danger threshold. ratio_bps is scaled against
+// BPS_DENOM (10_000 = exactly meets the requirement), NOT against
+// collateral_bps directly — so mirroring the frontend's existing
+// `ratio < targetRatio * 1.2` at-risk heuristic (frontend/app/invoice/[id]/page.tsx)
+// means 1.2x *that* baseline: 12_000, not 1.2x collateral_bps's raw bps
+// value. A position is flagged the moment its live value drops below 120%
+// of the bare minimum, leaving a 20% buffer to react before it's actually
+// under water — the whole point of an early-warning trigger.
+const DEFAULT_DANGER_BPS: u32 = 12_000;
 // #1036: default top-up grace window before a flagged at-risk position becomes
 // liquidatable via liquidate_collateral.
 const DEFAULT_GRACE_PERIOD_SECS: u64 = 3 * SECS_PER_DAY;
+// #1036: sanity ceiling on danger_bps. Unlike collateral_bps (a fraction of
+// principal, capped at BPS_DENOM), danger_bps is compared directly against
+// ratio_bps — which is scaled so 10_000 means "exactly meets the
+// requirement" and has no natural upper bound (a well-collateralized
+// position can run far above it). A useful early-warning buffer needs room
+// *above* 10_000, so the ceiling here is a generous multiple of it rather
+// than BPS_DENOM itself — just enough to reject a degenerate config that
+// would flag virtually every position regardless of actual health.
+const MAX_DANGER_BPS: u32 = 30_000;
 // #1036: when routing a liquidation through the auction contract, the sale's
 // starting price is the oracle-derived fair value and decays down to this
 // fraction of it (50%) over LIQUIDATION_SALE_DURATION_SECS — a floor low
@@ -3694,7 +3708,7 @@ impl FundingPool {
     }
 
     fn validate_collateral_risk_config(danger_bps: u32, grace_period_secs: u64) -> PoolResult<()> {
-        if danger_bps == 0 || danger_bps > BPS_DENOM {
+        if danger_bps == 0 || danger_bps > MAX_DANGER_BPS {
             return Err(PoolError::InvalidDangerConfig);
         }
         if grace_period_secs == 0 {
@@ -3874,7 +3888,14 @@ impl FundingPool {
             let price_snapshot = Self::get_asset_price(env.clone(), token.clone()).ok();
             env.events().publish(
                 (EVT, symbol_short!("col_topup")),
-                (invoice_id, depositor, token, amount, record.amount, price_snapshot),
+                (
+                    invoice_id,
+                    depositor,
+                    token,
+                    amount,
+                    record.amount,
+                    price_snapshot,
+                ),
             );
             Ok(())
         })
@@ -3910,14 +3931,20 @@ impl FundingPool {
     // at_risk_since on (crossing below danger_bps) or off (recovering above it).
     // Returns the (possibly updated) deposit so a caller can read the new state
     // without a second round-trip.
-    pub fn check_collateral_risk(env: Env, invoice_id: u64) -> Result<CollateralDeposit, PoolError> {
+    pub fn check_collateral_risk(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<CollateralDeposit, PoolError> {
         bump_instance(&env);
         Self::require_not_paused(&env);
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
-            let mut deposit: CollateralDeposit =
-                env.storage().persistent().get(&key).ok_or(PoolError::CollateralNotFound)?;
+            let mut deposit: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
             if deposit.settled {
                 return Err(PoolError::CollateralAlreadySettled);
             }
@@ -3973,8 +4000,11 @@ impl FundingPool {
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
-            let mut deposit: CollateralDeposit =
-                env.storage().persistent().get(&key).ok_or(PoolError::CollateralNotFound)?;
+            let mut deposit: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
             if deposit.settled {
                 return Err(PoolError::CollateralAlreadySettled);
             }
@@ -3984,7 +4014,9 @@ impl FundingPool {
                 .get(&DataKey::FundedInvoice(invoice_id))
                 .ok_or(PoolError::InvoiceNotFound)?;
 
-            let at_risk_since = deposit.at_risk_since.ok_or(PoolError::CollateralNotAtRisk)?;
+            let at_risk_since = deposit
+                .at_risk_since
+                .ok_or(PoolError::CollateralNotAtRisk)?;
             let risk_cfg = Self::get_collateral_risk_config(env.clone());
             let now = env.ledger().timestamp();
             if now < at_risk_since.saturating_add(risk_cfg.grace_period_secs) {
@@ -4022,35 +4054,36 @@ impl FundingPool {
             // (decimals/price lookup issue, sale rejected, etc.) — liquidation
             // must not get stuck just because the optional auction integration
             // hiccups.
-            let auction_sale_id = Self::get_auction_contract(env.clone()).and_then(|auction_addr| {
-                let fair_value = collateral_value_in_funding_token(
-                    &env,
-                    &deposit.token,
-                    deposit.amount,
-                    &record.token,
-                )
-                .ok()?;
-                if fair_value <= 0 {
-                    return None;
-                }
-                let floor_price = fair_value
-                    .checked_mul(LIQUIDATION_SALE_FLOOR_BPS as i128)?
-                    .checked_div(BPS_DENOM as i128)?;
-                let auction_client = AuctionClient::new(&env, &auction_addr);
-                match auction_client.try_open_collateral_sale(
-                    &env.current_contract_address(),
-                    &deposit.token,
-                    &deposit.amount,
-                    &record.token,
-                    &env.current_contract_address(),
-                    &fair_value,
-                    &floor_price,
-                    &LIQUIDATION_SALE_DURATION_SECS,
-                ) {
-                    Ok(Ok(sale_id)) => Some(sale_id),
-                    _ => None,
-                }
-            });
+            let auction_sale_id =
+                Self::get_auction_contract(env.clone()).and_then(|auction_addr| {
+                    let fair_value = collateral_value_in_funding_token(
+                        &env,
+                        &deposit.token,
+                        deposit.amount,
+                        &record.token,
+                    )
+                    .ok()?;
+                    if fair_value <= 0 {
+                        return None;
+                    }
+                    let floor_price = fair_value
+                        .checked_mul(LIQUIDATION_SALE_FLOOR_BPS as i128)?
+                        .checked_div(BPS_DENOM as i128)?;
+                    let auction_client = AuctionClient::new(&env, &auction_addr);
+                    match auction_client.try_open_collateral_sale(
+                        &env.current_contract_address(),
+                        &deposit.token,
+                        &deposit.amount,
+                        &record.token,
+                        &env.current_contract_address(),
+                        &fair_value,
+                        &floor_price,
+                        &LIQUIDATION_SALE_DURATION_SECS,
+                    ) {
+                        Ok(Ok(sale_id)) => Some(sale_id),
+                        _ => None,
+                    }
+                });
 
             if auction_sale_id.is_none() {
                 // Fallback: credit the seized asset directly into that token's
@@ -5968,7 +6001,11 @@ impl FundingPool {
     // #1036: optional — when unset, liquidate_collateral falls back to
     // crediting seized collateral directly into pool liquidity instead of
     // consigning it to an auction sale.
-    pub fn set_auction_contract(env: Env, admin: Address, auction: Address) -> Result<(), PoolError> {
+    pub fn set_auction_contract(
+        env: Env,
+        admin: Address,
+        auction: Address,
+    ) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -5998,13 +6035,16 @@ impl FundingPool {
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
-            let mut deposit: CollateralDeposit =
-                env.storage().persistent().get(&key).ok_or(PoolError::CollateralNotFound)?;
+            let mut deposit: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
             let sale_id = deposit
                 .auction_sale_id
                 .ok_or(PoolError::NoPendingLiquidationSale)?;
-            let auction_addr =
-                Self::get_auction_contract(env.clone()).ok_or(PoolError::NoPendingLiquidationSale)?;
+            let auction_addr = Self::get_auction_contract(env.clone())
+                .ok_or(PoolError::NoPendingLiquidationSale)?;
             let sale: CollateralSale = AuctionClient::new(&env, &auction_addr)
                 .get_sale(&sale_id)
                 .ok_or(PoolError::NoPendingLiquidationSale)?;
@@ -6012,7 +6052,9 @@ impl FundingPool {
             match sale.status {
                 SaleStatus::Open => return Err(PoolError::LiquidationSaleNotSettled),
                 SaleStatus::Settled => {
-                    let proceeds = sale.settled_price.ok_or(PoolError::LiquidationSaleNotSettled)?;
+                    let proceeds = sale
+                        .settled_price
+                        .ok_or(PoolError::LiquidationSaleNotSettled)?;
                     let token_totals_key = DataKey::TokenTotals(sale.proceeds_token.clone());
                     let mut tt: PoolTokenTotals = env
                         .storage()
@@ -7038,7 +7080,12 @@ impl FundingPool {
                 Self::execute_seize_collateral(&env, &admin, invoice_id)?
             }
             AdminOperation::SetCollateralRiskConfig(danger_bps, grace_period_secs) => {
-                Self::execute_set_collateral_risk_config(&env, &admin, danger_bps, grace_period_secs)?
+                Self::execute_set_collateral_risk_config(
+                    &env,
+                    &admin,
+                    danger_bps,
+                    grace_period_secs,
+                )?
             }
         }
 
@@ -8320,7 +8367,13 @@ mod test {
     // by every cross-asset collateral test below.
     fn setup_cross_asset_collateral(
         env: &Env,
-    ) -> (FundingPoolClient<'_>, Address, Address, Address, MockReflectorClient<'_>) {
+    ) -> (
+        FundingPoolClient<'_>,
+        Address,
+        Address,
+        Address,
+        MockReflectorClient<'_>,
+    ) {
         let (client, admin, usdc_id, share_token) = setup(env);
 
         let xlm_admin = Address::generate(env);
@@ -8349,7 +8402,11 @@ mod test {
         let required = client.required_collateral_for(&principal); // 2,000 usdc-equivalent
 
         let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+        oracle.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
         // xlm priced at half of usdc: 4,000 xlm covers exactly a 2,000-usdc-value
         // requirement (4,000 * 500,000 == 2,000 * 1,000,000).
         oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
@@ -8364,14 +8421,7 @@ mod test {
         // Funding succeeds even though the deposited token differs from the
         // invoice's funding token, because its oracle-priced value covers the
         // requirement.
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &principal,
-            &sme,
-            &(now + 10_000),
-            &usdc_id,
-        );
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &(now + 10_000), &usdc_id);
 
         assert_eq!(client.get_live_collateral_ratio(&1u64), 10_000u32);
     }
@@ -8388,7 +8438,11 @@ mod test {
 
         let principal: i128 = 10_000;
         let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+        oracle.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
         oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
 
         // Only half the xlm needed to cover the 2,000-usdc-value requirement.
@@ -8399,14 +8453,8 @@ mod test {
         client.deposit(&investor, &usdc_id, &20_000, &None);
         client.deposit_collateral(&1u64, &sme, &xlm_id, &xlm_amount);
 
-        let result = client.try_fund_invoice(
-            &admin,
-            &1u64,
-            &principal,
-            &sme,
-            &(now + 10_000),
-            &usdc_id,
-        );
+        let result =
+            client.try_fund_invoice(&admin, &1u64, &principal, &sme, &(now + 10_000), &usdc_id);
         assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
     }
 
@@ -8415,7 +8463,14 @@ mod test {
     // drive a price drop from a known-good (ratio == 10_000 bps) starting point.
     fn setup_funded_cross_asset_position(
         env: &Env,
-    ) -> (FundingPoolClient<'_>, Address, Address, Address, MockReflectorClient<'_>, Address) {
+    ) -> (
+        FundingPoolClient<'_>,
+        Address,
+        Address,
+        Address,
+        MockReflectorClient<'_>,
+        Address,
+    ) {
         let (client, admin, usdc_id, xlm_id, oracle) = setup_cross_asset_collateral(env);
         let investor = Address::generate(env);
         let sme = Address::generate(env);
@@ -8426,7 +8481,11 @@ mod test {
         let principal: i128 = 10_000;
         let required = client.required_collateral_for(&principal);
         let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+        oracle.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
         oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
         let xlm_amount = required * 2;
 
@@ -8481,7 +8540,11 @@ mod test {
         // Refresh both feeds (collateral still depressed) so they're fresh at
         // liquidation time — a keeper re-submitting live readings, not stale ones.
         let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+        oracle.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
         oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &400_000i128, &now);
 
         client.liquidate_collateral(&1u64);
@@ -8536,7 +8599,11 @@ mod test {
         // Both feeds refreshed; collateral price recovered back above the danger
         // threshold by liquidation time.
         let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+        oracle.set_price(
+            &ReflectorAsset::Stellar(usdc_id.clone()),
+            &1_000_000i128,
+            &now,
+        );
         oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
 
         let result = client.try_liquidate_collateral(&1u64);

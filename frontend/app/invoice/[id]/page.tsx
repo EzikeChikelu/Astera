@@ -364,7 +364,10 @@ export default function InvoiceDetailPage() {
       setCollateralRiskConfig(
         collateralRiskConfigResult.status === 'fulfilled' ? collateralRiskConfigResult.value : null,
       );
-      const tokens = acceptedTokensResult.status === 'fulfilled' ? acceptedTokensResult.value : [];
+      const tokens =
+        acceptedTokensResult.status === 'fulfilled' && Array.isArray(acceptedTokensResult.value)
+          ? acceptedTokensResult.value
+          : [];
       setAcceptedTokens(tokens);
       setCollateralToken((prev) => {
         if (prev && tokens.includes(prev)) return prev;

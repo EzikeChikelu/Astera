@@ -544,9 +544,12 @@ fn test_invalid_collateral_risk_config_rejected_at_proposal_time() {
     );
     assert_eq!(result, Err(Ok(PoolError::InvalidDangerConfig)));
 
+    // 11_000 (110%) is a *legitimate* early-warning buffer above the 10_000
+    // "exactly meets the requirement" baseline, not an error — only a
+    // degenerate value past the sanity ceiling (30_000) should be rejected.
     let result = client.try_propose_operation(
         &admin,
-        &pool::AdminOperation::SetCollateralRiskConfig(11_000, 86_400),
+        &pool::AdminOperation::SetCollateralRiskConfig(30_001, 86_400),
     );
     assert_eq!(result, Err(Ok(PoolError::InvalidDangerConfig)));
 }

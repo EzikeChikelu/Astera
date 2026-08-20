@@ -9,7 +9,9 @@
 //! in-crate unit tests (mocking the auction call away entirely) can't cover.
 
 use auction::{AuctionContract, AuctionContractClient};
-use pool::{AdminOperation, FundingPool, FundingPoolClient, PoolError, ReflectorAsset, ReflectorPriceData};
+use pool::{
+    AdminOperation, FundingPool, FundingPoolClient, PoolError, ReflectorAsset, ReflectorPriceData,
+};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -130,9 +132,7 @@ fn setup() -> Fixture {
     pool.set_max_investor_concentration(&admin, &10_000u32);
 
     let xlm_admin = Address::generate(&env);
-    let xlm_id = env
-        .register_stellar_asset_contract_v2(xlm_admin)
-        .address();
+    let xlm_id = env.register_stellar_asset_contract_v2(xlm_admin).address();
     pool.add_token(&admin, &xlm_id, &share_token);
 
     let oracle_id = env.register(MockReflector, ());
@@ -144,8 +144,10 @@ fn setup() -> Fixture {
     pool.set_auction_contract(&admin, &auction_id);
 
     let delay = pool.get_operation_delay();
-    let collateral_proposal =
-        pool.propose_operation(&admin, &AdminOperation::SetCollateralConfig(0i128, 2_000u32));
+    let collateral_proposal = pool.propose_operation(
+        &admin,
+        &AdminOperation::SetCollateralConfig(0i128, 2_000u32),
+    );
     let risk_proposal = pool.propose_operation(
         &admin,
         &AdminOperation::SetCollateralRiskConfig(9_000u32, 86_400u64),
@@ -160,7 +162,11 @@ fn setup() -> Fixture {
     let required = pool.required_collateral_for(&principal); // 2,000
 
     let now = env.ledger().timestamp();
-    oracle.set_price(&ReflectorAsset::Stellar(usdc_id.clone()), &1_000_000i128, &now);
+    oracle.set_price(
+        &ReflectorAsset::Stellar(usdc_id.clone()),
+        &1_000_000i128,
+        &now,
+    );
     oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
     let xlm_amount = required * 2; // 4,000
 
@@ -189,16 +195,25 @@ fn setup() -> Fixture {
 /// recheck succeeds.
 fn flag_at_risk_and_advance_past_grace(f: &Fixture) {
     let now = f.env.ledger().timestamp();
-    f.oracle
-        .set_price(&ReflectorAsset::Stellar(f.xlm_id.clone()), &400_000i128, &now);
+    f.oracle.set_price(
+        &ReflectorAsset::Stellar(f.xlm_id.clone()),
+        &400_000i128,
+        &now,
+    );
     f.pool.check_collateral_risk(&1u64);
 
     f.env.ledger().with_mut(|l| l.timestamp += 86_401);
     let now = f.env.ledger().timestamp();
-    f.oracle
-        .set_price(&ReflectorAsset::Stellar(f.usdc_id.clone()), &1_000_000i128, &now);
-    f.oracle
-        .set_price(&ReflectorAsset::Stellar(f.xlm_id.clone()), &400_000i128, &now);
+    f.oracle.set_price(
+        &ReflectorAsset::Stellar(f.usdc_id.clone()),
+        &1_000_000i128,
+        &now,
+    );
+    f.oracle.set_price(
+        &ReflectorAsset::Stellar(f.xlm_id.clone()),
+        &400_000i128,
+        &now,
+    );
 }
 
 #[test]
@@ -232,7 +247,12 @@ fn test_take_then_settle_credits_usdc_proceeds_to_pool() {
     flag_at_risk_and_advance_past_grace(&f);
     f.pool.liquidate_collateral(&1u64);
 
-    let sale_id = f.pool.get_collateral_deposit(&1u64).unwrap().auction_sale_id.unwrap();
+    let sale_id = f
+        .pool
+        .get_collateral_deposit(&1u64)
+        .unwrap()
+        .auction_sale_id
+        .unwrap();
     let taker = Address::generate(&f.env);
     mint(&f.env, &f.usdc_id, &taker, 10_000);
 
@@ -254,7 +274,12 @@ fn test_take_then_settle_credits_usdc_proceeds_to_pool() {
         f.pool.get_token_totals(&f.usdc_id).pool_value,
         20_000 + price_before,
     );
-    assert!(f.pool.get_collateral_deposit(&1u64).unwrap().auction_sale_id.is_none());
+    assert!(f
+        .pool
+        .get_collateral_deposit(&1u64)
+        .unwrap()
+        .auction_sale_id
+        .is_none());
 
     // Idempotent: a second call finds nothing pending.
     let result = f.pool.try_settle_liquidation_sale(&1u64);
@@ -267,7 +292,12 @@ fn test_reclaim_expired_sale_then_settle_credits_collateral_token() {
     flag_at_risk_and_advance_past_grace(&f);
     f.pool.liquidate_collateral(&1u64);
 
-    let sale_id = f.pool.get_collateral_deposit(&1u64).unwrap().auction_sale_id.unwrap();
+    let sale_id = f
+        .pool
+        .get_collateral_deposit(&1u64)
+        .unwrap()
+        .auction_sale_id
+        .unwrap();
 
     // No taker before the 24h auction window elapses.
     f.env.ledger().with_mut(|l| l.timestamp += 86_401);
@@ -281,7 +311,12 @@ fn test_reclaim_expired_sale_then_settle_credits_collateral_token() {
     f.pool.settle_liquidation_sale(&1u64);
 
     assert_eq!(f.pool.get_token_totals(&f.xlm_id).pool_value, 4_000);
-    assert!(f.pool.get_collateral_deposit(&1u64).unwrap().auction_sale_id.is_none());
+    assert!(f
+        .pool
+        .get_collateral_deposit(&1u64)
+        .unwrap()
+        .auction_sale_id
+        .is_none());
 }
 
 #[test]
