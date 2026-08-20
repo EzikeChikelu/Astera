@@ -1,5 +1,5 @@
 import { rpc as StellarRpc } from '@stellar/stellar-sdk';
-import { BaseClient, nativeToScVal, scValToNative, Address, xdr } from './base';
+import { BaseClient, nativeToScVal, scValToNative, Address, xdr, parseContractError } from './base';
 import { Errors as PoolErrors } from '../generated/pool';
 import type {
   ClientConfig,
@@ -166,6 +166,44 @@ export class PoolClient extends BaseClient {
       ],
       params.onProgress,
     );
+  }
+
+  /** #1037: permissionless liquidation trigger — any caller may invoke this once
+   * the invoice is Defaulted on-chain. Not gated to admin/keeper roles. */
+  async liquidateInvoice(params: {
+    signer: Signer;
+    caller: string;
+    invoiceId: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.caller,
+      'liquidate_invoice',
+      [new Address(params.caller).toScVal(), nativeToScVal(params.invoiceId, { type: 'u64' })],
+      params.onProgress,
+    );
+  }
+
+  /** #1037: liquidation-status query — settled=true means collateral has been seized. */
+  async getCollateralDeposit(invoiceId: bigint | number): Promise<CollateralDeposit | null> {
+    const sim = await this.simulate('get_collateral_deposit', [
+      nativeToScVal(invoiceId, { type: 'u64' }),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw parseContractError(sim.error, this.errors);
+    }
+    const raw = scValToNative(sim.result!.retval) as Record<string, unknown> | null;
+    if (!raw) return null;
+    return {
+      invoiceId: BigInt(String(raw.invoice_id)),
+      depositor: raw.depositor as string,
+      token: raw.token as string,
+      amount: BigInt(String(raw.amount)),
+      settled: Boolean(raw.settled),
+      postedAt: Number(raw.posted_at),
+      releasedAt: Number(raw.released_at),
+      seizedAt: Number(raw.seized_at),
+    };
   }
 
   async requestWithdrawal(params: {
