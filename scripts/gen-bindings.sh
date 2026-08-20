@@ -9,7 +9,7 @@ set -euo pipefail
 # resulting module to frontend/src/generated/<contract>.ts.
 #
 # Usage: ./scripts/gen-bindings.sh [contract...]
-#   contract:  one or more of: invoice pool credit_score
+#   contract:  one or more of: invoice pool credit_score secondary_market
 #              (default: all of them)
 #
 # Examples:
@@ -30,7 +30,9 @@ cd "$REPO_ROOT"
 
 WASM_DIR="target/wasm32-unknown-unknown/release"
 OUTPUT_DIR="frontend/src/generated"
-DEFAULT_CONTRACTS=(invoice pool credit_score)
+# #1044: secondary_market's MarketError enum is well under the 50-case
+# contract-spec limit that blocks pool below, so it's included by default.
+DEFAULT_CONTRACTS=(invoice pool credit_score secondary_market)
 
 # Contracts to process: CLI args if given, otherwise the full default set.
 if [ "$#" -gt 0 ]; then

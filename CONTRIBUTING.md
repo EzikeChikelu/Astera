@@ -773,8 +773,14 @@ hand** — they are overwritten on every run and excluded from ESLint/Prettier.
 > default, but the pool contract currently fails to build because its
 > `PoolError` enum exceeds Soroban's 50-case limit for contract-spec error
 > enums. Until that is fixed, the CI bindings job and the generated barrel only
-> cover `invoice` and `credit_score`; pass those explicitly
-> (`./scripts/gen-bindings.sh invoice credit_score`) to skip `pool` locally.
+> cover `invoice`, `credit_score`, and `secondary_market`; pass those
+> explicitly (`./scripts/gen-bindings.sh invoice credit_score secondary_market`)
+> to skip `pool` locally.
+>
+> `secondary_market` (#1044, the satellite contract split out of `pool` to
+> clear the 200KB wasm limit) is unaffected by the enum-limit issue above —
+> its `MarketError` enum has 11 cases — so its bindings generate and are
+> committed normally.
 
 ---
 

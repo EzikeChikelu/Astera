@@ -6,8 +6,6 @@ import type {
   PoolConfig,
   InvestorPosition,
   WithdrawalRequest,
-  WaitEstimate,
-  LiquidityForecastPoint,
   CoFundingRound,
   RateModelConfig,
   RateSnapshot,
@@ -184,7 +182,9 @@ export class PoolClient extends BaseClient {
     );
   }
 
-  /** #1037: liquidation-status query — settled=true means collateral has been seized. */
+  /** #1037: liquidation-status query — settled=true means collateral has been seized.
+   * #1036: also carries the at-risk/auction-sale fields the collateral risk
+   * response needs. */
   async getCollateralDeposit(invoiceId: bigint | number): Promise<CollateralDeposit | null> {
     const sim = await this.simulate('get_collateral_deposit', [
       nativeToScVal(invoiceId, { type: 'u64' }),
@@ -203,6 +203,9 @@ export class PoolClient extends BaseClient {
       postedAt: Number(raw.posted_at),
       releasedAt: Number(raw.released_at),
       seizedAt: Number(raw.seized_at),
+      collateralBpsAtDeposit: Number(raw.collateral_bps_at_deposit),
+      thresholdAtDeposit: BigInt(String(raw.threshold_at_deposit)),
+      atRiskSince: raw.at_risk_since != null ? Number(raw.at_risk_since) : undefined,
     };
   }
 
@@ -273,38 +276,6 @@ export class PoolClient extends BaseClient {
       shares: BigInt(String(r.shares)),
       requestedAt: Number(r.requested_at),
       requestId: BigInt(String(r.request_id)),
-    }));
-  }
-
-  async estimateWithdrawalWait(investor: string, token: string): Promise<WaitEstimate> {
-    const sim = await this.simulate('estimate_withdrawal_wait', [
-      new Address(investor).toScVal(),
-      new Address(token).toScVal(),
-    ]);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
-    return {
-      queuePosition: Number(raw.queue_position),
-      capitalAhead: BigInt(String(raw.capital_ahead)),
-      nearestInvoiceDueDate: Number(raw.nearest_invoice_due_date),
-      estimatedWaitSecs: Number(raw.estimated_wait_secs),
-    };
-  }
-
-  async getLiquidityForecast(token: string, horizonDays: number): Promise<LiquidityForecastPoint[]> {
-    const sim = await this.simulate('get_liquidity_forecast', [
-      new Address(token).toScVal(),
-      nativeToScVal(horizonDays, { type: 'u32' }),
-    ]);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
-    return raw.map((r) => ({
-      day: Number(r.day),
-      projectedAvailable: BigInt(String(r.projected_available)),
     }));
   }
 
@@ -729,31 +700,6 @@ export class PoolClient extends BaseClient {
     return {
       threshold: BigInt(String(raw.threshold)),
       collateralBps: Number(raw.collateral_bps),
-    };
-  }
-
-  async getCollateralDeposit(invoiceId: bigint | number): Promise<CollateralDeposit | null> {
-    const sim = await this.simulate('get_collateral_deposit', [
-      nativeToScVal(invoiceId, { type: 'u64' }),
-    ]);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    const raw = scValToNative(sim.result!.retval);
-    if (!raw) return null;
-    const r = raw as Record<string, unknown>;
-    return {
-      invoiceId: BigInt(String(r.invoice_id)),
-      depositor: r.depositor as string,
-      token: r.token as string,
-      amount: BigInt(String(r.amount)),
-      settled: Boolean(r.settled),
-      postedAt: Number(r.posted_at),
-      releasedAt: Number(r.released_at),
-      seizedAt: Number(r.seized_at),
-      collateralBpsAtDeposit: Number(r.collateral_bps_at_deposit),
-      thresholdAtDeposit: BigInt(String(r.threshold_at_deposit)),
-      atRiskSince: r.at_risk_since != null ? Number(r.at_risk_since) : undefined,
     };
   }
 

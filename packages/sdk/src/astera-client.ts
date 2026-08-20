@@ -1,5 +1,6 @@
 import { InvoiceClient } from './clients/invoice';
 import { PoolClient } from './clients/pool';
+import { SecondaryMarketClient } from './clients/secondary_market';
 import { CreditScoreClient } from './clients/credit_score';
 import { OracleRegistryClient } from './clients/oracle_registry';
 import { ComplianceClient } from './clients/compliance';
@@ -42,11 +43,14 @@ import type {
   CollateralConfig,
   CollateralDeposit,
   CollateralRiskConfig,
+  Listing,
+  ListingKind,
 } from './types';
 
 export class AsteraClient {
   private invoiceClient: InvoiceClient;
   private poolClient: PoolClient;
+  private secondaryMarketClient: SecondaryMarketClient;
   private creditScoreClient: CreditScoreClient;
   private oracleRegistryClient: OracleRegistryClient;
   private complianceClient: ComplianceClient;
@@ -63,6 +67,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.poolContractId,
+    });
+    this.secondaryMarketClient = new SecondaryMarketClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.secondaryMarketContractId ?? '',
     });
     this.creditScoreClient = new CreditScoreClient({
       rpcUrl: config.rpcUrl,
@@ -172,12 +181,6 @@ export class AsteraClient {
 
     getWithdrawalQueue: (token: string): Promise<WithdrawalRequest[]> =>
       this.poolClient.getWithdrawalQueue(token),
-
-    estimateWithdrawalWait: (investor: string, token: string): Promise<WaitEstimate> =>
-      this.poolClient.estimateWithdrawalWait(investor, token),
-
-    getLiquidityForecast: (token: string, horizonDays: number): Promise<LiquidityForecastPoint[]> =>
-      this.poolClient.getLiquidityForecast(token, horizonDays),
 
     repay: (params: {
       signer: (txXdr: string) => Promise<string>;
@@ -350,6 +353,51 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.poolClient.settleLiquidationSale(params),
+  };
+
+  /** #1044: secondary-market listings and withdrawal-wait/liquidity-forecast analytics. */
+  public readonly secondaryMarket = {
+    listPosition: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      seller: string;
+      invoiceId: bigint | number;
+      kind: ListingKind;
+      amountOrBps: bigint;
+      price: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.secondaryMarketClient.listPosition(params),
+
+    cancelListing: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      seller: string;
+      listingId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.secondaryMarketClient.cancelListing(params),
+
+    buyListing: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      buyer: string;
+      listingId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.secondaryMarketClient.buyListing(params),
+
+    getListing: (listingId: bigint | number): Promise<Listing | null> =>
+      this.secondaryMarketClient.getListing(listingId),
+
+    listListingsForInvoice: (invoiceId: bigint | number): Promise<bigint[]> =>
+      this.secondaryMarketClient.listListingsForInvoice(invoiceId),
+
+    listListingsForInvestor: (seller: string): Promise<bigint[]> =>
+      this.secondaryMarketClient.listListingsForInvestor(seller),
+
+    estimateWithdrawalWait: (investor: string, token: string): Promise<WaitEstimate> =>
+      this.secondaryMarketClient.estimateWithdrawalWait(investor, token),
+
+    getLiquidityForecast: (token: string, horizonDays: number): Promise<LiquidityForecastPoint[]> =>
+      this.secondaryMarketClient.getLiquidityForecast(token, horizonDays),
   };
 
   public readonly creditScore = {

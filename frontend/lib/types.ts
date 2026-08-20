@@ -98,6 +98,29 @@ export interface LiquidityForecastPoint {
   projectedAvailable: bigint;
 }
 
+// #1025/#1044: secondary market for pool positions and co-funding shares
+// (contracts/secondary_market).
+
+/** Whether a listing covers a co-funded share (bps) or a single-funded position slice (raw amount). */
+export type ListingKind = 'CoFunding' | 'SingleFunded';
+
+export type ListingStatus = 'Open' | 'Filled' | 'Cancelled';
+
+/** A secondary-market listing created by `list_position`. */
+export interface Listing {
+  listingId: number;
+  invoiceId: number;
+  seller: string;
+  token: string;
+  kind: ListingKind;
+  /** bps of the seller's co-fund share (CoFunding) or raw token amount of deployed principal (SingleFunded). */
+  amountOrBps: bigint;
+  /** Flat token amount the buyer must pay. */
+  price: bigint;
+  createdAt: number;
+  status: ListingStatus;
+}
+
 // ── #863: utilization-driven kinked interest-rate model ─────────────────────
 
 /** Curve parameters for one token, as returned by `get_rate_model_config`. */

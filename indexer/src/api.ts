@@ -346,6 +346,76 @@ export function startApiServer(
     }
   });
 
+  // #1044: secondary-market listings. Like co-funding above, lst_open/lst_cncl/
+  // lst_buy are classified into the "pool" event category (see parser.ts's
+  // classifyContract) even though they're emitted by the secondary_market
+  // contract, so no dedicated contractType is needed here either — a listing
+  // is "open" if it has an lst_open event and no later lst_cncl/lst_buy for
+  // the same listing_id (all three events carry listing_id as value[0]).
+  const SECONDARY_MARKET_EVENT_TYPES = new Set(["lst_open", "lst_cncl", "lst_buy"]);
+
+  app.get("/secondary-market/listings/open", (_req, res) => {
+    try {
+      const events = getEvents(db, {
+        contractType: "pool",
+        limit: 2000,
+        offset: 0,
+      });
+
+      const opened = new Set<string>();
+      const closed = new Set<string>();
+      for (const evt of events) {
+        if (!SECONDARY_MARKET_EVENT_TYPES.has(evt.eventType)) continue;
+        const listingId = extractListingId(evt.value);
+        if (listingId === null) continue;
+        if (evt.eventType === "lst_open") {
+          opened.add(listingId);
+        } else {
+          closed.add(listingId);
+        }
+      }
+
+      const openListingIds = Array.from(opened).filter((id) => !closed.has(id));
+      return res.json({ listingIds: openListingIds });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Every listing a given seller has ever created, derived from lst_open
+  // events (the third tuple element is always the seller address — see
+  // contracts/secondary_market/src/lib.rs's lst_open publish call).
+  app.get("/secondary-market/listings/seller/:address", (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address) {
+        return res.status(400).json({ error: "address path param is required" });
+      }
+      const addressLower = address.toLowerCase();
+
+      const events = getEvents(db, {
+        contractType: "pool",
+        eventType: "lst_open",
+        limit: 2000,
+        offset: 0,
+      });
+
+      const listingIds = new Set<string>();
+      for (const evt of events) {
+        const value = evt.value;
+        const seller = Array.isArray(value) ? value[2] : undefined;
+        if (typeof seller === "string" && seller.toLowerCase() === addressLower) {
+          const listingId = extractListingId(value);
+          if (listingId !== null) listingIds.add(listingId);
+        }
+      }
+
+      return res.json({ address, listingIds: Array.from(listingIds) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // #861: reconstruct a VerificationRound's status/history off-chain from the
   // oracle_registry contract's indexed events, rather than requiring a
   // simulated read against the live contract for every query. `rnd_open`
@@ -708,6 +778,17 @@ export function startApiServer(
 // Returned as a string since invoice IDs may exceed Number precision once
 // serialized through JSON.
 function extractCoFundingInvoiceId(value: any): string | null {
+  if (value === null || value === undefined) return null;
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (candidate === null || candidate === undefined) return null;
+  if (typeof candidate === "object") return null;
+  return String(candidate);
+}
+
+// #1044: every secondary-market listing event's value carries the listing_id
+// as its first tuple element (lst_open/lst_cncl/lst_buy — see
+// contracts/secondary_market/src/lib.rs's publish calls).
+function extractListingId(value: any): string | null {
   if (value === null || value === undefined) return null;
   const candidate = Array.isArray(value) ? value[0] : value;
   if (candidate === null || candidate === undefined) return null;

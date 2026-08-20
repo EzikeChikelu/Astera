@@ -41,3 +41,5 @@ export * from './generated/tranche';
 
 export { TrancheClient } from '../../packages/sdk/src/clients/tranche';
 export type { TrancheInvestorPosition } from '../../packages/sdk/src/clients/tranche';
+
+export { SecondaryMarketClient } from '../../packages/sdk/src/clients/secondary_market';
