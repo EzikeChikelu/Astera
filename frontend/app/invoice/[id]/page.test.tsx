@@ -38,6 +38,11 @@ jest.mock('@/lib/contracts', () => ({
   getCoFundingRound: jest.fn(),
   buildCommitToInvoiceTx: jest.fn(),
   submitTx: jest.fn(),
+  buildRaiseDisputeTx: jest.fn(),
+  getDispute: jest.fn(),
+  getArbitrationCaseByInvoice: jest.fn(),
+  getArbitrationEvidence: jest.fn(),
+  buildSubmitEvidenceTx: jest.fn(),
 }));
 
 jest.mock('@/lib/stellar', () => ({
