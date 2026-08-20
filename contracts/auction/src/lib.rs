@@ -86,6 +86,22 @@ pub struct CollateralSale {
     pub settled_price: Option<i128>,
 }
 
+// Bundles `open_collateral_sale`'s params (matches `ListingSettlement`'s
+// existing role in pool's contract, keeping multi-field contract
+// entrypoints under clippy's too-many-arguments threshold).
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralSaleParams {
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub proceeds_token: Address,
+    pub proceeds_recipient: Address,
+    pub start_price: i128,
+    pub floor_price: i128,
+    pub duration_secs: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     NextSaleId,
@@ -274,17 +290,17 @@ impl AuctionContract {
     /// mirror trait calls directly (see `ReflectorClient`/`InvoiceContractClient`
     /// in `contracts/pool/src/lib.rs`) — callers that want to handle failure
     /// gracefully use the SDK-generated `try_open_collateral_sale` instead.
-    pub fn open_collateral_sale(
-        env: Env,
-        seller: Address,
-        token: Address,
-        amount: i128,
-        proceeds_token: Address,
-        proceeds_recipient: Address,
-        start_price: i128,
-        floor_price: i128,
-        duration_secs: u64,
-    ) -> u64 {
+    pub fn open_collateral_sale(env: Env, params: CollateralSaleParams) -> u64 {
+        let CollateralSaleParams {
+            seller,
+            token,
+            amount,
+            proceeds_token,
+            proceeds_recipient,
+            start_price,
+            floor_price,
+            duration_secs,
+        } = params;
         seller.require_auth();
         if amount <= 0
             || start_price <= 0
@@ -701,16 +717,16 @@ mod tests {
         mint(&env, &seized_token, &seller, 1_000);
         mint(&env, &proceeds_token, &taker, 10_000);
 
-        let sale_id = client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &900i128, // start_price
-            &500i128, // floor_price
-            &3_600u64,
-        );
+        let sale_id = client.open_collateral_sale(&CollateralSaleParams {
+            seller: seller.clone(),
+            token: seized_token.clone(),
+            amount: 1_000i128,
+            proceeds_token: proceeds_token.clone(),
+            proceeds_recipient: recipient.clone(),
+            start_price: 900i128,
+            floor_price: 500i128,
+            duration_secs: 3_600u64,
+        });
 
         // Seized asset moved into the auction contract's custody immediately.
         let seized_client = token::Client::new(&env, &seized_token);
@@ -740,16 +756,16 @@ mod tests {
 
         mint(&env, &seized_token, &seller, 1_000);
 
-        let sale_id = client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &1_000i128,
-            &0i128,
-            &1_000u64,
-        );
+        let sale_id = client.open_collateral_sale(&CollateralSaleParams {
+            seller: seller.clone(),
+            token: seized_token.clone(),
+            amount: 1_000i128,
+            proceeds_token: proceeds_token.clone(),
+            proceeds_recipient: recipient.clone(),
+            start_price: 1_000i128,
+            floor_price: 0i128,
+            duration_secs: 1_000u64,
+        });
 
         assert_eq!(client.current_sale_price(&sale_id), 1_000);
         env.ledger().with_mut(|l| l.timestamp += 500);
@@ -770,16 +786,16 @@ mod tests {
         mint(&env, &seized_token, &seller, 1_000);
         mint(&env, &proceeds_token, &taker, 10_000);
 
-        let sale_id = client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &900i128,
-            &500i128,
-            &3_600u64,
-        );
+        let sale_id = client.open_collateral_sale(&CollateralSaleParams {
+            seller: seller.clone(),
+            token: seized_token.clone(),
+            amount: 1_000i128,
+            proceeds_token: proceeds_token.clone(),
+            proceeds_recipient: recipient.clone(),
+            start_price: 900i128,
+            floor_price: 500i128,
+            duration_secs: 3_600u64,
+        });
 
         env.ledger().with_mut(|l| l.timestamp += 3_601);
         let result = client.try_take_collateral_sale(&taker, &sale_id);
@@ -794,16 +810,16 @@ mod tests {
 
         mint(&env, &seized_token, &seller, 1_000);
 
-        let sale_id = client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &900i128,
-            &500i128,
-            &3_600u64,
-        );
+        let sale_id = client.open_collateral_sale(&CollateralSaleParams {
+            seller: seller.clone(),
+            token: seized_token.clone(),
+            amount: 1_000i128,
+            proceeds_token: proceeds_token.clone(),
+            proceeds_recipient: recipient.clone(),
+            start_price: 900i128,
+            floor_price: 500i128,
+            duration_secs: 3_600u64,
+        });
 
         env.ledger().with_mut(|l| l.timestamp += 3_601);
         client.reclaim_expired_sale(&keeper, &sale_id);
@@ -824,16 +840,16 @@ mod tests {
 
         mint(&env, &seized_token, &seller, 1_000);
 
-        let sale_id = client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &900i128,
-            &500i128,
-            &3_600u64,
-        );
+        let sale_id = client.open_collateral_sale(&CollateralSaleParams {
+            seller: seller.clone(),
+            token: seized_token.clone(),
+            amount: 1_000i128,
+            proceeds_token: proceeds_token.clone(),
+            proceeds_recipient: recipient.clone(),
+            start_price: 900i128,
+            floor_price: 500i128,
+            duration_secs: 3_600u64,
+        });
 
         let result = client.try_reclaim_expired_sale(&keeper, &sale_id);
         assert_eq!(result, Err(Ok(AuctionError::SaleNotExpired)));
@@ -847,15 +863,15 @@ mod tests {
         mint(&env, &seized_token, &seller, 1_000);
 
         // floor_price > start_price is invalid.
-        client.open_collateral_sale(
-            &seller,
-            &seized_token,
-            &1_000i128,
-            &proceeds_token,
-            &recipient,
-            &500i128,
-            &900i128,
-            &3_600u64,
-        );
+        client.open_collateral_sale(&CollateralSaleParams {
+            seller,
+            token: seized_token,
+            amount: 1_000i128,
+            proceeds_token,
+            proceeds_recipient: recipient,
+            start_price: 500i128,
+            floor_price: 900i128,
+            duration_secs: 3_600u64,
+        });
     }
 }

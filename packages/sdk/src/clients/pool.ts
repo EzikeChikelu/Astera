@@ -763,51 +763,6 @@ export class PoolClient extends BaseClient {
     );
   }
 
-  /** Admin-settable, optional: when configured, liquidate_collateral routes
-   * seized collateral through this auction contract's Dutch-auction sale
-   * instead of crediting pool liquidity directly. */
-  async setAuctionContract(params: {
-    signer: Signer;
-    admin: string;
-    auction: string;
-    onProgress?: (progress: TransactionProgress) => void;
-  }): Promise<string> {
-    return this.buildAndSendTx(
-      params.admin,
-      'set_auction_contract',
-      [new Address(params.admin).toScVal(), new Address(params.auction).toScVal()],
-      params.onProgress,
-    );
-  }
-
-  async getAuctionContract(): Promise<string | null> {
-    const sim = await this.simulate('get_auction_contract', []);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    const raw = scValToNative(sim.result!.retval);
-    return raw ? (raw as string) : null;
-  }
-
-  /** Permissionless follow-up to a liquidation that was routed through the
-   * auction contract: reconciles a settled or expired sale back into pool
-   * accounting. Reverts with LiquidationSaleNotSettled while the sale is
-   * still open, or NoPendingLiquidationSale if there's nothing to settle
-   * (never routed through auction, or already reconciled). */
-  async settleLiquidationSale(params: {
-    signer: Signer;
-    caller: string;
-    invoiceId: bigint | number;
-    onProgress?: (progress: TransactionProgress) => void;
-  }): Promise<string> {
-    return this.buildAndSendTx(
-      params.caller,
-      'settle_liquidation_sale',
-      [nativeToScVal(params.invoiceId, { type: 'u64' })],
-      params.onProgress,
-    );
-  }
-
   // #1025: secondary market
 
   private listingFromRaw(raw: Record<string, unknown>): Listing {

@@ -335,24 +335,6 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.poolClient.liquidateCollateral(params),
-
-    setAuctionContract: (params: {
-      signer: (txXdr: string) => Promise<string>;
-      admin: string;
-      auction: string;
-      onProgress?: (progress: TransactionProgress) => void;
-    }): Promise<string> =>
-      this.poolClient.setAuctionContract(params),
-
-    getAuctionContract: (): Promise<string | null> => this.poolClient.getAuctionContract(),
-
-    settleLiquidationSale: (params: {
-      signer: (txXdr: string) => Promise<string>;
-      caller: string;
-      invoiceId: bigint | number;
-      onProgress?: (progress: TransactionProgress) => void;
-    }): Promise<string> =>
-      this.poolClient.settleLiquidationSale(params),
   };
 
   /** #1044: secondary-market listings and withdrawal-wait/liquidity-forecast analytics. */

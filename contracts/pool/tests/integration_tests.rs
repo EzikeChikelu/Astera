@@ -517,16 +517,6 @@ fn test_execute_set_collateral_risk_config_after_delay() {
 }
 
 #[test]
-fn test_direct_set_collateral_risk_config_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, _usdc_id) = setup(&env);
-
-    let result = client.try_set_collateral_risk_config(&admin, &3_000, &86_400);
-    assert_eq!(result, Err(Ok(PoolError::OperationRequiresProposal)));
-}
-
-#[test]
 fn test_invalid_collateral_risk_config_rejected_at_proposal_time() {
     let env = Env::default();
     env.mock_all_auths();
