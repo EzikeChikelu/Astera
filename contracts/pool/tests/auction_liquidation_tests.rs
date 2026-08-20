@@ -23,6 +23,13 @@ pub struct DummyShare;
 
 #[contractimpl]
 impl DummyShare {
+    // add_token requires the share token to respond to decimals() (see
+    // pool/src/lib.rs's own validation); reused across usdc's initial share
+    // token and xlm's add_token call in setup() below.
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
     pub fn total_supply(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -115,7 +122,16 @@ struct Fixture {
 /// bps danger threshold and 86_400s grace period are configured.
 fn setup() -> Fixture {
     let env = Env::default();
-    env.mock_all_auths();
+    // liquidate_collateral (called directly, as the test's root invocation)
+    // calls into auction's open_collateral_sale, which does
+    // `seller.require_auth()` for pool's own address — a legitimate
+    // non-root contract self-authorization (pool is the direct caller of
+    // that specific frame), but plain mock_all_auths() only mocks auth tied
+    // to the root invocation and rejects this. See
+    // Env::mock_all_auths_allowing_non_root_auth's doc example, which is
+    // exactly this shape (contract B calling contract A with no
+    // require_auth at B's own entrypoint).
+    env.mock_all_auths_allowing_non_root_auth();
     env.ledger().with_mut(|l| l.timestamp = 100_000);
 
     let admin = Address::generate(&env);
@@ -256,23 +272,34 @@ fn test_take_then_settle_credits_usdc_proceeds_to_pool() {
     let taker = Address::generate(&f.env);
     mint(&f.env, &f.usdc_id, &taker, 10_000);
 
-    let price_before = f.auction.current_sale_price(&sale_id);
+    // Pool already holds some usdc at this point (the investor's 20,000
+    // deposit minus the 10,000 principal funded out to the sme) — track
+    // deltas rather than assuming an absolute balance.
+    let usdc_client = token::Client::new(&f.env, &f.usdc_id);
+    let pool_usdc_before_take = usdc_client.balance(&f.pool.address);
+    let pool_value_before_settle = f.pool.get_token_totals(&f.usdc_id).pool_value;
+
+    let price = f.auction.current_sale_price(&sale_id);
     f.auction.take_collateral_sale(&taker, &sale_id);
 
     // Keeper receives the xlm, pool's raw usdc balance grows by the price —
     // but pool_value accounting isn't touched yet (matches the existing,
     // separately-tested fact that a raw transfer into pool doesn't
     // auto-update pool_value).
-    let usdc_client = token::Client::new(&f.env, &f.usdc_id);
-    let pool_usdc_before = usdc_client.balance(&f.pool.address);
-    assert_eq!(pool_usdc_before, price_before);
-    assert_eq!(f.pool.get_token_totals(&f.usdc_id).pool_value, 20_000);
+    assert_eq!(
+        usdc_client.balance(&f.pool.address),
+        pool_usdc_before_take + price,
+    );
+    assert_eq!(
+        f.pool.get_token_totals(&f.usdc_id).pool_value,
+        pool_value_before_settle,
+    );
 
     f.pool.settle_liquidation_sale(&1u64);
 
     assert_eq!(
         f.pool.get_token_totals(&f.usdc_id).pool_value,
-        20_000 + price_before,
+        pool_value_before_settle + price,
     );
     assert!(f
         .pool

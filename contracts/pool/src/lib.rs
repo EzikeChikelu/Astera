@@ -8634,6 +8634,7 @@ mod test {
             &env.ledger().timestamp(),
         );
         client.check_collateral_risk(&1u64);
+        let flagged_at = env.ledger().timestamp();
 
         env.ledger().with_mut(|l| l.timestamp += 86_401);
         // Both feeds refreshed; collateral price recovered back above the danger
@@ -8652,12 +8653,15 @@ mod test {
         // Soroban invocations are atomic: since this call returned an error,
         // every write it made (if any) is rolled back — there is no way to
         // "partially succeed" and clear the flag while also erroring. The
-        // flag is unchanged; a separate check_collateral_risk call is what
-        // actually clears it on recovery (covered by
-        // test_check_collateral_risk_flags_and_clears above).
+        // flag is unchanged from whenever check_collateral_risk flagged it
+        // above (captured dynamically as flagged_at rather than assumed,
+        // since setup_funded_cross_asset_position's two governance proposals
+        // each advance the ledger past the setup() baseline); a separate
+        // check_collateral_risk call is what actually clears it on recovery
+        // (covered by test_check_collateral_risk_flags_and_clears above).
         let deposit = client.get_collateral_deposit(&1u64).unwrap();
         assert!(!deposit.settled);
-        assert_eq!(deposit.at_risk_since, Some(100_000));
+        assert_eq!(deposit.at_risk_since, Some(flagged_at));
     }
 
     #[test]
