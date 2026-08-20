@@ -33,6 +33,10 @@ export interface IndexedEvent {
 const CREDIT_SCORE_CONTRACT_ID = (process.env.CREDIT_SCORE_CONTRACT_ID || '').trim();
 const INVOICE_CONTRACT_ID = (process.env.INVOICE_CONTRACT_ID || '').trim();
 const POOL_CONTRACT_ID = (process.env.POOL_CONTRACT_ID || '').trim();
+// #1044: secondary-market listings satellite contract, split out of pool to
+// clear the 200KB wasm deploy limit. Emits lst_open/lst_cncl/lst_buy under
+// its own "market" topic — see SECONDARY_MARKET_EVENT_TYPES below.
+const SECONDARY_MARKET_CONTRACT_ID = (process.env.SECONDARY_MARKET_CONTRACT_ID || '').trim();
 // #861: N-of-M staked oracle consensus network
 const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || '').trim();
 // #867: on-chain compliance / sanctions screening registry
@@ -58,8 +62,10 @@ const ORACLE_REGISTRY_EVENT_TYPES = new Set([
   'unpaused',
 ]);
 
-// #1025: secondary market events emitted by the pool contract under the
-// "pool" topic.
+// #1025: secondary market events, now emitted by the secondary_market
+// contract (see #1044) under its own "market" topic rather than pool's
+// "pool" topic. Classified as 'pool' below to keep the existing API
+// category consumers already filter on.
 const SECONDARY_MARKET_EVENT_TYPES = new Set([
   'lst_open',
   'lst_cncl',
@@ -116,6 +122,11 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (POOL_CONTRACT_ID && contractId === POOL_CONTRACT_ID) {
     return 'pool';
   }
+  // #1044: secondary_market's listing events are still surfaced as 'pool'
+  // category events — it's a satellite of pool, not a distinct product area.
+  if (SECONDARY_MARKET_CONTRACT_ID && contractId === SECONDARY_MARKET_CONTRACT_ID) {
+    return 'pool';
+  }
   if (ORACLE_REGISTRY_CONTRACT_ID && contractId === ORACLE_REGISTRY_CONTRACT_ID) {
     return 'oracle_registry';
   }
@@ -143,6 +154,7 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   }
   if (contractType === 'invoice') return 'invoice';
   if (contractType === 'pool') return 'pool';
+  if (SECONDARY_MARKET_EVENT_TYPES.has(eventType)) return 'pool';
   return 'unknown';
 }
 

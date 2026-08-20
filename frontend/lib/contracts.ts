@@ -4,6 +4,7 @@ import {
   rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
+  SECONDARY_MARKET_CONTRACT_ID,
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
@@ -53,6 +54,9 @@ import type {
   MultiSigConfig,
   ActionPayload,
   Proposal,
+  Listing,
+  ListingKind,
+  ListingStatus,
 } from './types';
 import { ALL_ROLES } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
@@ -342,7 +346,7 @@ export async function estimateWithdrawalWait(
   token: string,
 ): Promise<WaitEstimate | null> {
   const sim = await simulateTx(
-    POOL_CONTRACT_ID,
+    SECONDARY_MARKET_CONTRACT_ID,
     'estimate_withdrawal_wait',
     [new Address(investor).toScVal(), new Address(token).toScVal()],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
@@ -387,7 +391,7 @@ export async function getLiquidityForecast(
   horizonDays: number,
 ): Promise<LiquidityForecastPoint[]> {
   const sim = await simulateTx(
-    POOL_CONTRACT_ID,
+    SECONDARY_MARKET_CONTRACT_ID,
     'get_liquidity_forecast',
     [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
@@ -401,6 +405,164 @@ export async function getLiquidityForecast(
     day: Number(r.day ?? 0),
     projectedAvailable: BigInt(String(r.projected_available ?? 0)),
   }));
+}
+
+// ---- #1025/#1044: secondary market for pool positions and co-funding shares ----
+
+function listingKindToScVal(kind: ListingKind): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(kind, { type: 'symbol' })]);
+}
+
+function listingFromRaw(raw: Record<string, unknown>): Listing {
+  return {
+    listingId: Number(raw.listing_id),
+    invoiceId: Number(raw.invoice_id),
+    seller: raw.seller as string,
+    token: raw.token as string,
+    kind: enumTagFromNative<ListingKind>(raw.kind),
+    amountOrBps: BigInt(String(raw.amount_or_bps)),
+    price: BigInt(String(raw.price)),
+    createdAt: Number(raw.created_at),
+    status: enumTagFromNative<ListingStatus>(raw.status),
+  };
+}
+
+/** List part or all of a position for sale on the secondary market. */
+export async function buildListPositionTx(params: {
+  seller: string;
+  invoiceId: number;
+  kind: ListingKind;
+  amountOrBps: bigint;
+  price: bigint;
+}): Promise<string> {
+  const account = await getRpcAccount(params.seller);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'list_position',
+        new Address(params.seller).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        listingKindToScVal(params.kind),
+        nativeToScVal(params.amountOrBps, { type: 'u64' }),
+        nativeToScVal(params.price, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Cancel an open listing. Only the original seller may cancel. */
+export async function buildCancelListingTx(seller: string, listingId: number): Promise<string> {
+  const account = await getRpcAccount(seller);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_listing',
+        new Address(seller).toScVal(),
+        nativeToScVal(listingId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Buy an open listing. Buyer's available balance is debited by the listing price. */
+export async function buildBuyListingTx(buyer: string, listingId: number): Promise<string> {
+  const account = await getRpcAccount(buyer);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'buy_listing',
+        new Address(buyer).toScVal(),
+        nativeToScVal(listingId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Fetch a single listing by ID. Returns null if not found. */
+export async function getListing(listingId: number): Promise<Listing | null> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'get_listing',
+    [nativeToScVal(listingId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return listingFromRaw(raw as Record<string, unknown>);
+}
+
+/** All listing IDs for a given invoice (open and closed). */
+export async function listListingsForInvoice(invoiceId: number): Promise<number[]> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'list_listings_for_invoice',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((id) => Number(id));
+}
+
+/** All listing IDs created by a given seller (open and closed). */
+export async function listListingsForInvestor(seller: string): Promise<number[]> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'list_listings_for_investor',
+    [new Address(seller).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((id) => Number(id));
 }
 
 export async function getAcceptedTokens(): Promise<string[]> {

@@ -13,6 +13,8 @@ import {
   listCoFundingRounds,
   getCoFundingRound,
   getInvestorCoFundPositions,
+  getListing,
+  listListingsForInvestor,
   buildDepositTx,
   buildWithdrawTx,
   buildCommitToInvoiceTx,
@@ -33,6 +35,7 @@ import type {
   InvoiceMetadata,
   ReferralStats,
   CoFundingRound,
+  Listing,
 } from './types';
 
 type SWRCacheEntry = {
@@ -107,6 +110,12 @@ export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
     dedupingInterval: CACHE_TTL.invoiceStatus,
   },
   coFundingPositions: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  secondaryMarketListings: {
     refreshInterval: CACHE_TTL.invoiceStatus,
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
@@ -272,6 +281,61 @@ export function useCoFundingPositions(investor: string | null) {
     () => fetcher(() => getInvestorCoFundPositions(investor!)),
     {
       ...CACHE_CONFIG.coFundingPositions,
+    },
+  );
+}
+
+// ---- #1044: Secondary Market Listings Cache ----
+//
+// Unlike co-funding rounds (which the pool contract can enumerate directly
+// via list_co_funding_rounds), secondary_market has no "list all listings"
+// entrypoint — only per-invoice and per-seller lookups. Browsing all open
+// listings across the platform is instead discovered from the indexer's
+// already-ingested lst_open/lst_cncl/lst_buy event history (see #1044's
+// indexer/src/parser.ts + api.ts changes), then hydrated with a live
+// getListing() read per id, mirroring the discover-then-hydrate shape of
+// useCoFundingRounds above.
+
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+
+async function fetchListingIds(path: string): Promise<number[]> {
+  const res = await fetch(`${INDEXER_URL}${path}`);
+  if (!res.ok) throw new Error(`Indexer error: ${res.status}`);
+  const data = (await res.json()) as { listingIds: Array<string | number> };
+  return (data.listingIds ?? []).map((id) => Number(id));
+}
+
+async function hydrateListings(ids: number[]): Promise<Listing[]> {
+  const listings = await Promise.all(ids.map((id) => getListing(id)));
+  return listings.filter((l): l is Listing => l !== null);
+}
+
+/** All currently-open secondary-market listings (across every seller/invoice). */
+export function useOpenListings() {
+  return useSWR<Listing[], ContractError>(
+    'secondary-market-open-listings',
+    () =>
+      fetcher(async () => {
+        const ids = await fetchListingIds('/secondary-market/listings/open');
+        return hydrateListings(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+/** Every listing (open, filled, or cancelled) a given seller has created. */
+export function useMyListings(seller: string | null) {
+  return useSWR<Listing[], ContractError>(
+    seller ? ['secondary-market-my-listings', seller] : null,
+    () =>
+      fetcher(async () => {
+        const ids = await listListingsForInvestor(seller!);
+        return hydrateListings(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
     },
   );
 }
