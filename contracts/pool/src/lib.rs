@@ -3615,6 +3615,37 @@ impl FundingPool {
     }
 
     fn execute_seize_collateral(env: &Env, admin: &Address, invoice_id: u64) -> PoolResult<()> {
+        Self::seize_collateral_core(env, admin, invoice_id, "col_seiz_default")
+    }
+
+    /// #1037: permissionless liquidation trigger. Unlike `seize_collateral` (which
+    /// requires an admin-proposed governance action), anyone may call this once an
+    /// invoice is objectively Defaulted on the invoice contract — no admin gating on
+    /// the trigger itself. Idempotent: a second call on an already-seized invoice
+    /// returns `CollateralAlreadySettled` rather than double-seizing.
+    ///
+    /// This only performs the seizure step. Insurance draw-down (`insurance.file_claim`)
+    /// and auction clearing remain separate permissionless follow-up calls — Soroban
+    /// disallows the pool→insurance→pool re-entrancy that a single atomic call would
+    /// require (see the note in `seize_collateral_core`), so a keeper chains these
+    /// three permissionless calls rather than the pool orchestrating them itself.
+    pub fn liquidate_invoice(env: Env, caller: Address, invoice_id: u64) -> Result<(), PoolError> {
+        caller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "liq_started")),
+            (invoice_id, caller.clone(), env.ledger().timestamp()),
+        );
+        Self::seize_collateral_core(&env, &caller, invoice_id, "liq_seized")
+    }
+
+    fn seize_collateral_core(
+        env: &Env,
+        triggered_by: &Address,
+        invoice_id: u64,
+        event_name: &str,
+    ) -> PoolResult<()> {
         non_reentrant!(env, {
             let record: FundedInvoice = env
                 .storage()
@@ -3690,10 +3721,19 @@ impl FundingPool {
                 SETTLEMENT_COLLATERAL_TTL,
             );
 
-            // #386: emit status-triggered seizure event (invoice was Defaulted).
+            // #386/#1037: emit status-triggered seizure event (invoice was Defaulted).
+            // event_name distinguishes the governance-proposed path ("col_seiz_default")
+            // from the permissionless liquidation path ("liq_seized") for indexer/frontend
+            // pipeline-stage tracking.
             env.events().publish(
-                (EVT, Symbol::new(env, "col_seiz_default")),
-                (invoice_id, col.depositor, col.amount, admin.clone(), now),
+                (EVT, Symbol::new(env, event_name)),
+                (
+                    invoice_id,
+                    col.depositor.clone(),
+                    col.amount,
+                    triggered_by.clone(),
+                    now,
+                ),
             );
 
             // #866: the default-insurance reserve's file_claim is deliberately
@@ -10783,6 +10823,103 @@ mod test {
         let col = client.get_collateral_deposit(&1u64).unwrap();
         assert!(col.settled);
         assert_eq!(col.seized_at, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_liquidate_invoice_permissionless_happy_path() {
+        // #1037: any address (a keeper, not the admin) can trigger liquidation
+        // directly once the invoice is Defaulted — no governance proposal needed.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
+
+        // Keeper (not admin, no proposal) triggers liquidation directly.
+        client.liquidate_invoice(&keeper, &1u64);
+
+        let col = client.get_collateral_deposit(&1u64).unwrap();
+        assert!(col.settled);
+        assert_eq!(col.seized_at, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_liquidate_invoice_not_defaulted_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        // Not yet marked Defaulted — permissionless trigger must reject it.
+        let result = client.try_liquidate_invoice(&keeper, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::NotDefaulted)));
+    }
+
+    #[test]
+    fn test_liquidate_invoice_double_liquidation_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
+
+        client.liquidate_invoice(&keeper, &1u64);
+
+        // Second permissionless call on the same already-seized invoice is rejected.
+        let result = client.try_liquidate_invoice(&keeper, &1u64);
+        assert_eq!(result, Err(Ok(PoolError::CollateralAlreadySettled)));
+
+        // Also rejected via the governance path — same underlying idempotency guard.
+        let proposal_id = client.propose_operation(&admin, &AdminOperation::SeizeCollateral(1u64));
+        advance_past_operation_delay(&env, &client);
+        let exec_result = client.try_execute_operation(&admin, &proposal_id);
+        assert_eq!(exec_result, Err(Ok(PoolError::CollateralAlreadySettled)));
     }
 
     #[test]
