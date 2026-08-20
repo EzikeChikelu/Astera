@@ -287,12 +287,20 @@ export default function InvestPage() {
             <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
             <p className="text-brand-muted">{t('description')}</p>
           </div>
-          <Link
-            href="/invest/co-funding"
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
-          >
-            Browse Co-Funding Rounds →
-          </Link>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Link
+              href="/invest/co-funding"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+            >
+              Browse Co-Funding Rounds →
+            </Link>
+            <Link
+              href="/invest/secondary-market"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+            >
+              Browse Secondary Market →
+            </Link>
+          </div>
         </div>
 
         {/* ── Top grid: Pool stats + deposit form ── */}

@@ -13,6 +13,10 @@
 
 export * as InvoiceContract from './invoice';
 export * as CreditScoreContract from './credit_score';
+// #1044: secondary_market's MarketError enum (11 cases) is well under
+// Soroban's 50-case contract-spec limit, so — unlike pool below — it
+// generates cleanly.
+export * as SecondaryMarketContract from './secondary_market';
 
 // NOTE: pool bindings are intentionally not generated yet. The pool contract
 // currently fails to compile because its `PoolError` enum exceeds Soroban's
