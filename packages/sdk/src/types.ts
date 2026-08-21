@@ -412,3 +412,69 @@ export interface CreditDefaultEvent {
   score: number;
   timestamp: number;
 }
+
+// ─── #1043: structured multi-party dispute arbitration ─────────────────────
+// Mirrors contracts/arbitration/src/lib.rs's public types. `DisputeResolution`
+// intentionally mirrors invoice's own dispute-outcome type by string value —
+// `true`/favor-debtor votes resolve to `'InFavorOfDebtor'`.
+
+export type DisputeResolution = 'Pending' | 'InFavorOfSME' | 'InFavorOfDebtor';
+
+export type PartyRole = 'Claimant' | 'Respondent';
+
+export type CaseStatus = 'EvidenceWindow' | 'CommitReveal' | 'Resolved' | 'NoQuorumEscalated';
+
+export interface JurorInfo {
+  address: string;
+  stakeAmount: bigint;
+  stakeToken: string;
+  isActive: boolean;
+  casesServed: number;
+  timesSlashed: number;
+  nonRevealStrikes: number;
+  registeredAt: number;
+  deregisterRequestedAt?: number;
+}
+
+export interface EvidenceEntry {
+  submitter: string;
+  party: PartyRole;
+  evidenceHash: string;
+  submittedAt: number;
+}
+
+export interface DisputeCase {
+  id: bigint;
+  invoiceId: bigint;
+  claimant: string;
+  respondent: string;
+  amount: bigint;
+  openedAt: number;
+  evidenceDeadline: number;
+  commitDeadline: number;
+  revealDeadline: number;
+  jurors: string[];
+  status: CaseStatus;
+  resolution: DisputeResolution;
+  retryCount: number;
+}
+
+export interface JurorVote {
+  commitHash?: string;
+  revealedVote?: boolean;
+}
+
+export interface ArbitrationConfig {
+  minStake: bigint;
+  stakeToken: string;
+  committeeSize: number;
+  quorumFloor: number;
+  evidenceWindowSecs: number;
+  commitWindowSecs: number;
+  revealWindowSecs: number;
+  deregisterCooldownSecs: number;
+  slashBps: number;
+  nonRevealSlashBps: number;
+  lopsidedConfidenceBps: number;
+  maxRetries: number;
+}

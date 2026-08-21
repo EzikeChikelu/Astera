@@ -415,3 +415,73 @@ export interface Proposal {
   expiresAt: number;
   status: AccessControlProposalStatus;
 }
+
+// #1043: structured multi-party dispute arbitration
+
+export interface DisputeRecord {
+  evidenceHash: string;
+  filedAt: number;
+  resolvedAt: number;
+  outcome: DisputeResolution;
+}
+
+export type DisputeResolution = 'Pending' | 'InFavorOfSME' | 'InFavorOfDebtor';
+
+export type PartyRole = 'Claimant' | 'Respondent';
+
+export type CaseStatus = 'EvidenceWindow' | 'CommitReveal' | 'Resolved' | 'NoQuorumEscalated';
+
+export interface JurorInfo {
+  address: StellarAddress;
+  stakeAmount: bigint;
+  stakeToken: string;
+  isActive: boolean;
+  casesServed: number;
+  timesSlashed: number;
+  nonRevealStrikes: number;
+  registeredAt: number;
+  deregisterRequestedAt: number | null;
+}
+
+export interface EvidenceEntry {
+  submitter: StellarAddress;
+  party: PartyRole;
+  evidenceHash: string;
+  submittedAt: number;
+}
+
+export interface DisputeCase {
+  id: number;
+  invoiceId: number;
+  claimant: StellarAddress;
+  respondent: StellarAddress;
+  amount: bigint;
+  openedAt: number;
+  evidenceDeadline: number;
+  commitDeadline: number;
+  revealDeadline: number;
+  jurors: StellarAddress[];
+  status: CaseStatus;
+  resolution: DisputeResolution;
+  retryCount: number;
+}
+
+export interface JurorVoteStatus {
+  hasCommitted: boolean;
+  revealedVote: boolean | null;
+}
+
+export interface ArbitrationConfig {
+  minStake: bigint;
+  stakeToken: string;
+  committeeSize: number;
+  quorumFloor: number;
+  evidenceWindowSecs: number;
+  commitWindowSecs: number;
+  revealWindowSecs: number;
+  deregisterCooldownSecs: number;
+  slashBps: number;
+  nonRevealSlashBps: number;
+  lopsidedConfidenceBps: number;
+  maxRetries: number;
+}

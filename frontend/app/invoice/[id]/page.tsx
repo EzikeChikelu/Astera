@@ -34,6 +34,11 @@ import {
   getCoFundingRound,
   buildCommitToInvoiceTx,
   submitTx,
+  buildRaiseDisputeTx,
+  getDispute,
+  getArbitrationCaseByInvoice,
+  getArbitrationEvidence,
+  buildSubmitEvidenceTx,
 } from '@/lib/contracts';
 import {
   formatAmount,
@@ -70,6 +75,9 @@ import type {
   CollateralRiskConfig,
   CoFundingRound,
   FullCreditScore,
+  DisputeRecord,
+  DisputeCase,
+  EvidenceEntry,
 } from '@/lib/types';
 
 type InvoiceEventKind = 'created' | 'funded' | 'paid' | 'defaulted' | 'repaid';
@@ -202,6 +210,17 @@ export default function InvoiceDetailPage() {
   const [repayAmount, setRepayAmount] = useState<string>('');
   const [disputeModalOpen, setDisputeModalOpen] = useState(false);
   const [disputeReason, setDisputeReason] = useState('');
+  // #1043: post-default dispute -> arbitration flow. Distinct from the
+  // pre-funding "Raise Dispute" button above (which disputes an oracle
+  // verification, not a default) — see the invoice contract's two separate
+  // dispute mechanisms.
+  const [defaultDisputeModalOpen, setDefaultDisputeModalOpen] = useState(false);
+  const [defaultDisputeEvidence, setDefaultDisputeEvidence] = useState('');
+  const [defaultDisputeRespondent, setDefaultDisputeRespondent] = useState('');
+  const [disputeRecord, setDisputeRecord] = useState<DisputeRecord | null>(null);
+  const [arbitrationCase, setArbitrationCase] = useState<DisputeCase | null>(null);
+  const [arbitrationEvidence, setArbitrationEvidence] = useState<EvidenceEntry[]>([]);
+  const [newEvidenceHash, setNewEvidenceHash] = useState('');
   const [collateralConfig, setCollateralConfig] = useState<CollateralConfig | null>(null);
   const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
   // #1036: live, oracle-priced ratio (bps) and the risk config it's judged
@@ -333,6 +352,8 @@ export default function InvoiceDetailPage() {
         privateResult,
         creditScoreResult,
         coFundingResult,
+        disputeResult,
+        arbitrationCaseResult,
       ] = await Promise.allSettled([
         getPoolConfig(),
         getFundedInvoice(numId),
@@ -344,6 +365,8 @@ export default function InvoiceDetailPage() {
         isInvoicePrivate(numId),
         getFullCreditScore(inv.owner),
         getCoFundingRound(numId),
+        getDispute(numId),
+        getArbitrationCaseByInvoice(numId),
       ]);
 
       setPoolConfig(poolResult.status === 'fulfilled' ? poolResult.value : null);
@@ -376,6 +399,17 @@ export default function InvoiceDetailPage() {
       setIsPrivate(privateResult.status === 'fulfilled' ? privateResult.value : false);
       setCreditScore(creditScoreResult.status === 'fulfilled' ? creditScoreResult.value : null);
       setCoFundingRound(coFundingResult.status === 'fulfilled' ? coFundingResult.value : null);
+      setDisputeRecord(disputeResult.status === 'fulfilled' ? disputeResult.value : null);
+      const arbCase =
+        arbitrationCaseResult.status === 'fulfilled' ? arbitrationCaseResult.value : null;
+      setArbitrationCase(arbCase);
+      if (arbCase) {
+        getArbitrationEvidence(arbCase.id)
+          .then(setArbitrationEvidence)
+          .catch(() => setArbitrationEvidence([]));
+      } else {
+        setArbitrationEvidence([]);
+      }
 
       void loadHistory(numId);
     } catch (e) {
@@ -603,6 +637,79 @@ export default function InvoiceDetailPage() {
       await loadInvoice();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to raise dispute.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  // #1043: post-default dispute — routes to arbitration when the invoice
+  // clears the configured value threshold. `respondent` stands in for the
+  // debtor's side of the case (invoice.debtor has no wallet today; see the
+  // arbitration contract's docs for why this is a deliberate limitation).
+  async function handleRaiseDefaultDispute() {
+    if (!wallet.address || !invoice || !defaultDisputeEvidence.trim()) return;
+    let respondent: string;
+    try {
+      respondent = parseStellarAddress(defaultDisputeRespondent.trim());
+    } catch {
+      toast.error('Enter a valid respondent Stellar address.');
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      const xdr = await buildRaiseDisputeTx({
+        borrower: wallet.address,
+        invoiceId: invoice.id,
+        evidenceHash: defaultDisputeEvidence,
+        respondent,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success('Dispute raised. Above-threshold disputes are routed to arbitration.');
+      setDefaultDisputeModalOpen(false);
+      setDefaultDisputeEvidence('');
+      setDefaultDisputeRespondent('');
+      await loadInvoice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to raise dispute.';
+      toast.error(msg);
+      console.error(e);
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function handleSubmitArbitrationEvidence() {
+    if (!wallet.address || !arbitrationCase || !newEvidenceHash.trim()) return;
+    setActionLoading(true);
+    try {
+      const xdr = await buildSubmitEvidenceTx({
+        submitter: wallet.address,
+        caseId: arbitrationCase.id,
+        evidenceHash: newEvidenceHash,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success('Evidence submitted.');
+      setNewEvidenceHash('');
+      await loadInvoice();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to submit evidence.';
       toast.error(msg);
       console.error(e);
     } finally {
@@ -1433,7 +1540,121 @@ export default function InvoiceDetailPage() {
                 Our team will review your dispute within 3-5 business days. You will be notified
                 once the issue is resolved.
               </p>
+
+              {arbitrationCase && (
+                <div className="mt-4 pt-4 border-t border-red-800/50 space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-brand-muted">Arbitration case #{arbitrationCase.id}</span>
+                    <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-brand-dark border border-brand-border">
+                      {arbitrationCase.status}
+                    </span>
+                  </div>
+                  {arbitrationEvidence.length > 0 && (
+                    <ul className="text-xs text-brand-muted space-y-1">
+                      {arbitrationEvidence.map((e, i) => (
+                        <li key={i} className="font-mono truncate">
+                          [{e.party}] {e.evidenceHash}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {arbitrationCase.status === 'EvidenceWindow' &&
+                    wallet.address &&
+                    (wallet.address === arbitrationCase.claimant ||
+                      wallet.address === arbitrationCase.respondent) && (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={newEvidenceHash}
+                          onChange={(e) => setNewEvidenceHash(e.target.value)}
+                          placeholder="Evidence hash / URI"
+                          className="flex-1 bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
+                        />
+                        <button
+                          onClick={() => void handleSubmitArbitrationEvidence()}
+                          disabled={actionLoading || !newEvidenceHash.trim()}
+                          className="px-3 py-2 bg-brand-gold text-brand-dark rounded-lg text-xs font-semibold hover:bg-brand-amber transition-colors disabled:opacity-50"
+                        >
+                          Submit
+                        </button>
+                      </div>
+                    )}
+                </div>
+              )}
+              {!arbitrationCase && disputeRecord && disputeRecord.outcome === 'Pending' && (
+                <p className="mt-2 text-xs text-brand-muted">
+                  This dispute is below the arbitration value threshold and stays on the standard
+                  admin review path.
+                </p>
+              )}
             </div>
+          )}
+
+          {isOwner && metadata.status === 'Defaulted' && (
+            <>
+              <button
+                onClick={() => setDefaultDisputeModalOpen(true)}
+                className="w-full px-5 py-3 border border-red-700/50 text-red-400 font-semibold rounded-xl hover:bg-red-900/20 transition-colors"
+              >
+                Dispute Default
+              </button>
+              {defaultDisputeModalOpen && (
+                <ConfirmActionModal
+                  title={`Dispute Default for Invoice #${invoice?.id}`}
+                  description="Disputing a default flag files a claim (e.g. non-delivery, wrongful default). Invoices above the configured value threshold are routed to staked-juror arbitration instead of a unilateral admin decision."
+                  confirmLabel="Raise Dispute"
+                  onConfirm={() => void handleRaiseDefaultDispute()}
+                  onCancel={() => {
+                    setDefaultDisputeModalOpen(false);
+                    setDefaultDisputeEvidence('');
+                    setDefaultDisputeRespondent('');
+                  }}
+                  variant="destructive"
+                  isOpen={defaultDisputeModalOpen}
+                >
+                  <div className="px-6 pt-4 space-y-3">
+                    <div>
+                      <label
+                        htmlFor="default-dispute-evidence"
+                        className="block text-xs font-medium text-brand-muted mb-2"
+                      >
+                        Evidence hash
+                      </label>
+                      <textarea
+                        id="default-dispute-evidence"
+                        value={defaultDisputeEvidence}
+                        onChange={(e) => setDefaultDisputeEvidence(e.target.value)}
+                        placeholder="Hash/URI of your supporting evidence..."
+                        rows={3}
+                        className="w-full px-4 py-2.5 rounded-xl border border-brand-border bg-brand-dark text-white placeholder-brand-muted/50 focus:border-brand-gold focus:outline-none focus:ring-2 focus:ring-brand-gold/40 resize-none"
+                        disabled={actionLoading}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="default-dispute-respondent"
+                        className="block text-xs font-medium text-brand-muted mb-2"
+                      >
+                        Respondent address
+                      </label>
+                      <input
+                        id="default-dispute-respondent"
+                        type="text"
+                        value={defaultDisputeRespondent}
+                        onChange={(e) => setDefaultDisputeRespondent(e.target.value)}
+                        placeholder="G..."
+                        className="w-full px-4 py-2.5 rounded-xl border border-brand-border bg-brand-dark text-white placeholder-brand-muted/50 focus:border-brand-gold focus:outline-none focus:ring-2 focus:ring-brand-gold/40"
+                        disabled={actionLoading}
+                      />
+                      <p className="mt-1.5 text-xs text-brand-muted">
+                        Only used if this dispute is routed to arbitration — stands in for the
+                        debtor&apos;s side of the case (see FAQ for why).
+                      </p>
+                    </div>
+                  </div>
+                </ConfirmActionModal>
+              )}
+            </>
           )}
 
           {isOwner &&
