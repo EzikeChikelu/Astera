@@ -1,4 +1,4 @@
-import { AsteraClient } from '../../../sdk/src/client';
+import { AsteraClient } from '../../../packages/sdk/src/astera-client';
 import { Deployer } from './deployer';
 import { 
   Keypair, 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { TrancheClass } from '@/../sdk/src/generated/tranche';
+import { TrancheClass } from '@/../packages/sdk/src/generated/tranche';
 
 interface WaterfallResult {
   seniorAmount: bigint;

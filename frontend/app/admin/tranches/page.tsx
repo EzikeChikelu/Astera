@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import toast from 'react-hot-toast';
-import { TrancheConfig } from '@/../sdk/src/generated/tranche';
+import { TrancheConfig } from '@/../packages/sdk/src/generated/tranche';
 import { buildSetTrancheConfigTx } from '@/lib/contracts';
 import { submitTx } from '@/lib/stellar';
 import { useStore } from '@/lib/store';

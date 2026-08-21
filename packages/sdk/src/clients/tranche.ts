@@ -8,8 +8,8 @@ import type {
   TrancheAccounting,
   InvoiceTrancheExposure,
   WaterfallSimulation,
-} from '../../../../sdk/src/generated/tranche';
-import { TrancheClass } from '../../../../sdk/src/generated/tranche';
+} from '../generated/tranche';
+import { TrancheClass } from '../generated/tranche';
 
 export interface TrancheInvestorPosition {
   deposited: bigint;
