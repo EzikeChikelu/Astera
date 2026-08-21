@@ -6620,6 +6620,12 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_compliance_cleared(&env, &buyer)?;
+        // #1035: the order-book matching engine can settle a fill between
+        // two arbitrary resting orders, not just a buyer accepting a
+        // seller's own listing, so the seller's compliance/KYC status is
+        // re-checked here too rather than assumed still valid from
+        // whenever they originally entered their position.
+        Self::require_compliance_cleared(&env, &seller)?;
 
         if seller == buyer {
             return Err(PoolError::Unauthorized);
@@ -6627,6 +6633,7 @@ impl FundingPool {
 
         non_reentrant!(&env, {
             require_kyc_approved(&env, &buyer)?;
+            require_kyc_approved(&env, &seller)?;
 
             let record: FundedInvoice = env
                 .storage()

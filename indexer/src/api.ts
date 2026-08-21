@@ -416,6 +416,90 @@ export function startApiServer(
     }
   });
 
+  // #1035: order-book events (place_order/cancel_order/expire_order), sitting
+  // alongside the #1025 listing events above in the same "pool" category.
+  // Unlike a listing, an order can be *partially* filled — ord_fill doesn't
+  // by itself mean an order is fully closed — so "open" here is optimistic
+  // (has an ord_open/ord_fill and no later ord_cncl/ord_exp); the frontend
+  // always re-hydrates via get_order on-chain for the authoritative
+  // status/remaining before rendering, mirroring the listings endpoint above
+  // (including its 2000-event replay ceiling).
+  const ORDER_BOOK_EVENT_TYPES = new Set(["ord_open", "ord_cncl", "ord_fill", "ord_exp"]);
+
+  app.get("/secondary-market/orders/open", (_req, res) => {
+    try {
+      const events = getEvents(db, {
+        contractType: "pool",
+        limit: 2000,
+        offset: 0,
+      });
+
+      const opened = new Set<string>();
+      const closed = new Set<string>();
+      for (const evt of events) {
+        if (!ORDER_BOOK_EVENT_TYPES.has(evt.eventType)) continue;
+        if (evt.eventType === "ord_cncl" || evt.eventType === "ord_exp") {
+          const orderId = extractListingId(evt.value);
+          if (orderId !== null) closed.add(orderId);
+          continue;
+        }
+        if (evt.eventType === "ord_open") {
+          const orderId = extractListingId(evt.value);
+          if (orderId !== null) opened.add(orderId);
+          continue;
+        }
+        // ord_fill carries both the taker's and maker's order_id at
+        // value[0]/value[1] — either may still have remaining size, so
+        // both are candidates until proven closed above.
+        if (Array.isArray(evt.value)) {
+          const takerId = evt.value[0] !== undefined ? String(evt.value[0]) : null;
+          const makerId = evt.value[1] !== undefined ? String(evt.value[1]) : null;
+          if (takerId !== null) opened.add(takerId);
+          if (makerId !== null) opened.add(makerId);
+        }
+      }
+
+      const openOrderIds = Array.from(opened).filter((id) => !closed.has(id));
+      return res.json({ orderIds: openOrderIds });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Every order a given owner has ever placed, derived from ord_open events
+  // (the third tuple element is always the owner address — see
+  // contracts/secondary_market/src/lib.rs's place_order publish call).
+  app.get("/secondary-market/orders/owner/:address", (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address) {
+        return res.status(400).json({ error: "address path param is required" });
+      }
+      const addressLower = address.toLowerCase();
+
+      const events = getEvents(db, {
+        contractType: "pool",
+        eventType: "ord_open",
+        limit: 2000,
+        offset: 0,
+      });
+
+      const orderIds = new Set<string>();
+      for (const evt of events) {
+        const value = evt.value;
+        const owner = Array.isArray(value) ? value[2] : undefined;
+        if (typeof owner === "string" && owner.toLowerCase() === addressLower) {
+          const orderId = extractListingId(value);
+          if (orderId !== null) orderIds.add(orderId);
+        }
+      }
+
+      return res.json({ address, orderIds: Array.from(orderIds) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // #861: reconstruct a VerificationRound's status/history off-chain from the
   // oracle_registry contract's indexed events, rather than requiring a
   // simulated read against the live contract for every query. `rnd_open`

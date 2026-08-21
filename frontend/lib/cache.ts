@@ -15,6 +15,9 @@ import {
   getInvestorCoFundPositions,
   getListing,
   listListingsForInvestor,
+  getOrder,
+  getOrderBook,
+  listOrdersForOwner,
   buildDepositTx,
   buildWithdrawTx,
   buildCommitToInvoiceTx,
@@ -36,6 +39,8 @@ import type {
   ReferralStats,
   CoFundingRound,
   Listing,
+  ListingKind,
+  Order,
 } from './types';
 
 type SWRCacheEntry = {
@@ -333,6 +338,49 @@ export function useMyListings(seller: string | null) {
       fetcher(async () => {
         const ids = await listListingsForInvestor(seller!);
         return hydrateListings(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+// ---- #1035: Order Book Cache ----
+//
+// Unlike the listings above, `get_order_book` is scoped to a single
+// (invoiceId, kind) pair and reads on-chain state directly — no indexer
+// discovery step needed, since there's no "browse every invoice's book at
+// once" need in the UI (a seller/buyer works one invoice at a time).
+
+async function hydrateOrders(ids: number[]): Promise<Order[]> {
+  const orders = await Promise.all(ids.map((id) => getOrder(id)));
+  return orders.filter((o): o is Order => o !== null);
+}
+
+/** Resting bid/ask orders for one invoice's order book, as `{ bids, asks }`. */
+export function useOrderBook(invoiceId: number | null, kind: ListingKind | null) {
+  return useSWR<{ bids: Order[]; asks: Order[] }, ContractError>(
+    invoiceId !== null && kind ? ['secondary-market-order-book', invoiceId, kind] : null,
+    () =>
+      fetcher(async () => {
+        const { bidIds, askIds } = await getOrderBook(invoiceId!, kind!);
+        const [bids, asks] = await Promise.all([hydrateOrders(bidIds), hydrateOrders(askIds)]);
+        return { bids, asks };
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+/** Every order (any status) a given owner has placed. */
+export function useMyOrders(owner: string | null) {
+  return useSWR<Order[], ContractError>(
+    owner ? ['secondary-market-my-orders', owner] : null,
+    () =>
+      fetcher(async () => {
+        const ids = await listOrdersForOwner(owner!);
+        return hydrateOrders(ids);
       }),
     {
       ...CACHE_CONFIG.secondaryMarketListings,

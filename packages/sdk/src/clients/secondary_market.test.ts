@@ -50,6 +50,26 @@ function listingScVal(overrides: Partial<Record<string, xdr.ScVal>> = {}): xdr.S
   });
 }
 
+function orderScVal(overrides: Partial<Record<string, xdr.ScVal>> = {}): xdr.ScVal {
+  return scvMap({
+    order_id: xdr.ScVal.scvU64(new xdr.Uint64(11)),
+    invoice_id: xdr.ScVal.scvU64(new xdr.Uint64(42)),
+    owner: new Address(SELLER).toScVal(),
+    token: new Address(TOKEN).toScVal(),
+    kind: unitVariant('CoFunding'),
+    side: unitVariant('Ask'),
+    price: xdr.ScVal.scvI128(
+      new xdr.Int128Parts({ hi: xdr.Int64.fromString('0'), lo: xdr.Uint64.fromString('10000000') }),
+    ),
+    amount_or_bps: xdr.ScVal.scvU64(new xdr.Uint64(3000)),
+    remaining: xdr.ScVal.scvU64(new xdr.Uint64(1000)),
+    created_at: xdr.ScVal.scvU64(new xdr.Uint64(1700000000)),
+    expires_at: xdr.ScVal.scvU64(new xdr.Uint64(0)),
+    status: unitVariant('PartiallyFilled'),
+    ...overrides,
+  });
+}
+
 describe('SecondaryMarketClient reads', () => {
   it('getListing decodes listing_id, kind, and status out of their one-element enum vecs', async () => {
     const client = makeClient();
@@ -126,6 +146,78 @@ describe('SecondaryMarketClient reads', () => {
     });
   });
 
+  it('getOrder decodes order_id, kind, side, and status out of their one-element enum vecs', async () => {
+    const client = makeClient();
+    jest.spyOn(client as any, 'simulate').mockResolvedValue({
+      result: { retval: orderScVal() },
+    });
+
+    const order = await client.getOrder(11);
+
+    expect(order).not.toBeNull();
+    expect(order?.orderId).toBe(11n);
+    expect(order?.invoiceId).toBe(42n);
+    expect(order?.owner).toBe(SELLER);
+    expect(order?.kind).toBe('CoFunding');
+    expect(order?.side).toBe('Ask');
+    expect(order?.price).toBe(10000000n);
+    expect(order?.amountOrBps).toBe(3000n);
+    expect(order?.remaining).toBe(1000n);
+    expect(order?.expiresAt).toBe(0);
+    expect(order?.status).toBe('PartiallyFilled');
+  });
+
+  it('getOrder returns null for a nonexistent order', async () => {
+    const client = makeClient();
+    jest.spyOn(client as any, 'simulate').mockResolvedValue({
+      result: { retval: xdr.ScVal.scvVoid() },
+    });
+
+    expect(await client.getOrder(9999)).toBeNull();
+  });
+
+  it('getOrderBook decodes the (bid_ids, ask_ids) tuple into bidIds/askIds', async () => {
+    const client = makeClient();
+    jest.spyOn(client as any, 'simulate').mockResolvedValue({
+      result: {
+        retval: xdr.ScVal.scvVec([
+          xdr.ScVal.scvVec([xdr.ScVal.scvU64(new xdr.Uint64(1))]),
+          xdr.ScVal.scvVec([
+            xdr.ScVal.scvU64(new xdr.Uint64(2)),
+            xdr.ScVal.scvU64(new xdr.Uint64(3)),
+          ]),
+        ]),
+      },
+    });
+
+    const book = await client.getOrderBook(42, 'CoFunding');
+    expect(book).toEqual({ bidIds: [1n], askIds: [2n, 3n] });
+  });
+
+  it('getOrderBook returns empty arrays instead of throwing on a simulation error', async () => {
+    const client = makeClient();
+    jest.spyOn(client as any, 'simulate').mockResolvedValue({
+      error: 'HostError: Error(Contract, #NotInitialized)',
+    });
+
+    expect(await client.getOrderBook(42, 'CoFunding')).toEqual({ bidIds: [], askIds: [] });
+  });
+
+  it('listOrdersForOwner decodes a Vec<u64> of order ids', async () => {
+    const client = makeClient();
+    jest.spyOn(client as any, 'simulate').mockResolvedValue({
+      result: {
+        retval: xdr.ScVal.scvVec([
+          xdr.ScVal.scvU64(new xdr.Uint64(11)),
+          xdr.ScVal.scvU64(new xdr.Uint64(12)),
+        ]),
+      },
+    });
+
+    const ids = await client.listOrdersForOwner(SELLER);
+    expect(ids).toEqual([11n, 12n]);
+  });
+
   it('getLiquidityForecast decodes a Vec<LiquidityForecastPoint>', async () => {
     const client = makeClient();
     jest.spyOn(client as any, 'simulate').mockResolvedValue({
@@ -199,5 +291,63 @@ describe('SecondaryMarketClient writes', () => {
     expect(caller).toBe(BUYER);
     expect(method).toBe('buy_listing');
     expect(args).toHaveLength(2);
+  });
+
+  it('placeOrder calls buildAndSendTx with place_order and (owner, request), defaulting expiresAt to 0', async () => {
+    const client = makeClient();
+    const spy = jest.spyOn(client as any, 'buildAndSendTx').mockResolvedValue('txhash');
+
+    await client.placeOrder({
+      signer: async (xdrTx: string) => xdrTx,
+      owner: SELLER,
+      invoiceId: 42,
+      kind: 'CoFunding',
+      side: 'Ask',
+      amountOrBps: 3000n,
+      price: 10_000_000n,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [caller, method, args] = spy.mock.calls[0];
+    expect(caller).toBe(SELLER);
+    expect(method).toBe('place_order');
+    // (owner, request) — the request is a single PlaceOrderRequest struct,
+    // not individual scalar args (clippy's too-many-arguments threshold —
+    // see the same pattern for pool's OpenCoFundingRequest).
+    expect(args).toHaveLength(2);
+  });
+
+  it('cancelOrder calls buildAndSendTx with cancel_order and (owner, order_id)', async () => {
+    const client = makeClient();
+    const spy = jest.spyOn(client as any, 'buildAndSendTx').mockResolvedValue('txhash');
+
+    await client.cancelOrder({
+      signer: async (xdrTx: string) => xdrTx,
+      owner: SELLER,
+      orderId: 11,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [caller, method, args] = spy.mock.calls[0];
+    expect(caller).toBe(SELLER);
+    expect(method).toBe('cancel_order');
+    expect(args).toHaveLength(2);
+  });
+
+  it('expireOrder calls buildAndSendTx with expire_order and a single order_id arg', async () => {
+    const client = makeClient();
+    const spy = jest.spyOn(client as any, 'buildAndSendTx').mockResolvedValue('txhash');
+
+    await client.expireOrder({
+      signer: async (xdrTx: string) => xdrTx,
+      caller: BUYER,
+      orderId: 11,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [caller, method, args] = spy.mock.calls[0];
+    expect(caller).toBe(BUYER);
+    expect(method).toBe('expire_order');
+    expect(args).toHaveLength(1);
   });
 });
