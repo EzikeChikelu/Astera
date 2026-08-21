@@ -229,6 +229,39 @@ export type ActionPayload =
   | { tag: 'SetLateThreshold'; values: [bigint] }
   | { tag: 'SetScoreThresholds'; values: [number, number, number, number] }
   | { tag: 'RegisterAttestor'; values: [string, number, number] }
+  // ── oracle_registry (#1042) ──
+  | { tag: 'SetOracleRegistryInvoiceContract'; values: [string] }
+  | { tag: 'SetOracleRegistryTreasury'; values: [string | undefined] }
+  | {
+      tag: 'SetOracleRegistryConfig';
+      values: [bigint, number, number, bigint, bigint];
+    }
+  | { tag: 'SetOracleRegistryPaused'; values: [boolean] }
+  | { tag: 'SlashOracle'; values: [string, number, bigint, string] }
+  | { tag: 'AdminResolveRound'; values: [bigint, boolean, string] }
+  // ── compliance (#1042) ──
+  | { tag: 'SetCompliancePaused'; values: [boolean] }
+  | { tag: 'RegisterScreener'; values: [string] }
+  | { tag: 'ConfirmScreenerRegistration'; values: [string] }
+  | { tag: 'DeregisterScreener'; values: [string] }
+  | { tag: 'SetRescreeningInterval'; values: [bigint] }
+  | { tag: 'SetScreenerTimelock'; values: [bigint] }
+  // ── governance (#1042) ──
+  | { tag: 'UpdateGovernanceConfig'; values: [number, number] }
+  | { tag: 'SetCategoryQuorum'; values: [number, number] }
+  // ── referral (#1042) ──
+  | { tag: 'SetReferralPaused'; values: [boolean] }
+  | { tag: 'SetReferralPool'; values: [string] }
+  | { tag: 'SetBorrowRewardBps'; values: [number] }
+  | { tag: 'SetDepositRewardBps'; values: [number] }
+  // ── admin-key rotation (#1042) ──
+  | { tag: 'SetPoolAccessControl'; values: [string] }
+  | { tag: 'SetInvoiceAccessControl'; values: [string] }
+  | { tag: 'SetCreditScoreAccessControl'; values: [string] }
+  | { tag: 'SetOracleRegistryAccessControl'; values: [string] }
+  | { tag: 'SetComplianceAccessControl'; values: [string] }
+  | { tag: 'SetGovernanceAccessControl'; values: [string] }
+  | { tag: 'SetReferralAccessControl'; values: [string] }
   | { tag: 'AddSigner'; values: [Role, string] }
   | { tag: 'RemoveSigner'; values: [Role, string] }
   | { tag: 'SetThreshold'; values: [Role, number] };

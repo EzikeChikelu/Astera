@@ -52,6 +52,9 @@ pub enum ReferralError {
     SelfReferral = 3,
     InvalidBps = 4,
     ContractPaused = 5,
+    // #1042: a `*_via_ac` entrypoint was called but no `access_control`
+    // contract has been configured via `set_access_control` yet.
+    AccessControlNotConfigured = 6,
 }
 
 #[contracttype]
@@ -90,6 +93,9 @@ pub enum DataKey {
     /// #943: descending-sorted leaderboard of the top MAX_LEADERBOARD_SIZE
     /// referrers by referral_count.
     TopReferrers,
+    /// #1042: multisig trust anchor. Additive — untouched, this stays unset
+    /// and every admin-gated entrypoint above works exactly as before.
+    AccessControl,
 }
 
 fn bump_instance(env: &Env) {
@@ -191,6 +197,17 @@ fn require_admin(env: &Env, admin: &Address) {
     }
 }
 
+fn require_access_control(env: &Env, caller: &Address) {
+    let configured: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::AccessControl)
+        .unwrap_or_else(|| panic_with_error!(env, ReferralError::AccessControlNotConfigured));
+    if caller != &configured {
+        panic_with_error!(env, ReferralError::Unauthorized);
+    }
+}
+
 #[contract]
 pub struct ReferralContract;
 
@@ -284,6 +301,90 @@ impl ReferralContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("dep_bps")), (admin, bps));
+    }
+
+    // #1042: multisig admin path, additive to the legacy single-admin
+    // functions above — see access_control/src/lib.rs for the full
+    // propose/approve/execute lifecycle. `set_access_control` bootstraps
+    // the trust anchor (still gated by the legacy admin key); every
+    // `*_via_ac` entrypoint below then trusts only calls that carry the
+    // configured `access_control` contract's own on-chain identity.
+
+    pub fn set_access_control(env: Env, admin: Address, access_control: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &access_control);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (admin, access_control));
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::AccessControl)
+    }
+
+    /// #1042: rotates the trust anchor itself through the currently
+    /// configured `access_control` contract rather than the legacy admin
+    /// key.
+    pub fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &new_access_control);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, symbol_short!("ac_rot")),
+            (access_control, new_access_control),
+        );
+    }
+
+    pub fn set_paused_via_ac(env: Env, access_control: Address, paused: bool) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
+    }
+
+    pub fn set_pool_via_ac(env: Env, access_control: Address, pool: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage().instance().set(&DataKey::Pool, &pool);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("ac_pool")), (access_control, pool));
+    }
+
+    pub fn set_borrow_reward_bps_via_ac(env: Env, access_control: Address, bps: u32) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        if bps > MAX_BPS {
+            panic_with_error!(&env, ReferralError::InvalidBps);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::BorrowRewardBps, &bps);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("ac_brw")), (access_control, bps));
+    }
+
+    pub fn set_deposit_reward_bps_via_ac(env: Env, access_control: Address, bps: u32) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        if bps > MAX_BPS {
+            panic_with_error!(&env, ReferralError::InvalidBps);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DepositRewardBps, &bps);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("ac_dep")), (access_control, bps));
     }
 
     pub fn get_borrow_reward_bps(env: Env) -> u32 {

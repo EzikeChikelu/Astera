@@ -77,6 +77,9 @@ pub enum OracleRegistryError {
     // #954: slash_oracle's on-chain evidence requirement.
     InvalidEvidence = 23,
     SlashRoundNotFound = 24,
+    // #1042: a `*_via_ac` entrypoint was called but no `access_control`
+    // contract has been configured via `set_access_control` yet.
+    AccessControlNotConfigured = 25,
 }
 
 #[contracttype]
@@ -172,6 +175,9 @@ pub enum DataKey {
     OpenRounds,
     QuorumTiers,
     OracleRounds(Address),
+    // #1042: multisig trust anchor. Additive — untouched, this stays unset
+    // and every admin-gated entrypoint above works exactly as before.
+    AccessControl,
 }
 
 const EVT: Symbol = symbol_short!("ORACLE");
@@ -508,6 +514,17 @@ impl OracleRegistryContract {
     ) -> Result<(), OracleRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::slash_oracle_internal(&env, operator, bps, round_id, evidence, admin)
+    }
+
+    fn slash_oracle_internal(
+        env: &Env,
+        operator: Address,
+        bps: u32,
+        round_id: u64,
+        evidence: String,
+        caller: Address,
+    ) -> Result<(), OracleRegistryError> {
         if bps == 0 || bps > 10_000 {
             return Err(OracleRegistryError::InvalidBps);
         }
@@ -532,15 +549,15 @@ impl OracleRegistryContract {
         info.total_slashes += 1;
         env.storage().persistent().set(&key, &info);
 
-        let config = Self::load_config(&env)?;
+        let config = Self::load_config(env)?;
         if let Some(treasury) = config.treasury {
-            let token_client = token::Client::new(&env, &config.stake_token);
+            let token_client = token::Client::new(env, &config.stake_token);
             token_client.transfer(&env.current_contract_address(), &treasury, &slash_amount);
         }
 
         env.events().publish(
             (EVT, symbol_short!("slashed")),
-            (operator, bps, slash_amount, admin, round_id, evidence),
+            (operator, bps, slash_amount, caller, round_id, evidence),
         );
         Ok(())
     }
@@ -795,6 +812,16 @@ impl OracleRegistryContract {
     ) -> Result<(), OracleRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::admin_resolve_round_internal(&env, invoice_id, approved, reason, admin)
+    }
+
+    fn admin_resolve_round_internal(
+        env: &Env,
+        invoice_id: u64,
+        approved: bool,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), OracleRegistryError> {
         let round_key = DataKey::Round(invoice_id);
         let mut round: VerificationRound = env
             .storage()
@@ -818,10 +845,10 @@ impl OracleRegistryContract {
         };
         let oracle_hash = round.oracle_hash.clone();
         env.storage().persistent().set(&round_key, &round);
-        Self::finalize_on_invoice(&env, invoice_id, approved, &oracle_hash)?;
+        Self::finalize_on_invoice(env, invoice_id, approved, &oracle_hash)?;
         env.events().publish(
             (EVT, symbol_short!("fallback")),
-            (invoice_id, approved, admin, reason),
+            (invoice_id, approved, caller, reason),
         );
         Ok(())
     }
@@ -925,6 +952,154 @@ impl OracleRegistryContract {
         }
     }
 
+    // #1042: multisig admin path, additive to the legacy single-admin
+    // functions above — see access_control/src/lib.rs for the full
+    // propose/approve/execute lifecycle. `set_access_control` bootstraps
+    // the trust anchor (still gated by the legacy admin key, same as
+    // pool/invoice/credit_score); every `*_via_ac` entrypoint below then
+    // trusts only calls that carry the configured `access_control`
+    // contract's own on-chain identity.
+
+    pub fn set_access_control(
+        env: Env,
+        admin: Address,
+        access_control: Address,
+    ) -> Result<(), OracleRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &access_control);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (admin, access_control));
+        Ok(())
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::AccessControl)
+    }
+
+    /// #1042: rotates the trust anchor itself through the currently
+    /// configured `access_control` contract rather than the legacy admin
+    /// key, so a compromised admin key alone can no longer repoint or strip
+    /// multisig gating once this registry has adopted it.
+    pub fn set_access_control_via_ac(
+        env: Env,
+        access_control: Address,
+        new_access_control: Address,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &new_access_control);
+        env.events().publish(
+            (EVT, symbol_short!("ac_rot")),
+            (access_control, new_access_control),
+        );
+        Ok(())
+    }
+
+    pub fn set_invoice_contract_via_ac(
+        env: Env,
+        access_control: Address,
+        invoice_contract: Address,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
+        env.events()
+            .publish((EVT, symbol_short!("inv_set")), invoice_contract);
+        Ok(())
+    }
+
+    pub fn set_treasury_via_ac(
+        env: Env,
+        access_control: Address,
+        treasury: Option<Address>,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        let mut config = Self::load_config(&env)?;
+        config.treasury = treasury;
+        env.storage().instance().set(&DataKey::Config, &config);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_registry_config_via_ac(
+        env: Env,
+        access_control: Address,
+        min_stake: i128,
+        required_votes: u32,
+        quorum_bps: u32,
+        round_duration_secs: u64,
+        deregister_cooldown_secs: u64,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        if min_stake <= 0
+            || required_votes == 0
+            || quorum_bps == 0
+            || quorum_bps > 10_000
+            || round_duration_secs == 0
+        {
+            return Err(OracleRegistryError::InvalidConfig);
+        }
+        let mut config = Self::load_config(&env)?;
+        config.min_stake = min_stake;
+        config.required_votes = required_votes;
+        config.quorum_bps = quorum_bps;
+        config.round_duration_secs = round_duration_secs;
+        config.deregister_cooldown_secs = deregister_cooldown_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("cfg_upd")), access_control);
+        Ok(())
+    }
+
+    pub fn set_paused_via_ac(
+        env: Env,
+        access_control: Address,
+        paused: bool,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events().publish(
+            (EVT, symbol_short!("ac_pause")),
+            (access_control, paused),
+        );
+        Ok(())
+    }
+
+    pub fn slash_oracle_via_ac(
+        env: Env,
+        access_control: Address,
+        operator: Address,
+        bps: u32,
+        round_id: u64,
+        evidence: String,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        Self::slash_oracle_internal(&env, operator, bps, round_id, evidence, access_control)
+    }
+
+    pub fn admin_resolve_round_via_ac(
+        env: Env,
+        access_control: Address,
+        invoice_id: u64,
+        approved: bool,
+        reason: String,
+    ) -> Result<(), OracleRegistryError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        Self::admin_resolve_round_internal(&env, invoice_id, approved, reason, access_control)
+    }
+
     fn require_admin(env: &Env, admin: &Address) -> Result<(), OracleRegistryError> {
         let stored: Address = env
             .storage()
@@ -932,6 +1107,18 @@ impl OracleRegistryContract {
             .get(&DataKey::Admin)
             .ok_or(OracleRegistryError::NotInitialized)?;
         if admin != &stored {
+            return Err(OracleRegistryError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn require_access_control(env: &Env, caller: &Address) -> Result<(), OracleRegistryError> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccessControl)
+            .ok_or(OracleRegistryError::AccessControlNotConfigured)?;
+        if caller != &configured {
             return Err(OracleRegistryError::Unauthorized);
         }
         Ok(())

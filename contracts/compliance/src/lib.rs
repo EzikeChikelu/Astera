@@ -53,6 +53,9 @@ pub enum ComplianceError {
     ReviewRequestTooSoon = 13,
     // Screener has already screened this subject within the rescreening interval.
     RescreeningTooSoon = 14,
+    // #1042: a `*_via_ac` entrypoint was called but no `access_control`
+    // contract has been configured via `set_access_control` yet.
+    AccessControlNotConfigured = 15,
 }
 
 #[contracttype]
@@ -138,6 +141,9 @@ pub enum DataKey {
     ScreenerSubmissions(Address),
     // Last screening timestamp keyed by (screener, subject address).
     LastScreenedAt(Address, Address),
+    // #1042: multisig trust anchor. Additive — untouched, this stays unset
+    // and every admin-gated entrypoint above works exactly as before.
+    AccessControl,
 }
 
 const EVT: Symbol = symbol_short!("COMPLY");
@@ -220,7 +226,15 @@ impl ComplianceContract {
     ) -> Result<(), ComplianceError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        require_not_paused(&env);
+        Self::register_screener_internal(&env, screener, admin)
+    }
+
+    fn register_screener_internal(
+        env: &Env,
+        screener: Address,
+        caller: Address,
+    ) -> Result<(), ComplianceError> {
+        require_not_paused(env);
 
         if env
             .storage()
@@ -248,7 +262,7 @@ impl ComplianceContract {
         let now = env.ledger().timestamp();
 
         if timelock == 0 {
-            Self::activate_screener(&env, &screener)?;
+            Self::activate_screener(env, &screener)?;
         } else {
             // Freeze effective_at at registration time — confirm uses this value,
             // never the live ScreenerTimelockSecs config (#926).
@@ -262,7 +276,7 @@ impl ComplianceContract {
                 .set(&DataKey::PendingScreener(screener.clone()), &pending);
             env.events().publish(
                 (EVT, symbol_short!("scr_prop")),
-                (admin, screener, pending.effective_at),
+                (caller, screener, pending.effective_at),
             );
         }
         Ok(())
@@ -276,7 +290,14 @@ impl ComplianceContract {
     ) -> Result<(), ComplianceError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        require_not_paused(&env);
+        Self::confirm_screener_registration_internal(&env, screener)
+    }
+
+    fn confirm_screener_registration_internal(
+        env: &Env,
+        screener: Address,
+    ) -> Result<(), ComplianceError> {
+        require_not_paused(env);
 
         let pending: PendingScreener = env
             .storage()
@@ -292,7 +313,7 @@ impl ComplianceContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingScreener(screener.clone()));
-        Self::activate_screener(&env, &screener)?;
+        Self::activate_screener(env, &screener)?;
         Ok(())
     }
 
@@ -303,7 +324,15 @@ impl ComplianceContract {
     ) -> Result<(), ComplianceError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        require_not_paused(&env);
+        Self::deregister_screener_internal(&env, screener, admin)
+    }
+
+    fn deregister_screener_internal(
+        env: &Env,
+        screener: Address,
+        caller: Address,
+    ) -> Result<(), ComplianceError> {
+        require_not_paused(env);
 
         if !env
             .storage()
@@ -320,7 +349,7 @@ impl ComplianceContract {
                     .instance()
                     .remove(&DataKey::PendingScreener(screener.clone()));
                 env.events()
-                    .publish((EVT, symbol_short!("scr_can")), (admin, screener));
+                    .publish((EVT, symbol_short!("scr_can")), (caller, screener));
                 return Ok(());
             }
             return Err(ComplianceError::ScreenerNotRegistered);
@@ -329,9 +358,9 @@ impl ComplianceContract {
         env.storage()
             .persistent()
             .remove(&DataKey::Screener(screener.clone()));
-        Self::remove_from_list(&env, &DataKey::ScreenerIds, &screener);
+        Self::remove_from_list(env, &DataKey::ScreenerIds, &screener);
         env.events()
-            .publish((EVT, symbol_short!("scr_del")), (admin, screener));
+            .publish((EVT, symbol_short!("scr_del")), (caller, screener));
         Ok(())
     }
 
@@ -708,6 +737,130 @@ impl ComplianceContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, ComplianceError::NotInitialized))
     }
+
+    // #1042: multisig admin path, additive to the legacy single-admin
+    // functions above — see access_control/src/lib.rs for the full
+    // propose/approve/execute lifecycle. `set_access_control` bootstraps
+    // the trust anchor (still gated by the legacy admin key); every
+    // `*_via_ac` entrypoint below then trusts only calls that carry the
+    // configured `access_control` contract's own on-chain identity.
+
+    pub fn set_access_control(
+        env: Env,
+        admin: Address,
+        access_control: Address,
+    ) -> Result<(), ComplianceError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &access_control);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (admin, access_control));
+        Ok(())
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::AccessControl)
+    }
+
+    /// #1042: rotates the trust anchor itself through the currently
+    /// configured `access_control` contract rather than the legacy admin
+    /// key.
+    pub fn set_access_control_via_ac(
+        env: Env,
+        access_control: Address,
+        new_access_control: Address,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &new_access_control);
+        env.events().publish(
+            (EVT, symbol_short!("ac_rot")),
+            (access_control, new_access_control),
+        );
+        Ok(())
+    }
+
+    pub fn set_paused_via_ac(
+        env: Env,
+        access_control: Address,
+        paused: bool,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events().publish(
+            (EVT, symbol_short!("ac_pause")),
+            (access_control, paused),
+        );
+        Ok(())
+    }
+
+    pub fn register_screener_via_ac(
+        env: Env,
+        access_control: Address,
+        screener: Address,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        Self::register_screener_internal(&env, screener, access_control)
+    }
+
+    pub fn confirm_screener_registration_via_ac(
+        env: Env,
+        access_control: Address,
+        screener: Address,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        Self::confirm_screener_registration_internal(&env, screener)
+    }
+
+    pub fn deregister_screener_via_ac(
+        env: Env,
+        access_control: Address,
+        screener: Address,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        Self::deregister_screener_internal(&env, screener, access_control)
+    }
+
+    pub fn set_rescreening_interval_via_ac(
+        env: Env,
+        access_control: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        if secs == 0 {
+            return Err(ComplianceError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RescreeningInterval, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("int_set")), (access_control, secs));
+        Ok(())
+    }
+
+    pub fn set_screener_timelock_via_ac(
+        env: Env,
+        access_control: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        access_control.require_auth();
+        Self::require_access_control(&env, &access_control)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ScreenerTimelockSecs, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("tl_set")), (access_control, secs));
+        Ok(())
+    }
 }
 
 impl ComplianceContract {
@@ -718,6 +871,18 @@ impl ComplianceContract {
             .get(&DataKey::Admin)
             .ok_or(ComplianceError::NotInitialized)?;
         if admin != &stored {
+            return Err(ComplianceError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn require_access_control(env: &Env, caller: &Address) -> Result<(), ComplianceError> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccessControl)
+            .ok_or(ComplianceError::AccessControlNotConfigured)?;
+        if caller != &configured {
             return Err(ComplianceError::Unauthorized);
         }
         Ok(())

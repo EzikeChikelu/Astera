@@ -133,6 +133,30 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     assert_eq!(f.pool_client.get_oracle_contract(), Some(oracle));
 }
 
+// ── #1042: admin-key rotation itself requires access_control, not admin ────
+
+#[test]
+fn test_set_access_control_via_ac_rotates_the_trust_anchor() {
+    let f = setup();
+    let access_control = Address::generate(&f.env);
+    f.pool_client.set_access_control(&f.admin, &access_control);
+
+    let new_access_control = Address::generate(&f.env);
+    f.pool_client
+        .set_access_control_via_ac(&access_control, &new_access_control);
+    assert_eq!(f.pool_client.get_access_control(), Some(new_access_control.clone()));
+
+    // The old access_control address can no longer rotate or act — only the
+    // newly-configured one can.
+    let result = f
+        .pool_client
+        .try_set_access_control_via_ac(&access_control, &access_control);
+    assert_eq!(result.unwrap_err().unwrap(), PoolError::Unauthorized);
+
+    f.pool_client.set_paused_via_ac(&new_access_control, &true);
+    assert!(f.pool_client.is_paused());
+}
+
 // ── (d) real access_control contract driving a genuine 2-of-3 proposal ─────
 
 #[test]

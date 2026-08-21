@@ -1354,6 +1354,23 @@ impl InvoiceContract {
         env.storage().instance().get(&ACCESS_CONTROL)
     }
 
+    /// #1042: rotates the trust anchor itself through the currently
+    /// configured `access_control` contract rather than the legacy admin
+    /// key, so a compromised admin key alone can no longer repoint or
+    /// strip multisig gating once this contract has adopted it.
+    pub fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address) {
+        access_control.require_auth();
+        require_access_control(&env, &access_control);
+        env.storage()
+            .instance()
+            .set(&ACCESS_CONTROL, &new_access_control);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "ac_rot")),
+            (access_control, new_access_control),
+        );
+    }
+
     /// Unified pause/unpause via an access-control-approved multisig
     /// proposal. `true` pauses, `false` unpauses.
     pub fn set_paused_via_ac(env: Env, access_control: Address, paused: bool) {
