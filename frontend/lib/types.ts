@@ -255,9 +255,6 @@ export interface CollateralDeposit {
   seizedAt: number;
   collateralBpsAtDeposit: number;
   thresholdAtDeposit: bigint;
-  /** #1036: ledger timestamp the live oracle-priced ratio first dropped below
-   * the configured danger threshold, or null if not currently flagged. */
-  atRiskSince: number | null;
 }
 
 // #1036: multi-asset, oracle-priced collateral risk response

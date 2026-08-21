@@ -1,6 +1,7 @@
 import { InvoiceClient } from './clients/invoice';
 import { PoolClient } from './clients/pool';
 import { SecondaryMarketClient } from './clients/secondary_market';
+import { AuctionClient } from './clients/auction';
 import { CreditScoreClient } from './clients/credit_score';
 import { OracleRegistryClient } from './clients/oracle_registry';
 import { ComplianceClient } from './clients/compliance';
@@ -43,6 +44,7 @@ import type {
   CollateralConfig,
   CollateralDeposit,
   CollateralRiskConfig,
+  CollateralSale,
   Listing,
   ListingKind,
 } from './types';
@@ -51,6 +53,7 @@ export class AsteraClient {
   private invoiceClient: InvoiceClient;
   private poolClient: PoolClient;
   private secondaryMarketClient: SecondaryMarketClient;
+  private auctionClient: AuctionClient;
   private creditScoreClient: CreditScoreClient;
   private oracleRegistryClient: OracleRegistryClient;
   private complianceClient: ComplianceClient;
@@ -72,6 +75,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.secondaryMarketContractId ?? '',
+    });
+    this.auctionClient = new AuctionClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.auctionContractId ?? '',
     });
     this.creditScoreClient = new CreditScoreClient({
       rpcUrl: config.rpcUrl,
@@ -314,11 +322,42 @@ export class AsteraClient {
     getCollateralDeposit: (invoiceId: bigint | number): Promise<CollateralDeposit | null> =>
       this.poolClient.getCollateralDeposit(invoiceId),
 
-    getLiveCollateralRatio: (invoiceId: bigint | number): Promise<number> =>
-      this.poolClient.getLiveCollateralRatio(invoiceId),
+    // get_live_collateral_ratio/check_collateral_risk/liquidateCollateral and
+    // the risk-config get/set now live on the auction satellite (see
+    // `this.auction` below) — pool keeps only the trusted mutation
+    // entrypoint that satellite calls.
+    setRiskContract: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      riskContract: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.poolClient.setRiskContract(params),
+  };
+
+  // #1036: collateral-liquidation Dutch auction + oracle-priced,
+  // multi-asset collateral risk-response satellite (contracts/auction).
+  public readonly auction = {
+    getPoolContract: (): Promise<string | null> =>
+      this.auctionClient.getPoolContract(),
+
+    setCollateralRiskConfig: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      dangerBps: number;
+      gracePeriodSecs: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.auctionClient.setCollateralRiskConfig(params),
 
     getCollateralRiskConfig: (): Promise<CollateralRiskConfig> =>
-      this.poolClient.getCollateralRiskConfig(),
+      this.auctionClient.getCollateralRiskConfig(),
+
+    getLiveCollateralRatio: (invoiceId: bigint | number): Promise<number> =>
+      this.auctionClient.getLiveCollateralRatio(invoiceId),
+
+    getAtRiskSince: (invoiceId: bigint | number): Promise<number | null> =>
+      this.auctionClient.getAtRiskSince(invoiceId),
 
     checkCollateralRisk: (params: {
       signer: (txXdr: string) => Promise<string>;
@@ -326,7 +365,7 @@ export class AsteraClient {
       invoiceId: bigint | number;
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
-      this.poolClient.checkCollateralRisk(params),
+      this.auctionClient.checkCollateralRisk(params),
 
     liquidateCollateral: (params: {
       signer: (txXdr: string) => Promise<string>;
@@ -334,7 +373,29 @@ export class AsteraClient {
       invoiceId: bigint | number;
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
-      this.poolClient.liquidateCollateral(params),
+      this.auctionClient.liquidateCollateral(params),
+
+    getSale: (saleId: bigint | number): Promise<CollateralSale | null> =>
+      this.auctionClient.getSale(saleId),
+
+    currentSalePrice: (saleId: bigint | number): Promise<bigint> =>
+      this.auctionClient.currentSalePrice(saleId),
+
+    takeCollateralSale: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      taker: string;
+      saleId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.auctionClient.takeCollateralSale(params),
+
+    reclaimExpiredSale: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      saleId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.auctionClient.reclaimExpiredSale(params),
   };
 
   /** #1044: secondary-market listings and withdrawal-wait/liquidity-forecast analytics. */

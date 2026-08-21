@@ -139,9 +139,6 @@ export interface CollateralDeposit {
   seizedAt: number;
   collateralBpsAtDeposit: number;
   thresholdAtDeposit: bigint;
-  /** Ledger timestamp the live oracle-priced ratio first dropped below the
-   * configured danger threshold, or undefined if not currently flagged. */
-  atRiskSince?: number;
 }
 
 export interface CollateralRiskConfig {
@@ -149,6 +146,26 @@ export interface CollateralRiskConfig {
   dangerBps: number;
   /** Seconds a depositor has to top up before liquidateCollateral is callable. */
   gracePeriodSecs: number;
+}
+
+export type CollateralSaleStatus = 'Open' | 'Settled' | 'Expired';
+
+/** #1036: a seized collateral asset up for sale on the auction contract's
+ * Dutch/declining-price liquidation mechanism. */
+export interface CollateralSale {
+  saleId: bigint;
+  seller: string;
+  token: string;
+  amount: bigint;
+  proceedsToken: string;
+  proceedsRecipient: string;
+  startPrice: bigint;
+  floorPrice: bigint;
+  openedAt: number;
+  durationSecs: number;
+  status: CollateralSaleStatus;
+  taker?: string;
+  settledPrice?: bigint;
 }
 
 // #1025: secondary market
@@ -198,6 +215,8 @@ export interface AsteraConfig {
   poolContractId: string;
   /** #1044: secondary-market listing + withdrawal-wait/liquidity-forecast satellite contract. */
   secondaryMarketContractId?: string;
+  /** #1036: collateral-liquidation Dutch auction + risk-response satellite contract. */
+  auctionContractId?: string;
   creditScoreContractId?: string;
   oracleRegistryContractId?: string;
   complianceContractId?: string;

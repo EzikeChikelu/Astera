@@ -83,10 +83,6 @@ export const Errors = {
   80: { message: 'RateModelNotConfigured' },
   81: { message: 'RateModelProposalNotFound' },
   82: { message: 'RateModelChangeNotReady' },
-  // #1036: multi-asset, oracle-priced collateral risk response
-  97: { message: 'InvalidDangerConfig' },
-  98: { message: 'CollateralNotAtRisk' },
-  99: { message: 'GracePeriodNotElapsed' },
 } as const;
 
 export type PoolErrorCode = keyof typeof Errors;

@@ -16,7 +16,6 @@ import type {
   ListingKind,
   CollateralConfig,
   CollateralDeposit,
-  CollateralRiskConfig,
 } from '../types';
 import type { Signer } from '../types';
 
@@ -205,7 +204,6 @@ export class PoolClient extends BaseClient {
       seizedAt: Number(raw.seized_at),
       collateralBpsAtDeposit: Number(raw.collateral_bps_at_deposit),
       thresholdAtDeposit: BigInt(String(raw.threshold_at_deposit)),
-      atRiskSince: raw.at_risk_since != null ? Number(raw.at_risk_since) : undefined,
     };
   }
 
@@ -703,62 +701,27 @@ export class PoolClient extends BaseClient {
     };
   }
 
-  /** Read-only: the live, oracle-priced collateral ratio (bps) for a funded
-   * invoice's posted collateral — 10_000 = exactly covers the requirement at
-   * today's prices. Requires the invoice to already be funded. */
-  async getLiveCollateralRatio(invoiceId: bigint | number): Promise<number> {
-    const sim = await this.simulate('get_live_collateral_ratio', [
-      nativeToScVal(invoiceId, { type: 'u64' }),
-    ]);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    return Number(scValToNative(sim.result!.retval));
-  }
+  // #1036: get_live_collateral_ratio/check_collateral_risk/liquidateCollateral,
+  // the risk-config get/set, and the at-risk flag itself all moved to the
+  // collateral-risk-response satellite (contracts/auction, see AuctionClient)
+  // — pool's own wasm was ~68KB over Soroban's 200KB deploy limit with that
+  // logic inline. pool keeps only the trusted risk_liquidate_collateral
+  // mutation entrypoint the satellite calls, gated to whichever contract is
+  // registered below.
 
-  async getCollateralRiskConfig(): Promise<CollateralRiskConfig> {
-    const sim = await this.simulate('get_collateral_risk_config', []);
-    if (StellarRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-    const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
-    return {
-      dangerBps: Number(raw.danger_bps),
-      gracePeriodSecs: Number(raw.grace_period_secs),
-    };
-  }
-
-  /** Permissionless keeper call: recomputes the live ratio and flips the
-   * deposit's at-risk flag on or off. Returns the tx hash — read the updated
-   * state back via getCollateralDeposit. */
-  async checkCollateralRisk(params: {
+  /** Registers the trusted collateral-risk-response satellite (AuctionClient's
+   * contract) — the only caller pool's risk_liquidate_collateral entrypoint
+   * accepts. */
+  async setRiskContract(params: {
     signer: Signer;
-    caller: string;
-    invoiceId: bigint | number;
+    admin: string;
+    riskContract: string;
     onProgress?: (progress: TransactionProgress) => void;
   }): Promise<string> {
     return this.buildAndSendTx(
-      params.caller,
-      'check_collateral_risk',
-      [nativeToScVal(params.invoiceId, { type: 'u64' })],
-      params.onProgress,
-    );
-  }
-
-  /** Permissionless keeper call: seizes a deposit that's been at-risk for at
-   * least the configured grace period and is still below the danger threshold
-   * on a fresh price recheck. Reverts with GracePeriodNotElapsed,
-   * CollateralNotAtRisk, or OraclePriceUnavailable if not yet eligible. */
-  async liquidateCollateral(params: {
-    signer: Signer;
-    caller: string;
-    invoiceId: bigint | number;
-    onProgress?: (progress: TransactionProgress) => void;
-  }): Promise<string> {
-    return this.buildAndSendTx(
-      params.caller,
-      'liquidate_collateral',
-      [nativeToScVal(params.invoiceId, { type: 'u64' })],
+      params.admin,
+      'set_risk_contract',
+      [new Address(params.admin).toScVal(), new Address(params.riskContract).toScVal()],
       params.onProgress,
     );
   }

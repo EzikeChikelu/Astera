@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Env, Map, Symbol, Vec,
+    Address, Env, IntoVal, Map, Symbol, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -106,7 +106,69 @@ pub struct CollateralSaleParams {
 pub enum DataKey {
     NextSaleId,
     Sale(u64),
+    Admin,
+    PoolContract,
+    Initialized,
+    RiskConfig,
+    // #1036: the at-risk flag is purely informational/monitoring state —
+    // pool doesn't need to know about it (only the eventual liquidation
+    // mutation is trusted/authoritative), so it's tracked entirely here
+    // rather than round-tripped to pool on every check_collateral_risk call.
+    AtRiskSince(u64),
 }
+
+// #1036: local mirrors of pool's types, decoded by field name — same
+// deliberate raw-`invoke_contract` convention (and the same rationale) as
+// contracts/secondary_market: depending on `pool` as a real dependency and
+// using its generated client would pull pool's whole compiled object file
+// into this crate (codegen-units=1) and collide at link time on shared
+// entrypoint names. `pool` stays a dev-dependency here, used only by tests.
+#[contracttype]
+#[derive(Clone)]
+struct CollateralDepositView {
+    pub invoice_id: u64,
+    pub depositor: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub settled: bool,
+    pub posted_at: u64,
+    pub released_at: u64,
+    pub seized_at: u64,
+    pub collateral_bps_at_deposit: u32,
+    pub threshold_at_deposit: i128,
+}
+
+/// Mirrors `pool::FundedInvoice`.
+#[contracttype]
+#[derive(Clone)]
+struct FundedInvoiceView {
+    pub invoice_id: u64,
+    pub sme: Address,
+    pub token: Address,
+    pub principal: i128,
+    pub funded_at: u64,
+    pub factoring_fee: i128,
+    pub due_date: u64,
+    pub repaid_amount: i128,
+    pub co_funding_round_id: Option<u64>,
+    pub locked_yield_bps: u32,
+}
+
+// #1036: danger_bps is compared against a live ratio_bps scaled the same way
+// pool's funding-time check is (BPS_DENOM = 10_000 = 100%). Set above 10_000
+// so a position gets flagged — and a keeper gets a grace window to react —
+// before it actually falls under the 100% funding-time floor, not only after.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollateralRiskConfig {
+    pub danger_bps: u32,
+    pub grace_period_secs: u64,
+}
+
+const BPS_DENOM: i128 = 10_000;
+const DEFAULT_DANGER_BPS: u32 = 12_000; // 120%
+const MAX_DANGER_BPS: u32 = 30_000; // sanity ceiling
+const DEFAULT_GRACE_PERIOD_SECS: u64 = 259_200; // 3 days
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -133,6 +195,15 @@ pub enum AuctionError {
     SaleNotOpen = 17,
     SaleExpired = 18,
     SaleNotExpired = 19,
+    // #1036: collateral-risk-response errors
+    DepositNotFound = 20,
+    InvoiceNotFound = 21,
+    CollateralAlreadySettled = 22,
+    OraclePriceUnavailable = 23,
+    NotAtRisk = 24,
+    GracePeriodNotElapsed = 25,
+    InvalidRiskConfig = 26,
+    AmountOverflow = 27,
 }
 
 // ── Clearing Algorithm (pure function) ────────────────────────────────────────
@@ -455,6 +526,252 @@ impl AuctionContract {
         env.events()
             .publish((EVT, symbol_short!("sale_exp")), (sale_id, caller));
         Ok(())
+    }
+
+    // ── #1036: collateral-risk-response (permissionless monitoring/liquidation) ──
+
+    pub fn initialize(env: Env, admin: Address, pool: Address) {
+        if env.storage().instance().has(&DataKey::Initialized) {
+            panic_with_error!(&env, AuctionError::AlreadyInitialized);
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::PoolContract, &pool);
+        env.storage().instance().set(&DataKey::Initialized, &true);
+    }
+
+    pub fn get_pool_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PoolContract)
+    }
+
+    fn require_pool(env: &Env) -> Result<Address, AuctionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .ok_or(AuctionError::NotInitialized)
+    }
+
+    /// Direct admin setter (not a governance timelock) — same tier of trust
+    /// as pool's own set_oracle_contract/set_risk_contract.
+    pub fn set_collateral_risk_config(
+        env: Env,
+        admin: Address,
+        danger_bps: u32,
+        grace_period_secs: u64,
+    ) -> Result<(), AuctionError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(AuctionError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(AuctionError::Unauthorized);
+        }
+        // Must clear 100% (BPS_DENOM) so a position is flagged with a buffer
+        // still above pool's own funding-time floor, not only once already
+        // underwater by that standard.
+        if danger_bps <= BPS_DENOM as u32 || danger_bps > MAX_DANGER_BPS || grace_period_secs == 0 {
+            return Err(AuctionError::InvalidRiskConfig);
+        }
+        let cfg = CollateralRiskConfig {
+            danger_bps,
+            grace_period_secs,
+        };
+        env.storage().instance().set(&DataKey::RiskConfig, &cfg);
+        env.events().publish(
+            (EVT, symbol_short!("risk_cfg")),
+            (admin, danger_bps, grace_period_secs),
+        );
+        Ok(())
+    }
+
+    pub fn get_collateral_risk_config(env: Env) -> CollateralRiskConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::RiskConfig)
+            .unwrap_or(CollateralRiskConfig {
+                danger_bps: DEFAULT_DANGER_BPS,
+                grace_period_secs: DEFAULT_GRACE_PERIOD_SECS,
+            })
+    }
+
+    /// Reads a live oracle price via pool's own get_asset_price, which
+    /// bounds its own staleness (ORACLE_STALE_SECS / ORACLE_FALLBACK_PX). A
+    /// stale or missing price fails this call cleanly rather than falling
+    /// back to a value that could justify a spurious liquidation.
+    fn fetch_price(env: &Env, pool_id: &Address, token: &Address) -> Result<i128, AuctionError> {
+        let result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+            pool_id,
+            &Symbol::new(env, "get_asset_price"),
+            Vec::from_array(env, [token.into_val(env)]),
+        );
+        match result {
+            Ok(Ok(price)) if price > 0 => Ok(price),
+            _ => Err(AuctionError::OraclePriceUnavailable),
+        }
+    }
+
+    /// Fetches the deposit + funded invoice from pool and computes the live,
+    /// oracle-priced ratio_bps — the same formula as pool's own funding-time
+    /// check, just recomputed with current prices instead of deposit-time
+    /// amounts. A ratio of BPS_DENOM (100%) or higher means fully covered.
+    fn compute_live_ratio(
+        env: &Env,
+        pool_id: &Address,
+        invoice_id: u64,
+    ) -> Result<u32, AuctionError> {
+        let deposit: Option<CollateralDepositView> = env.invoke_contract(
+            pool_id,
+            &Symbol::new(env, "get_collateral_deposit"),
+            Vec::from_array(env, [invoice_id.into_val(env)]),
+        );
+        let deposit = deposit.ok_or(AuctionError::DepositNotFound)?;
+        if deposit.settled {
+            return Err(AuctionError::CollateralAlreadySettled);
+        }
+        let funded: Option<FundedInvoiceView> = env.invoke_contract(
+            pool_id,
+            &Symbol::new(env, "get_funded_invoice"),
+            Vec::from_array(env, [invoice_id.into_val(env)]),
+        );
+        let funded = funded.ok_or(AuctionError::InvoiceNotFound)?;
+
+        let required: i128 = if funded.principal < deposit.threshold_at_deposit {
+            0
+        } else {
+            ((funded.principal as u128 * deposit.collateral_bps_at_deposit as u128)
+                / BPS_DENOM as u128) as i128
+        };
+        if required <= 0 {
+            return Ok(BPS_DENOM as u32);
+        }
+
+        let collateral_price = Self::fetch_price(env, pool_id, &deposit.token)?;
+        let funding_price = Self::fetch_price(env, pool_id, &funded.token)?;
+        let collateral_value = deposit
+            .amount
+            .checked_mul(collateral_price)
+            .ok_or(AuctionError::AmountOverflow)?;
+        let required_value = required
+            .checked_mul(funding_price)
+            .ok_or(AuctionError::AmountOverflow)?;
+        if required_value <= 0 {
+            return Ok(BPS_DENOM as u32);
+        }
+        Ok(((collateral_value * BPS_DENOM) / required_value) as u32)
+    }
+
+    /// Read-only view of a position's live, oracle-priced collateral ratio
+    /// (in bps, BPS_DENOM = 100%) — what the frontend polls for the "at
+    /// risk" indicator.
+    pub fn get_live_collateral_ratio(env: Env, invoice_id: u64) -> Result<u32, AuctionError> {
+        let pool_id = Self::require_pool(&env)?;
+        let ratio_bps = Self::compute_live_ratio(&env, &pool_id, invoice_id)?;
+        Ok(ratio_bps)
+    }
+
+    /// Read-only: the ledger timestamp a position was first flagged at-risk
+    /// (None if not currently flagged). Kept entirely in this contract's own
+    /// storage, not pool's — it's monitoring state, not fund-movement state.
+    pub fn get_at_risk_since(env: Env, invoice_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AtRiskSince(invoice_id))
+    }
+
+    /// Permissionless: anyone may call this to recompute a position's live
+    /// ratio and flag/clear its at-risk state — the same "no gating on who
+    /// triggers it" shape as pool's own liquidate_invoice (#1037). Purely a
+    /// local storage write (no cross-contract call): pool doesn't need to
+    /// know about this, only about the eventual liquidation. Returns the new
+    /// at-risk state.
+    pub fn check_collateral_risk(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+    ) -> Result<bool, AuctionError> {
+        caller.require_auth();
+        let pool_id = Self::require_pool(&env)?;
+        let ratio_bps = Self::compute_live_ratio(&env, &pool_id, invoice_id)?;
+        let cfg = Self::get_collateral_risk_config(env.clone());
+        let at_risk = ratio_bps < cfg.danger_bps;
+        let key = DataKey::AtRiskSince(invoice_id);
+        if at_risk {
+            if !env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .set(&key, &env.ledger().timestamp());
+                env.events()
+                    .publish((EVT, symbol_short!("col_risk")), (invoice_id, ratio_bps));
+            }
+        } else if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+            env.events()
+                .publish((EVT, symbol_short!("col_safe")), (invoice_id, ratio_bps));
+        }
+        Ok(at_risk)
+    }
+
+    /// Permissionless: seizes a deposit that's been continuously flagged
+    /// at-risk for at least the configured grace period. Rechecks the ratio
+    /// against current prices first — if the position has recovered since
+    /// being flagged, this clears the local flag instead of seizing
+    /// collateral on stale grounds, and returns `Ok(false)` (no liquidation
+    /// happened, but the call still succeeded and did useful work). `Ok(true)`
+    /// means liquidation happened.
+    pub fn liquidate_collateral(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+    ) -> Result<bool, AuctionError> {
+        caller.require_auth();
+        let pool_id = Self::require_pool(&env)?;
+        let ratio_bps = Self::compute_live_ratio(&env, &pool_id, invoice_id)?;
+        let key = DataKey::AtRiskSince(invoice_id);
+        let at_risk_since: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(AuctionError::NotAtRisk)?;
+        let cfg = Self::get_collateral_risk_config(env.clone());
+        let now = env.ledger().timestamp();
+        if now.saturating_sub(at_risk_since) < cfg.grace_period_secs {
+            return Err(AuctionError::GracePeriodNotElapsed);
+        }
+        if ratio_bps >= cfg.danger_bps {
+            // Recovered since being flagged — clear the flag rather than
+            // seizing collateral on stale grounds.
+            env.storage().persistent().remove(&key);
+            env.events()
+                .publish((EVT, symbol_short!("col_safe")), (invoice_id, ratio_bps));
+            return Ok(false);
+        }
+
+        let args = Vec::from_array(
+            &env,
+            [
+                env.current_contract_address().into_val(&env),
+                invoice_id.into_val(&env),
+            ],
+        );
+        let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &pool_id,
+            &Symbol::new(&env, "risk_liquidate_collateral"),
+            args,
+        );
+        match result {
+            Ok(Ok(())) => {}
+            _ => return Err(AuctionError::PoolCallFailed),
+        }
+        env.storage().persistent().remove(&key);
+        // Distinct symbol from pool's own "col_liq" (published by
+        // risk_liquidate_collateral with a different payload shape — the
+        // definitive seizure record) so indexer routing can't conflate this
+        // satellite-side trigger record with pool's actual fund-movement
+        // event.
+        env.events()
+            .publish((EVT, symbol_short!("auc_liq")), (invoice_id, caller, now));
+        Ok(true)
     }
 }
 

@@ -178,15 +178,6 @@ pub enum PoolError {
     ListingPriceMismatch = 95,
     // #789: invoice contract declined the Funded -> Cancelled transition
     InvoiceNotCancelled = 96,
-    // #1036: set_collateral_risk_config / propose_operation rejected a
-    // danger_bps outside (0, BPS_DENOM] or a zero grace_period_secs
-    InvalidDangerConfig = 97,
-    // #1036: liquidate_collateral called on a deposit that isn't currently
-    // flagged at-risk (or that recovered above the danger threshold on recheck)
-    CollateralNotAtRisk = 98,
-    // #1036: liquidate_collateral called before grace_period_secs has
-    // elapsed since the deposit was flagged at-risk
-    GracePeriodNotElapsed = 99,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -208,27 +199,6 @@ const DEFAULT_MAX_UTILIZATION_BPS: u32 = 10_000;
 const DEFAULT_UTILIZATION_WARNING_BPS: u32 = 8_000;
 const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
-// #1036: default live-ratio danger threshold. ratio_bps is scaled against
-// BPS_DENOM (10_000 = exactly meets the requirement), NOT against
-// collateral_bps directly — so mirroring the frontend's existing
-// `ratio < targetRatio * 1.2` at-risk heuristic (frontend/app/invoice/[id]/page.tsx)
-// means 1.2x *that* baseline: 12_000, not 1.2x collateral_bps's raw bps
-// value. A position is flagged the moment its live value drops below 120%
-// of the bare minimum, leaving a 20% buffer to react before it's actually
-// under water — the whole point of an early-warning trigger.
-const DEFAULT_DANGER_BPS: u32 = 12_000;
-// #1036: default top-up grace window before a flagged at-risk position becomes
-// liquidatable via liquidate_collateral.
-const DEFAULT_GRACE_PERIOD_SECS: u64 = 3 * SECS_PER_DAY;
-// #1036: sanity ceiling on danger_bps. Unlike collateral_bps (a fraction of
-// principal, capped at BPS_DENOM), danger_bps is compared directly against
-// ratio_bps — which is scaled so 10_000 means "exactly meets the
-// requirement" and has no natural upper bound (a well-collateralized
-// position can run far above it). A useful early-warning buffer needs room
-// *above* 10_000, so the ceiling here is a generous multiple of it rather
-// than BPS_DENOM itself — just enough to reject a degenerate config that
-// would flag virtually every position regardless of actual health.
-const MAX_DANGER_BPS: u32 = 30_000;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
                                                // #227: yield timelock — 48 hours default delay for two-step yield change
@@ -550,28 +520,12 @@ pub struct CollateralConfig {
     pub collateral_bps: u32,
 }
 
-// #1036: collateral risk-response config — separate from CollateralConfig (which
-// governs how much collateral must be posted) since this governs the automated
-// response once a *live*, oracle-priced ratio falls below a danger level.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct CollateralRiskConfig {
-    // Live collateral ratio (bps, same unit as CollateralConfig::collateral_bps) below
-    // which a position is flagged at-risk and the top-up grace window starts.
-    pub danger_bps: u32,
-    // Seconds a depositor has to top up (or for the ratio to recover via a price
-    // rebound) after being flagged at-risk before liquidate_collateral is callable.
-    pub grace_period_secs: u64,
-}
-
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdminOperation {
     RemoveToken(Address),
     SetCollateralConfig(i128, u32),
     SeizeCollateral(u64),
-    // #1036
-    SetCollateralRiskConfig(u32, u64),
 }
 
 #[contracttype]
@@ -619,11 +573,6 @@ pub struct CollateralDeposit {
     // is attempted.
     pub collateral_bps_at_deposit: u32,
     pub threshold_at_deposit: i128,
-    // #1036: ledger timestamp the live oracle-priced ratio first dropped below the
-    // configured danger threshold (None = not currently flagged). Set/cleared by
-    // check_collateral_risk; liquidate_collateral requires this to be Some and
-    // grace_period_secs to have elapsed since.
-    pub at_risk_since: Option<u64>,
 }
 
 #[contracttype]
@@ -745,10 +694,15 @@ const DEFAULT_ORACLE_STALE_SECS: u64 = 3600;
 // market_settle_listing. Symbol key because DataKey is at Soroban's
 // 50-variant ceiling.
 const SECONDARY_MARKET_CONTRACT: Symbol = symbol_short!("mkt_ctrt");
-// #1036: collateral risk-response config (danger threshold + grace window). Symbol
-// key, not a DataKey variant — DataKey is at Soroban's 50-variant ceiling (see
-// #867/#777/#863/#866 above).
-const COLLATERAL_RISK_CFG: Symbol = symbol_short!("col_risk");
+// #1036: trusted collateral-risk-response satellite (contracts/auction) —
+// the only caller risk_liquidate_collateral accepts. Symbol key,
+// not a DataKey variant — DataKey is at Soroban's 50-variant ceiling. The
+// live-ratio computation, danger-threshold config, and at-risk/liquidation
+// decision logic all live in the satellite (originally implemented directly
+// in pool, but that pushed pool's wasm ~68KB over Soroban's 200KB deploy
+// limit); pool keeps only the storage mutation, gated to this trusted caller,
+// mirroring market_settle_listing's pattern for secondary_market above.
+const RISK_CONTRACT: Symbol = symbol_short!("risk_ctr");
 
 #[contractclient(name = "CreditScoreClient")]
 pub trait CreditScoreContract {
@@ -1332,54 +1286,6 @@ fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
         return 0;
     }
     ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
-}
-
-// #1036: the *live*, oracle-priced collateral ratio for a posted deposit, in bps,
-// where BPS_DENOM (10_000) = the deposit's current market value exactly covers
-// required_collateral_for(principal)'s value at today's prices. Unlike
-// `required_collateral`, this converts both sides to a common unit via Reflector
-// prices, so it's correct even when the collateral asset differs from the
-// invoice's funding token.
-fn live_collateral_ratio_bps(
-    env: &Env,
-    deposit: &CollateralDeposit,
-    funding_token: &Address,
-    principal: i128,
-) -> PoolResult<u32> {
-    let required = required_collateral(
-        principal,
-        &CollateralConfig {
-            threshold: deposit.threshold_at_deposit,
-            collateral_bps: deposit.collateral_bps_at_deposit,
-        },
-    );
-    if required <= 0 {
-        // No collateral required at all (below threshold) — always "fully collateralized".
-        return Ok(BPS_DENOM);
-    }
-
-    // No decimal normalization needed: add_token/initialize both require every
-    // accepted token to be exactly EXPECTED_DECIMALS (7), so collateral and
-    // funding token amounts are already on the same scale.
-    let collateral_price = FundingPool::get_asset_price(env.clone(), deposit.token.clone())?;
-    let funding_price = FundingPool::get_asset_price(env.clone(), funding_token.clone())?;
-
-    let collateral_value = deposit
-        .amount
-        .checked_mul(collateral_price)
-        .ok_or(PoolError::AmountOverflow)?;
-    let required_value = required
-        .checked_mul(funding_price)
-        .ok_or(PoolError::AmountOverflow)?;
-    if required_value <= 0 {
-        return Ok(BPS_DENOM);
-    }
-
-    let ratio = collateral_value
-        .checked_mul(BPS_DENOM as i128)
-        .and_then(|v| v.checked_div(required_value))
-        .ok_or(PoolError::AmountOverflow)?;
-    Ok(ratio.clamp(0, u32::MAX as i128) as u32)
 }
 
 fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
@@ -3199,11 +3105,27 @@ impl FundingPool {
                         }
                     } else {
                         // #1036: cross-asset collateral — convert both sides to a
-                        // common unit via the oracle price feed. A live ratio below
-                        // 100% (BPS_DENOM) means the posted collateral's current
-                        // market value doesn't cover the required amount.
-                        let ratio_bps = live_collateral_ratio_bps(&env, &d, &token, principal)?;
-                        if ratio_bps < BPS_DENOM {
+                        // common unit via the same oracle price feed the
+                        // risk-response satellite (contracts/auction) reads for its
+                        // own ongoing monitoring (Self::get_asset_price, bounded by
+                        // the same staleness window either way — computed inline
+                        // here rather than via a cross-contract call, since it's a
+                        // pure read pool already has and doesn't need the
+                        // satellite's config/liquidation state). collateral_value <
+                        // required_value means the posted collateral's current market
+                        // value doesn't cover the required amount — equivalent to (and
+                        // cheaper than) computing a bps ratio and comparing it to
+                        // BPS_DENOM, since floor(a/b) < c iff a < b*c for b > 0.
+                        let collateral_price = Self::get_asset_price(env.clone(), d.token.clone())?;
+                        let funding_price = Self::get_asset_price(env.clone(), token.clone())?;
+                        let collateral_value = d
+                            .amount
+                            .checked_mul(collateral_price)
+                            .ok_or(PoolError::AmountOverflow)?;
+                        let required_value = req_collateral
+                            .checked_mul(funding_price)
+                            .ok_or(PoolError::AmountOverflow)?;
+                        if required_value > 0 && collateral_value < required_value {
                             return Err(PoolError::InvalidAmount);
                         }
                     }
@@ -3581,47 +3503,91 @@ impl FundingPool {
         required_collateral(principal, &cfg)
     }
 
-    // #1036: unlike set_collateral_config, there's no direct-call decoy entrypoint
-    // here (every wasm entrypoint has real fixed size cost) — governance can
-    // propose_operation(AdminOperation::SetCollateralRiskConfig(...)) directly.
-    fn validate_collateral_risk_config(danger_bps: u32, grace_period_secs: u64) -> PoolResult<()> {
-        if danger_bps == 0 || danger_bps > MAX_DANGER_BPS {
-            return Err(PoolError::InvalidDangerConfig);
-        }
-        if grace_period_secs == 0 {
-            return Err(PoolError::InvalidDangerConfig);
-        }
-        Ok(())
-    }
-
-    fn execute_set_collateral_risk_config(
-        env: &Env,
-        admin: &Address,
-        danger_bps: u32,
-        grace_period_secs: u64,
-    ) -> PoolResult<()> {
-        Self::validate_collateral_risk_config(danger_bps, grace_period_secs)?;
-        let cfg = CollateralRiskConfig {
-            danger_bps,
-            grace_period_secs,
-        };
-        env.storage().instance().set(&COLLATERAL_RISK_CFG, &cfg);
-        env.events().publish(
-            (EVT, symbol_short!("col_rcfg")),
-            (admin.clone(), danger_bps, grace_period_secs),
-        );
-        Ok(())
-    }
-
-    pub fn get_collateral_risk_config(env: Env) -> CollateralRiskConfig {
+    // #1036: registers the trusted collateral-risk-response satellite
+    // (contracts/auction) — the only caller risk_liquidate_collateral
+    // accepts. Direct admin setter (not the propose_operation timelock) —
+    // same tier of trust as set_oracle_contract.
+    pub fn set_risk_contract(
+        env: Env,
+        admin: Address,
+        risk_contract: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
         bump_instance(&env);
-        env.storage()
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&RISK_CONTRACT, &risk_contract);
+        env.events()
+            .publish((EVT, symbol_short!("set_risk")), (admin, risk_contract));
+        Ok(())
+    }
+
+    fn require_risk_contract(env: &Env, caller: &Address) -> PoolResult<()> {
+        let trusted: Address = env
+            .storage()
             .instance()
-            .get(&COLLATERAL_RISK_CFG)
-            .unwrap_or(CollateralRiskConfig {
-                danger_bps: DEFAULT_DANGER_BPS,
-                grace_period_secs: DEFAULT_GRACE_PERIOD_SECS,
-            })
+            .get(&RISK_CONTRACT)
+            .ok_or(PoolError::NotInitialized)?;
+        if caller != &trusted {
+            return Err(PoolError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    // Trusted entrypoint: the risk-response satellite (contracts/auction) has
+    // already verified this liquidation is warranted — performs the seizure,
+    // crediting the asset into that token's own pool liquidity (mirrors
+    // execute_seize_collateral's default-seizure credit path). Pool trusts
+    // the caller's decision entirely (same relationship market_settle_listing
+    // has with secondary_market) — the at-risk flag itself is purely
+    // informational and lives in the satellite's own storage, not here.
+    pub fn risk_liquidate_collateral(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        caller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_risk_contract(&env, &caller)?;
+
+        non_reentrant!(&env, {
+            let key = DataKey::CollateralDeposit(invoice_id);
+            let mut deposit: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
+            if deposit.settled {
+                return Err(PoolError::CollateralAlreadySettled);
+            }
+
+            let token_totals_key = DataKey::TokenTotals(deposit.token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            tt.pool_value = tt
+                .pool_value
+                .checked_add(deposit.amount)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            deposit.settled = true;
+            deposit.seized_at = env.ledger().timestamp();
+            env.storage().persistent().set(&key, &deposit);
+            env.storage().persistent().extend_ttl(
+                &key,
+                SETTLEMENT_COLLATERAL_TTL,
+                SETTLEMENT_COLLATERAL_TTL,
+            );
+            env.events().publish(
+                (EVT, symbol_short!("col_liq")),
+                (invoice_id, deposit.depositor, deposit.token, deposit.amount),
+            );
+            Ok(())
+        })
     }
 
     pub fn deposit_collateral(
@@ -3686,7 +3652,6 @@ impl FundingPool {
                 seized_at: 0,
                 collateral_bps_at_deposit: collateral_cfg.collateral_bps,
                 threshold_at_deposit: collateral_cfg.threshold,
-                at_risk_since: None,
             };
             env.storage()
                 .persistent()
@@ -3698,14 +3663,17 @@ impl FundingPool {
                 ACTIVE_INVOICE_TTL,
             );
 
+            // #1036: dropped the duplicate trailing `depositor` this tuple used
+            // to carry twice (once at index 1, once again at the end) — a
+            // leftover redundancy from before this branch's history, not a
+            // deliberate two-actor encoding; index 1 already carries it.
             env.events().publish(
                 (EVT, symbol_short!("col_dep")),
                 (
                     invoice_id,
-                    depositor.clone(),
+                    depositor,
                     token,
                     amount,
-                    depositor,
                     env.ledger().timestamp(),
                 ),
             );
@@ -3767,181 +3735,6 @@ impl FundingPool {
             .get(&DataKey::CollateralDeposit(invoice_id))
     }
 
-    // #1036: read-only — the live, oracle-priced collateral ratio (bps) for a
-    // funded invoice's posted collateral. Requires the invoice to already be
-    // funded (collateral posted pre-funding has no principal/funding_token yet
-    // to compare against).
-    pub fn get_live_collateral_ratio(env: Env, invoice_id: u64) -> Result<u32, PoolError> {
-        bump_instance(&env);
-        let deposit: CollateralDeposit = env
-            .storage()
-            .persistent()
-            .get(&DataKey::CollateralDeposit(invoice_id))
-            .ok_or(PoolError::CollateralNotFound)?;
-        let record: FundedInvoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::FundedInvoice(invoice_id))
-            .ok_or(PoolError::InvoiceNotFound)?;
-        live_collateral_ratio_bps(&env, &deposit, &record.token, record.principal)
-    }
-
-    // #1036: permissionless keeper call — recomputes the live ratio and flips
-    // at_risk_since on (crossing below danger_bps) or off (recovering above it).
-    // Returns the (possibly updated) deposit so a caller can read the new state
-    // without a second round-trip.
-    pub fn check_collateral_risk(
-        env: Env,
-        invoice_id: u64,
-    ) -> Result<CollateralDeposit, PoolError> {
-        bump_instance(&env);
-        Self::require_not_paused(&env);
-
-        non_reentrant!(&env, {
-            let key = DataKey::CollateralDeposit(invoice_id);
-            let mut deposit: CollateralDeposit = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .ok_or(PoolError::CollateralNotFound)?;
-            if deposit.settled {
-                return Err(PoolError::CollateralAlreadySettled);
-            }
-            let record: FundedInvoice = env
-                .storage()
-                .persistent()
-                .get(&DataKey::FundedInvoice(invoice_id))
-                .ok_or(PoolError::InvoiceNotFound)?;
-
-            let ratio_bps =
-                live_collateral_ratio_bps(&env, &deposit, &record.token, record.principal)?;
-            let risk_cfg = Self::get_collateral_risk_config(env.clone());
-            let now = env.ledger().timestamp();
-
-            if ratio_bps < risk_cfg.danger_bps {
-                if deposit.at_risk_since.is_none() {
-                    deposit.at_risk_since = Some(now);
-                    env.storage().persistent().set(&key, &deposit);
-                    env.events().publish(
-                        (EVT, symbol_short!("col_risk")),
-                        (
-                            invoice_id,
-                            ratio_bps,
-                            now,
-                            now.saturating_add(risk_cfg.grace_period_secs),
-                        ),
-                    );
-                }
-            } else if deposit.at_risk_since.is_some() {
-                deposit.at_risk_since = None;
-                env.storage().persistent().set(&key, &deposit);
-                env.events().publish(
-                    (EVT, symbol_short!("col_safe")),
-                    (invoice_id, ratio_bps, now),
-                );
-            }
-
-            Ok(deposit)
-        })
-    }
-
-    // #1036: permissionless keeper call — seizes a deposit that has been at-risk
-    // (per check_collateral_risk) for at least grace_period_secs and is still
-    // below the danger threshold on a *fresh* price recheck. The seized asset
-    // (which may differ from the invoice's funding token) is forfeited into that
-    // token's own pool liquidity — unlike execute_seize_collateral (admin-only,
-    // requires an already-Defaulted invoice, writes off the invoice principal),
-    // this is a collateral-side risk response independent of the invoice's own
-    // repayment/default status, so principal/total_deployed are left untouched.
-    pub fn liquidate_collateral(env: Env, invoice_id: u64) -> Result<(), PoolError> {
-        bump_instance(&env);
-        Self::require_not_paused(&env);
-
-        non_reentrant!(&env, {
-            let key = DataKey::CollateralDeposit(invoice_id);
-            let mut deposit: CollateralDeposit = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .ok_or(PoolError::CollateralNotFound)?;
-            if deposit.settled {
-                return Err(PoolError::CollateralAlreadySettled);
-            }
-            let record: FundedInvoice = env
-                .storage()
-                .persistent()
-                .get(&DataKey::FundedInvoice(invoice_id))
-                .ok_or(PoolError::InvoiceNotFound)?;
-
-            let at_risk_since = deposit
-                .at_risk_since
-                .ok_or(PoolError::CollateralNotAtRisk)?;
-            let risk_cfg = Self::get_collateral_risk_config(env.clone());
-            let now = env.ledger().timestamp();
-            if now < at_risk_since.saturating_add(risk_cfg.grace_period_secs) {
-                return Err(PoolError::GracePeriodNotElapsed);
-            }
-
-            // Re-check against a fresh price right before seizing: refuses to
-            // liquidate if the position has recovered, and — since
-            // get_asset_price enforces a bounded staleness window on both the
-            // live Reflector reading and the admin fallback price — refuses to
-            // liquidate at all if no price within that window is available.
-            //
-            // Soroban invocations are atomic (a declared error return rolls
-            // back every write made during it, same as a panic), so there is
-            // no way to persist "the flag cleared, but liquidation didn't
-            // happen" from this single call — recovery is only observable via
-            // a separate check_collateral_risk call, which is the function
-            // actually responsible for clearing at_risk_since.
-            let ratio_bps =
-                live_collateral_ratio_bps(&env, &deposit, &record.token, record.principal)?;
-            if ratio_bps >= risk_cfg.danger_bps {
-                return Err(PoolError::CollateralNotAtRisk);
-            }
-
-            // Credit the seized asset directly into that token's own pool
-            // liquidity (same place execute_seize_collateral's existing
-            // default-seizure path already credits recovered collateral).
-            let token_totals_key = DataKey::TokenTotals(deposit.token.clone());
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.pool_value = tt
-                .pool_value
-                .checked_add(deposit.amount)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&token_totals_key, &tt);
-
-            deposit.settled = true;
-            deposit.seized_at = now;
-            deposit.at_risk_since = None;
-            env.storage().persistent().set(&key, &deposit);
-            // Use SETTLEMENT_COLLATERAL_TTL (90 days) so the liquidation record
-            // remains queryable for the full post-settlement audit window.
-            env.storage().persistent().extend_ttl(
-                &key,
-                SETTLEMENT_COLLATERAL_TTL,
-                SETTLEMENT_COLLATERAL_TTL,
-            );
-
-            env.events().publish(
-                (EVT, symbol_short!("col_liq")),
-                (
-                    invoice_id,
-                    deposit.depositor.clone(),
-                    deposit.token.clone(),
-                    deposit.amount,
-                    ratio_bps,
-                    now,
-                ),
-            );
-            Ok(())
-        })
-    }
-
     pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) -> Result<(), PoolError> {
         let _ = invoice_id;
         admin.require_auth();
@@ -3954,17 +3747,21 @@ impl FundingPool {
         Self::seize_collateral_core(env, admin, invoice_id, "col_seiz_default")
     }
 
-    /// #1037: permissionless liquidation trigger. Unlike `seize_collateral` (which
-    /// requires an admin-proposed governance action), anyone may call this once an
-    /// invoice is objectively Defaulted on the invoice contract — no admin gating on
-    /// the trigger itself. Idempotent: a second call on an already-seized invoice
-    /// returns `CollateralAlreadySettled` rather than double-seizing.
-    ///
-    /// This only performs the seizure step. Insurance draw-down (`insurance.file_claim`)
-    /// and auction clearing remain separate permissionless follow-up calls — Soroban
-    /// disallows the pool→insurance→pool re-entrancy that a single atomic call would
-    /// require (see the note in `seize_collateral_core`), so a keeper chains these
-    /// three permissionless calls rather than the pool orchestrating them itself.
+    // #1037: permissionless liquidation trigger. Unlike seize_collateral (which
+    // requires an admin-proposed governance action), anyone may call this once an
+    // invoice is objectively Defaulted on the invoice contract — no admin gating on
+    // the trigger itself. Idempotent: a second call on an already-seized invoice
+    // returns CollateralAlreadySettled rather than double-seizing.
+    //
+    // This only performs the seizure step. Insurance draw-down (insurance.file_claim)
+    // and auction clearing remain separate permissionless follow-up calls — Soroban
+    // disallows the pool->insurance->pool re-entrancy a single atomic call would
+    // require (see the note in seize_collateral_core), so a keeper chains these
+    // three permissionless calls rather than the pool orchestrating them itself.
+    //
+    // (#1036: switched from a /// doc comment to a regular one — #[contractimpl]
+    // embeds pub fn doc comments into the on-chain contractspecv0 section, and
+    // this one alone measurably affected pool's deploy-size budget.)
     pub fn liquidate_invoice(env: Env, caller: Address, invoice_id: u64) -> Result<(), PoolError> {
         caller.require_auth();
         bump_instance(&env);
@@ -5931,8 +5728,9 @@ impl FundingPool {
         }
         // #1036: bound the fallback price's own staleness by the same threshold —
         // a fallback set outside the staleness window is refused, not just an
-        // absent one, so liquidate_collateral can't be forced through on a stale
-        // admin backstop price either.
+        // absent one, so a stale admin backstop price can't be used to justify
+        // a liquidation either (this is what the risk-response satellite in
+        // contracts/auction relies on via its own get_asset_price reads here).
         let now = env.ledger().timestamp();
         let stale_secs = Self::get_oracle_stale_threshold(env.clone());
         let prices: Map<Address, (i128, u64)> = env
@@ -6758,9 +6556,6 @@ impl FundingPool {
             AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
                 Self::validate_collateral_config(*threshold, *collateral_bps)?
             }
-            AdminOperation::SetCollateralRiskConfig(danger_bps, grace_period_secs) => {
-                Self::validate_collateral_risk_config(*danger_bps, *grace_period_secs)?
-            }
             AdminOperation::RemoveToken(_) | AdminOperation::SeizeCollateral(_) => {}
         }
 
@@ -6836,14 +6631,6 @@ impl FundingPool {
             }
             AdminOperation::SeizeCollateral(invoice_id) => {
                 Self::execute_seize_collateral(&env, &admin, invoice_id)?
-            }
-            AdminOperation::SetCollateralRiskConfig(danger_bps, grace_period_secs) => {
-                Self::execute_set_collateral_risk_config(
-                    &env,
-                    &admin,
-                    danger_bps,
-                    grace_period_secs,
-                )?
             }
         }
 
@@ -7421,21 +7208,6 @@ mod test {
     ) {
         let proposal_id =
             client.propose_operation(admin, &AdminOperation::SeizeCollateral(invoice_id));
-        advance_past_operation_delay(env, client);
-        client.execute_operation(admin, &proposal_id);
-    }
-
-    fn propose_and_execute_set_collateral_risk_config(
-        env: &Env,
-        client: &FundingPoolClient<'_>,
-        admin: &Address,
-        danger_bps: u32,
-        grace_period_secs: u64,
-    ) {
-        let proposal_id = client.propose_operation(
-            admin,
-            &AdminOperation::SetCollateralRiskConfig(danger_bps, grace_period_secs),
-        );
         advance_past_operation_delay(env, client);
         client.execute_operation(admin, &proposal_id);
     }
@@ -8118,38 +7890,33 @@ mod test {
         assert_eq!(result, Err(Ok(PoolError::OraclePriceUnavailable)));
     }
 
-    // #1036: multi-asset, oracle-priced collateral + automated risk response.
+    // #1036: multi-asset, oracle-priced collateral (funding-gate side; the
+    // risk-response side — check_collateral_risk/liquidate_collateral/
+    // get_live_collateral_ratio — lives in contracts/auction, see its tests).
 
-    // Registers a second accepted token (`xlm_id`) distinct from the pool's usdc
-    // funding token, and a MockReflector oracle pricing both — the fixture shared
-    // by every cross-asset collateral test below.
+    // Registers a second accepted token (`xlm_id`) distinct from the pool's
+    // usdc funding token — the fixture shared by the cross-asset tests below.
+    // The cross-asset ratio check reads prices via pool's own
+    // get_asset_price (fallback prices set directly here, no oracle
+    // contract registered), the same path the risk-response satellite in
+    // contracts/auction reads for its own ongoing monitoring.
     fn setup_cross_asset_collateral(
         env: &Env,
-    ) -> (
-        FundingPoolClient<'_>,
-        Address,
-        Address,
-        Address,
-        MockReflectorClient<'_>,
-    ) {
+    ) -> (FundingPoolClient<'_>, Address, Address, Address) {
         let (client, admin, usdc_id, share_token) = setup(env);
 
         let xlm_admin = Address::generate(env);
         let xlm_id = env.register_stellar_asset_contract_v2(xlm_admin).address();
         client.add_token(&admin, &xlm_id, &share_token);
 
-        let oracle_id = env.register(MockReflector, ());
-        let oracle_client = MockReflectorClient::new(env, &oracle_id);
-        client.set_oracle_contract(&admin, &oracle_id);
-
-        (client, admin, usdc_id, xlm_id, oracle_client)
+        (client, admin, usdc_id, xlm_id)
     }
 
     #[test]
     fn test_cross_asset_collateral_ratio_uses_oracle_prices() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, usdc_id, xlm_id, oracle) = setup_cross_asset_collateral(&env);
+        let (client, admin, usdc_id, xlm_id) = setup_cross_asset_collateral(&env);
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
@@ -8159,15 +7926,10 @@ mod test {
         let principal: i128 = 10_000;
         let required = client.required_collateral_for(&principal); // 2,000 usdc-equivalent
 
-        let now = env.ledger().timestamp();
-        oracle.set_price(
-            &ReflectorAsset::Stellar(usdc_id.clone()),
-            &1_000_000i128,
-            &now,
-        );
+        client.set_fallback_price(&admin, &usdc_id, &1_000_000i128);
         // xlm priced at half of usdc: 4,000 xlm covers exactly a 2,000-usdc-value
         // requirement (4,000 * 500,000 == 2,000 * 1,000,000).
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
+        client.set_fallback_price(&admin, &xlm_id, &500_000i128);
         let xlm_amount = required * 2;
 
         mint(&env, &usdc_id, &investor, 20_000);
@@ -8177,31 +7939,27 @@ mod test {
         client.deposit_collateral(&1u64, &sme, &xlm_id, &xlm_amount);
 
         // Funding succeeds even though the deposited token differs from the
-        // invoice's funding token, because its oracle-priced value covers the
-        // requirement.
+        // invoice's funding token: fund_invoice computes the ratio inline via
+        // get_asset_price, and it covers the requirement exactly.
+        let now = env.ledger().timestamp();
         client.fund_invoice(&admin, &1u64, &principal, &sme, &(now + 10_000), &usdc_id);
 
-        assert_eq!(client.get_live_collateral_ratio(&1u64), 10_000u32);
+        assert!(client.get_funded_invoice(&1u64).is_some());
     }
 
     #[test]
     fn test_cross_asset_collateral_insufficient_value_rejected_at_funding() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, usdc_id, xlm_id, oracle) = setup_cross_asset_collateral(&env);
+        let (client, admin, usdc_id, xlm_id) = setup_cross_asset_collateral(&env);
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
 
         propose_and_execute_set_collateral_config(&env, &client, &admin, 0i128, 2_000u32);
 
         let principal: i128 = 10_000;
-        let now = env.ledger().timestamp();
-        oracle.set_price(
-            &ReflectorAsset::Stellar(usdc_id.clone()),
-            &1_000_000i128,
-            &now,
-        );
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
+        client.set_fallback_price(&admin, &usdc_id, &1_000_000i128);
+        client.set_fallback_price(&admin, &xlm_id, &500_000i128);
 
         // Only half the xlm needed to cover the 2,000-usdc-value requirement.
         let xlm_amount = client.required_collateral_for(&principal); // 2,000, not 4,000
@@ -8211,202 +7969,10 @@ mod test {
         client.deposit(&investor, &usdc_id, &20_000, &None);
         client.deposit_collateral(&1u64, &sme, &xlm_id, &xlm_amount);
 
+        let now = env.ledger().timestamp();
         let result =
             client.try_fund_invoice(&admin, &1u64, &principal, &sme, &(now + 10_000), &usdc_id);
         assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
-    }
-
-    // Deposits sufficient cross-asset collateral, funds the invoice, and returns
-    // the fixture positioned right after funding so risk/liquidation tests can
-    // drive a price drop from a known-good (ratio == 10_000 bps) starting point.
-    fn setup_funded_cross_asset_position(
-        env: &Env,
-    ) -> (
-        FundingPoolClient<'_>,
-        Address,
-        Address,
-        Address,
-        MockReflectorClient<'_>,
-        Address,
-    ) {
-        let (client, admin, usdc_id, xlm_id, oracle) = setup_cross_asset_collateral(env);
-        let investor = Address::generate(env);
-        let sme = Address::generate(env);
-
-        propose_and_execute_set_collateral_config(env, &client, &admin, 0i128, 2_000u32);
-        propose_and_execute_set_collateral_risk_config(env, &client, &admin, 9_000u32, 86_400u64);
-
-        let principal: i128 = 10_000;
-        let required = client.required_collateral_for(&principal);
-        let now = env.ledger().timestamp();
-        oracle.set_price(
-            &ReflectorAsset::Stellar(usdc_id.clone()),
-            &1_000_000i128,
-            &now,
-        );
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
-        let xlm_amount = required * 2;
-
-        mint(env, &usdc_id, &investor, 20_000);
-        mint(env, &xlm_id, &sme, xlm_amount);
-        client.deposit(&investor, &usdc_id, &20_000, &None);
-        client.deposit_collateral(&1u64, &sme, &xlm_id, &xlm_amount);
-        client.fund_invoice(&admin, &1u64, &principal, &sme, &(now + 10_000), &usdc_id);
-
-        (client, admin, usdc_id, xlm_id, oracle, sme)
-    }
-
-    #[test]
-    fn test_check_collateral_risk_flags_and_clears() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _usdc_id, xlm_id, oracle, _sme) =
-            setup_funded_cross_asset_position(&env);
-
-        // At deposit-time prices, ratio is exactly 10_000 bps — not at risk
-        // against a 9_000 bps danger threshold.
-        let deposit = client.check_collateral_risk(&1u64);
-        assert!(deposit.at_risk_since.is_none());
-
-        // Price drops 20%: ratio falls to 8_000 bps, below the 9_000 danger line.
-        let now = env.ledger().timestamp();
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &400_000i128, &now);
-        let deposit = client.check_collateral_risk(&1u64);
-        assert_eq!(deposit.at_risk_since, Some(now));
-
-        // Price recovers: the flag clears again.
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
-        let deposit = client.check_collateral_risk(&1u64);
-        assert!(deposit.at_risk_since.is_none());
-    }
-
-    #[test]
-    fn test_liquidate_collateral_after_grace_period_elapses() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, usdc_id, xlm_id, oracle, sme) =
-            setup_funded_cross_asset_position(&env);
-
-        oracle.set_price(
-            &ReflectorAsset::Stellar(xlm_id.clone()),
-            &400_000i128,
-            &env.ledger().timestamp(),
-        );
-        client.check_collateral_risk(&1u64);
-
-        env.ledger().with_mut(|l| l.timestamp += 86_401);
-        // Refresh both feeds (collateral still depressed) so they're fresh at
-        // liquidation time — a keeper re-submitting live readings, not stale ones.
-        let now = env.ledger().timestamp();
-        oracle.set_price(
-            &ReflectorAsset::Stellar(usdc_id.clone()),
-            &1_000_000i128,
-            &now,
-        );
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &400_000i128, &now);
-
-        client.liquidate_collateral(&1u64);
-
-        let deposit = client.get_collateral_deposit(&1u64).unwrap();
-        assert!(deposit.settled);
-        assert_eq!(deposit.seized_at, now);
-        assert!(deposit.at_risk_since.is_none());
-        assert_eq!(deposit.depositor, sme);
-
-        // Seized xlm becomes part of that token's own pool liquidity.
-        assert_eq!(client.get_token_totals(&xlm_id).pool_value, deposit.amount);
-    }
-
-    #[test]
-    fn test_liquidate_collateral_rejected_before_grace_period_elapses() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _usdc_id, xlm_id, oracle, _sme) =
-            setup_funded_cross_asset_position(&env);
-
-        oracle.set_price(
-            &ReflectorAsset::Stellar(xlm_id.clone()),
-            &400_000i128,
-            &env.ledger().timestamp(),
-        );
-        client.check_collateral_risk(&1u64);
-
-        env.ledger().with_mut(|l| l.timestamp += 100);
-        let result = client.try_liquidate_collateral(&1u64);
-        assert_eq!(result, Err(Ok(PoolError::GracePeriodNotElapsed)));
-
-        let deposit = client.get_collateral_deposit(&1u64).unwrap();
-        assert!(!deposit.settled);
-    }
-
-    #[test]
-    fn test_liquidate_collateral_rejected_when_position_recovers() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, usdc_id, xlm_id, oracle, _sme) =
-            setup_funded_cross_asset_position(&env);
-
-        oracle.set_price(
-            &ReflectorAsset::Stellar(xlm_id.clone()),
-            &400_000i128,
-            &env.ledger().timestamp(),
-        );
-        client.check_collateral_risk(&1u64);
-        let flagged_at = env.ledger().timestamp();
-
-        env.ledger().with_mut(|l| l.timestamp += 86_401);
-        // Both feeds refreshed; collateral price recovered back above the danger
-        // threshold by liquidation time.
-        let now = env.ledger().timestamp();
-        oracle.set_price(
-            &ReflectorAsset::Stellar(usdc_id.clone()),
-            &1_000_000i128,
-            &now,
-        );
-        oracle.set_price(&ReflectorAsset::Stellar(xlm_id.clone()), &500_000i128, &now);
-
-        let result = client.try_liquidate_collateral(&1u64);
-        assert_eq!(result, Err(Ok(PoolError::CollateralNotAtRisk)));
-
-        // Soroban invocations are atomic: since this call returned an error,
-        // every write it made (if any) is rolled back — there is no way to
-        // "partially succeed" and clear the flag while also erroring. The
-        // flag is unchanged from whenever check_collateral_risk flagged it
-        // above (captured dynamically as flagged_at rather than assumed,
-        // since setup_funded_cross_asset_position's two governance proposals
-        // each advance the ledger past the setup() baseline); a separate
-        // check_collateral_risk call is what actually clears it on recovery
-        // (covered by test_check_collateral_risk_flags_and_clears above).
-        let deposit = client.get_collateral_deposit(&1u64).unwrap();
-        assert!(!deposit.settled);
-        assert_eq!(deposit.at_risk_since, Some(flagged_at));
-    }
-
-    #[test]
-    fn test_liquidate_collateral_rejected_on_stale_oracle() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _usdc_id, xlm_id, oracle, _sme) =
-            setup_funded_cross_asset_position(&env);
-
-        oracle.set_price(
-            &ReflectorAsset::Stellar(xlm_id.clone()),
-            &400_000i128,
-            &env.ledger().timestamp(),
-        );
-        let flagged_at = client.check_collateral_risk(&1u64).at_risk_since.unwrap();
-
-        // Grace period elapses, but nobody refreshed either price feed since —
-        // both are now far past the default 3600s staleness window, and no
-        // fallback price is configured either.
-        env.ledger().with_mut(|l| l.timestamp += 86_401);
-        let result = client.try_liquidate_collateral(&1u64);
-        assert_eq!(result, Err(Ok(PoolError::OraclePriceUnavailable)));
-
-        // No liquidation was triggered — the deposit is untouched.
-        let deposit = client.get_collateral_deposit(&1u64).unwrap();
-        assert!(!deposit.settled);
-        assert_eq!(deposit.at_risk_since, Some(flagged_at));
     }
 
     #[test]

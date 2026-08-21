@@ -24,6 +24,7 @@ import {
   getCollateralDeposit,
   getLiveCollateralRatio,
   getCollateralRiskConfig,
+  getAtRiskSince,
   getAcceptedTokens,
   getAssetPrice,
   buildDepositCollateralTx,
@@ -229,6 +230,10 @@ export default function InvoiceDetailPage() {
   const [collateralRiskConfig, setCollateralRiskConfig] = useState<CollateralRiskConfig | null>(
     null,
   );
+  // #1036: ledger timestamp the position was first flagged at-risk — tracked
+  // entirely in the auction satellite's own storage, not on pool's
+  // CollateralDeposit (it's monitoring state, not fund-movement state).
+  const [atRiskSince, setAtRiskSince] = useState<number | null>(null);
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
@@ -348,6 +353,7 @@ export default function InvoiceDetailPage() {
         collateralDepositResult,
         liveRatioResult,
         collateralRiskConfigResult,
+        atRiskSinceResult,
         acceptedTokensResult,
         privateResult,
         creditScoreResult,
@@ -361,6 +367,7 @@ export default function InvoiceDetailPage() {
         getCollateralDeposit(numId),
         getLiveCollateralRatio(numId),
         getCollateralRiskConfig(),
+        getAtRiskSince(numId),
         getAcceptedTokens(),
         isInvoicePrivate(numId),
         getFullCreditScore(inv.owner),
@@ -387,6 +394,7 @@ export default function InvoiceDetailPage() {
       setCollateralRiskConfig(
         collateralRiskConfigResult.status === 'fulfilled' ? collateralRiskConfigResult.value : null,
       );
+      setAtRiskSince(atRiskSinceResult.status === 'fulfilled' ? atRiskSinceResult.value : null);
       const tokens =
         acceptedTokensResult.status === 'fulfilled' && Array.isArray(acceptedTokensResult.value)
           ? acceptedTokensResult.value
@@ -1159,10 +1167,10 @@ export default function InvoiceDetailPage() {
                   const dangerPct = collateralRiskConfig
                     ? collateralRiskConfig.dangerBps / 100
                     : null;
-                  const onChainAtRisk = collateralDeposit.atRiskSince != null;
+                  const onChainAtRisk = atRiskSince != null;
                   const topUpDeadline =
                     onChainAtRisk && collateralRiskConfig
-                      ? collateralDeposit.atRiskSince! + collateralRiskConfig.gracePeriodSecs
+                      ? atRiskSince! + collateralRiskConfig.gracePeriodSecs
                       : null;
 
                   return (

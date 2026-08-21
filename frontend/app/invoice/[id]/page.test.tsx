@@ -33,6 +33,7 @@ jest.mock('@/lib/contracts', () => ({
   getCollateralDeposit: jest.fn(),
   getLiveCollateralRatio: jest.fn(),
   getCollateralRiskConfig: jest.fn(),
+  getAtRiskSince: jest.fn(),
   getAcceptedTokens: jest.fn(),
   getAssetPrice: jest.fn(),
   buildDepositCollateralTx: jest.fn(),
