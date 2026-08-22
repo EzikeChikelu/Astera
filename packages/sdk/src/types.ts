@@ -185,6 +185,27 @@ export interface Listing {
   status: ListingStatus;
 }
 
+// #1035: order-book, sitting alongside the #1025 fixed-price listing flow above.
+export type OrderSide = 'Bid' | 'Ask';
+export type OrderStatus = 'Open' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Expired';
+
+export interface Order {
+  orderId: bigint;
+  invoiceId: bigint;
+  owner: string;
+  token: string;
+  kind: ListingKind;
+  side: OrderSide;
+  /** Per-unit price, scaled by 1e7 (`PRICE_SCALE` on-chain) — not a flat total like `Listing.price`. */
+  price: bigint;
+  amountOrBps: bigint;
+  remaining: bigint;
+  createdAt: number;
+  /** Ledger timestamp after which the order can no longer match; 0 means no expiry. */
+  expiresAt: number;
+  status: OrderStatus;
+}
+
 export interface CoFundingRound {
   invoiceId: bigint;
   token: string;

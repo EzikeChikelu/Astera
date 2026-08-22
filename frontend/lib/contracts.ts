@@ -60,6 +60,9 @@ import type {
   Listing,
   ListingKind,
   ListingStatus,
+  Order,
+  OrderSide,
+  OrderStatus,
   DisputeRecord,
   DisputeResolution,
   DisputeCase,
@@ -569,6 +572,202 @@ export async function listListingsForInvestor(seller: string): Promise<number[]>
     SECONDARY_MARKET_CONTRACT_ID,
     'list_listings_for_investor',
     [new Address(seller).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((id) => Number(id));
+}
+
+// ---- #1035: limit order book, sitting alongside the #1025 listing flow above ----
+
+function orderSideToScVal(side: OrderSide): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(side, { type: 'symbol' })]);
+}
+
+// `place_order` takes a single PlaceOrderRequest struct rather than
+// individual scalar params (mirrors `openCoFundingRequestToScVal` above).
+// Soroban encodes named-field #[contracttype] structs as an ScMap keyed by
+// field-name Symbols in alphabetical order — NOT declaration order — so
+// the entries below are deliberately sorted (amount_or_bps, expires_at,
+// invoice_id, kind, price, side).
+function placeOrderRequestToScVal(params: {
+  invoiceId: number;
+  kind: ListingKind;
+  side: OrderSide;
+  amountOrBps: bigint;
+  price: bigint;
+  expiresAt?: number;
+}): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('amount_or_bps', nativeToScVal(params.amountOrBps, { type: 'u64' })),
+    entry('expires_at', nativeToScVal(params.expiresAt ?? 0, { type: 'u64' })),
+    entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    entry('kind', listingKindToScVal(params.kind)),
+    entry('price', nativeToScVal(params.price, { type: 'i128' })),
+    entry('side', orderSideToScVal(params.side)),
+  ]);
+}
+
+function orderFromRaw(raw: Record<string, unknown>): Order {
+  return {
+    orderId: Number(raw.order_id),
+    invoiceId: Number(raw.invoice_id),
+    owner: raw.owner as string,
+    token: raw.token as string,
+    kind: enumTagFromNative<ListingKind>(raw.kind),
+    side: enumTagFromNative<OrderSide>(raw.side),
+    price: BigInt(String(raw.price)),
+    amountOrBps: BigInt(String(raw.amount_or_bps)),
+    remaining: BigInt(String(raw.remaining)),
+    createdAt: Number(raw.created_at),
+    expiresAt: Number(raw.expires_at),
+    status: enumTagFromNative<OrderStatus>(raw.status),
+  };
+}
+
+/**
+ * Place a resting limit order (bid or ask). Matches immediately against
+ * crossing resting orders on the opposite side; any unfilled remainder
+ * rests on the book. `price` is per-unit, scaled by 1e7 — not a flat total
+ * like `buildListPositionTx`'s `price`. `expiresAt` of `0` means no expiry.
+ */
+export async function buildPlaceOrderTx(params: {
+  owner: string;
+  invoiceId: number;
+  kind: ListingKind;
+  side: OrderSide;
+  amountOrBps: bigint;
+  price: bigint;
+  expiresAt?: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.owner);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'place_order',
+        new Address(params.owner).toScVal(),
+        placeOrderRequestToScVal(params),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Cancel a resting or partially-filled order. Only the original owner may cancel. */
+export async function buildCancelOrderTx(owner: string, orderId: number): Promise<string> {
+  const account = await getRpcAccount(owner);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_order',
+        new Address(owner).toScVal(),
+        nativeToScVal(orderId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/**
+ * Permissionlessly expire a resting order past its `expiresAt`. Anyone
+ * (the connected wallet, in the frontend's case) can submit this — it only
+ * prunes stale book state, no funds move.
+ */
+export async function buildExpireOrderTx(caller: string, orderId: number): Promise<string> {
+  const account = await getRpcAccount(caller);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('expire_order', nativeToScVal(orderId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Fetch a single order by ID. Returns null if not found. */
+export async function getOrder(orderId: number): Promise<Order | null> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'get_order',
+    [nativeToScVal(orderId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return orderFromRaw(raw as Record<string, unknown>);
+}
+
+/** Resting bid/ask order IDs for an invoice's order book, as `{ bidIds, askIds }`. */
+export async function getOrderBook(
+  invoiceId: number,
+  kind: ListingKind,
+): Promise<{ bidIds: number[]; askIds: number[] }> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'get_order_book',
+    [nativeToScVal(invoiceId, { type: 'u64' }), listingKindToScVal(kind)],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as [unknown[], unknown[]];
+  if (!Array.isArray(raw)) return { bidIds: [], askIds: [] };
+  const [bids, asks] = raw;
+  return {
+    bidIds: (bids ?? []).map((id) => Number(id)),
+    askIds: (asks ?? []).map((id) => Number(id)),
+  };
+}
+
+/** All order IDs ever placed by `owner` (any status). */
+export async function listOrdersForOwner(owner: string): Promise<number[]> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'list_orders_for_owner',
+    [new Address(owner).toScVal()],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
   );
 

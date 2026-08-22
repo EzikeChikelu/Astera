@@ -7,6 +7,8 @@ import type {
   LiquidityForecastPoint,
   Listing,
   ListingKind,
+  Order,
+  OrderSide,
   TransactionProgress,
 } from '../types';
 import type { Signer } from '../types';
@@ -38,6 +40,54 @@ export class SecondaryMarketClient extends BaseClient {
 
   private listingKindToScVal(kind: ListingKind): xdr.ScVal {
     return xdr.ScVal.scvVec([nativeToScVal(kind, { type: 'symbol' })]);
+  }
+
+  private orderSideToScVal(side: OrderSide): xdr.ScVal {
+    return xdr.ScVal.scvVec([nativeToScVal(side, { type: 'symbol' })]);
+  }
+
+  // `place_order` takes a single PlaceOrderRequest struct rather than
+  // individual scalar params (clippy's too-many-arguments threshold —
+  // see the same pattern for pool's OpenCoFundingRequest). Soroban encodes
+  // named-field #[contracttype] structs as an ScMap keyed by field-name
+  // Symbols in alphabetical order — NOT declaration order — so the entries
+  // below are deliberately sorted (amount_or_bps, expires_at, invoice_id,
+  // kind, price, side).
+  private placeOrderRequestToScVal(params: {
+    invoiceId: bigint | number;
+    kind: ListingKind;
+    side: OrderSide;
+    amountOrBps: bigint;
+    price: bigint;
+    expiresAt?: bigint | number;
+  }): xdr.ScVal {
+    const entry = (key: string, val: xdr.ScVal) =>
+      new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+    return xdr.ScVal.scvMap([
+      entry('amount_or_bps', nativeToScVal(params.amountOrBps, { type: 'u64' })),
+      entry('expires_at', nativeToScVal(params.expiresAt ?? 0, { type: 'u64' })),
+      entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+      entry('kind', this.listingKindToScVal(params.kind)),
+      entry('price', nativeToScVal(params.price, { type: 'i128' })),
+      entry('side', this.orderSideToScVal(params.side)),
+    ]);
+  }
+
+  private orderFromRaw(raw: Record<string, unknown>): Order {
+    return {
+      orderId: BigInt(String(raw.order_id)),
+      invoiceId: BigInt(String(raw.invoice_id)),
+      owner: raw.owner as string,
+      token: raw.token as string,
+      kind: (Array.isArray(raw.kind) ? raw.kind[0] : raw.kind) as ListingKind,
+      side: (Array.isArray(raw.side) ? raw.side[0] : raw.side) as OrderSide,
+      price: BigInt(String(raw.price)),
+      amountOrBps: BigInt(String(raw.amount_or_bps)),
+      remaining: BigInt(String(raw.remaining)),
+      createdAt: Number(raw.created_at),
+      expiresAt: Number(raw.expires_at),
+      status: (Array.isArray(raw.status) ? raw.status[0] : raw.status) as Order['status'],
+    };
   }
 
   /** List part or all of a position for sale on the secondary market. */
@@ -126,6 +176,99 @@ export class SecondaryMarketClient extends BaseClient {
     const sim = await this.simulate('list_listings_for_investor', [
       new Address(seller).toScVal(),
     ]);
+    if (StellarRpc.Api.isSimulationError(sim)) return [];
+    const raw = scValToNative(sim.result!.retval) as unknown[];
+    return (raw ?? []).map((id) => BigInt(String(id)));
+  }
+
+  /**
+   * Place a resting limit order (bid or ask). Matches immediately against
+   * crossing resting orders on the opposite side; any unfilled remainder
+   * rests on the book. `price` is per-unit, scaled by 1e7 — not a flat
+   * total like `listPosition`'s `price`. `expiresAt` of `0n`/`0` means no
+   * expiry.
+   */
+  async placeOrder(params: {
+    signer: Signer;
+    owner: string;
+    invoiceId: bigint | number;
+    kind: ListingKind;
+    side: OrderSide;
+    amountOrBps: bigint;
+    price: bigint;
+    expiresAt?: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.owner,
+      'place_order',
+      [new Address(params.owner).toScVal(), this.placeOrderRequestToScVal(params)],
+      params.onProgress,
+    );
+  }
+
+  /** Cancel a resting or partially-filled order. Only the original owner may cancel. */
+  async cancelOrder(params: {
+    signer: Signer;
+    owner: string;
+    orderId: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.owner,
+      'cancel_order',
+      [new Address(params.owner).toScVal(), nativeToScVal(params.orderId, { type: 'u64' })],
+      params.onProgress,
+    );
+  }
+
+  /**
+   * Permissionlessly expire a resting order past its `expiresAt`. Anyone
+   * may submit this — it only prunes stale book state, no funds move.
+   */
+  async expireOrder(params: {
+    signer: Signer;
+    caller: string;
+    orderId: bigint | number;
+    onProgress?: (progress: TransactionProgress) => void;
+  }): Promise<string> {
+    return this.buildAndSendTx(
+      params.caller,
+      'expire_order',
+      [nativeToScVal(params.orderId, { type: 'u64' })],
+      params.onProgress,
+    );
+  }
+
+  /** Fetch a single order by ID. Returns null if not found. */
+  async getOrder(orderId: bigint | number): Promise<Order | null> {
+    const sim = await this.simulate('get_order', [nativeToScVal(orderId, { type: 'u64' })]);
+    if (StellarRpc.Api.isSimulationError(sim)) return null;
+    const raw = scValToNative(sim.result!.retval);
+    if (!raw) return null;
+    return this.orderFromRaw(raw as Record<string, unknown>);
+  }
+
+  /** Resting bid/ask order IDs for an invoice's order book, as `{ bidIds, askIds }`. */
+  async getOrderBook(
+    invoiceId: bigint | number,
+    kind: ListingKind,
+  ): Promise<{ bidIds: bigint[]; askIds: bigint[] }> {
+    const sim = await this.simulate('get_order_book', [
+      nativeToScVal(invoiceId, { type: 'u64' }),
+      this.listingKindToScVal(kind),
+    ]);
+    if (StellarRpc.Api.isSimulationError(sim)) return { bidIds: [], askIds: [] };
+    const [bids, asks] = scValToNative(sim.result!.retval) as [unknown[], unknown[]];
+    return {
+      bidIds: (bids ?? []).map((id) => BigInt(String(id))),
+      askIds: (asks ?? []).map((id) => BigInt(String(id))),
+    };
+  }
+
+  /** All order IDs ever placed by `owner` (any status). */
+  async listOrdersForOwner(owner: string): Promise<bigint[]> {
+    const sim = await this.simulate('list_orders_for_owner', [new Address(owner).toScVal()]);
     if (StellarRpc.Api.isSimulationError(sim)) return [];
     const raw = scValToNative(sim.result!.retval) as unknown[];
     return (raw ?? []).map((id) => BigInt(String(id)));
