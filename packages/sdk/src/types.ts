@@ -108,18 +108,6 @@ export interface FundedInvoice {
   coFundingRoundId?: bigint;
 }
 
-/** #1037: seize/liquidation status for a funded invoice's posted collateral. */
-export interface CollateralDeposit {
-  invoiceId: bigint;
-  depositor: string;
-  token: string;
-  amount: bigint;
-  settled: boolean;
-  postedAt: number;
-  releasedAt: number;
-  seizedAt: number;
-}
-
 export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
 
 // #1036: multi-asset, oracle-priced collateral risk response

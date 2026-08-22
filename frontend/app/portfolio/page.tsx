@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import { LiquidityForecastChart } from '@/components/analytics/LiquidityForecastChart';
-import { TrancheClass } from '@/../sdk/src/generated/tranche';
+import { TrancheClass } from '@/../packages/sdk/src/generated/tranche';
 import {
   getInvestorPosition,
   getPoolConfig,

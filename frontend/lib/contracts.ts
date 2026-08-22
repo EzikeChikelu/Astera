@@ -3646,8 +3646,8 @@ export async function buildRegisterReferralTx(referee: string, referrer: string)
 
 // ── #862: Tranche helpers ─────────────────────────────────────────────────────
 
-import { TrancheClass } from '@/../sdk/src/generated/tranche';
-import type { TranchePool, TrancheConfig } from '@/../sdk/src/generated/tranche';
+import { TrancheClass } from '@/../packages/sdk/src/generated/tranche';
+import type { TranchePool, TrancheConfig } from '@/../packages/sdk/src/generated/tranche';
 
 export type { TranchePool, TrancheConfig };
 export { TrancheClass };

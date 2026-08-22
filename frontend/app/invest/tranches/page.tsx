@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { TrancheClass, TranchePool } from '@/../sdk/src/generated/tranche';
+import { TrancheClass, TranchePool } from '@/../packages/sdk/src/generated/tranche';
 import { getTranchePool, buildTrancheDepositTx } from '@/lib/contracts';
 import { submitTx, toStroops } from '@/lib/stellar';
 import { useStore } from '@/lib/store';

@@ -5,6 +5,10 @@ export { CreditScoreClient } from './clients/credit_score';
 export { OracleRegistryClient } from './clients/oracle_registry';
 export { ComplianceClient } from './clients/compliance';
 export { ArbitrationClient, computeCommitHash, generateSalt } from './clients/arbitration';
+export { TrancheClient } from './clients/tranche';
+export type { TrancheInvestorPosition } from './clients/tranche';
+export { AccessControlClient } from './clients/access_control';
+export { AuctionClient } from './clients/auction';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';
@@ -17,6 +21,15 @@ export { GovernanceError } from './generated/governance';
 export { Errors as OracleRegistryErrors } from './generated/oracle_registry';
 export { Errors as ComplianceErrors } from './generated/compliance';
 export { Errors as ArbitrationErrors } from './generated/arbitration';
+export { Errors as AccessControlErrors } from './generated/access_control';
+export { Errors as TrancheErrors, TrancheClass } from './generated/tranche';
+export type {
+  TrancheConfig,
+  TrancheAccounting,
+  TranchePool,
+  InvoiceTrancheExposure,
+  WaterfallSimulation,
+} from './generated/tranche';
 export {
   parseContractEvent,
   ContractEvent,

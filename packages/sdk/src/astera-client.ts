@@ -14,7 +14,7 @@ import type {
   InvoiceTrancheExposure,
   WaterfallSimulation,
   TrancheClass,
-} from '../../../sdk/src/generated/tranche';
+} from './generated/tranche';
 import type {
   AsteraConfig,
   Invoice,
