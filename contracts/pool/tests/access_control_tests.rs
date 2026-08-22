@@ -133,6 +133,10 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     assert_eq!(f.pool_client.get_oracle_contract(), Some(oracle));
 }
 
+// #1042: pool has no set_access_control_via_ac (rotation) entrypoint —
+// its wasm binary has no size budget left for a new public entrypoint.
+// See the comment on pool's get_access_control in contracts/pool/src/lib.rs.
+
 // ── (d) real access_control contract driving a genuine 2-of-3 proposal ─────
 
 #[test]

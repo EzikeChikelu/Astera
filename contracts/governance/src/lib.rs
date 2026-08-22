@@ -104,6 +104,9 @@ pub enum DataKey {
     ProposalCount,
     Vote(u64, Address),
     Initialized,
+    // #1042: multisig trust anchor. Additive — untouched, this stays unset
+    // and every admin-gated entrypoint above works exactly as before.
+    AccessControl,
 }
 
 #[contracterror]
@@ -122,6 +125,9 @@ pub enum GovernanceError {
     Unauthorized = 10,
     ProposalExpired = 11,
     InvalidConfig = 12,
+    // #1042: a `*_via_ac` entrypoint was called but no `access_control`
+    // contract has been configured via `set_access_control` yet.
+    AccessControlNotConfigured = 13,
 }
 
 type GovernanceResult<T> = Result<T, GovernanceError>;
@@ -156,6 +162,30 @@ fn quorum_for_category(config: &GovernanceConfig, category: &ProposalCategory) -
         ProposalCategory::ParameterChange => config.quorum_bps,
         ProposalCategory::Treasury => config.treasury_quorum_bps,
         ProposalCategory::Critical => config.critical_quorum_bps,
+    }
+}
+
+fn require_access_control(env: &Env, caller: &Address) -> GovernanceResult<()> {
+    let configured: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::AccessControl)
+        .ok_or(GovernanceError::AccessControlNotConfigured)?;
+    if caller != &configured {
+        return Err(GovernanceError::Unauthorized);
+    }
+    Ok(())
+}
+
+/// #1042: decodes access_control's discriminant-encoded category (see
+/// `ActionPayload::SetCategoryQuorum` in access_control/src/lib.rs) —
+/// 0=ParameterChange, 1=Treasury, 2=Critical.
+fn category_from_discriminant(discriminant: u32) -> GovernanceResult<ProposalCategory> {
+    match discriminant {
+        0 => Ok(ProposalCategory::ParameterChange),
+        1 => Ok(ProposalCategory::Treasury),
+        2 => Ok(ProposalCategory::Critical),
+        _ => Err(GovernanceError::InvalidConfig),
     }
 }
 
@@ -629,5 +659,105 @@ impl Governance {
     ) -> Result<u32, GovernanceError> {
         let config = load_config(&env)?;
         Ok(quorum_for_category(&config, &category))
+    }
+
+    // #1042: multisig admin path, additive to the legacy single-admin
+    // functions above — see access_control/src/lib.rs for the full
+    // propose/approve/execute lifecycle. `set_access_control` bootstraps
+    // the trust anchor (still gated by `config.admin`); every `*_via_ac`
+    // entrypoint below then trusts only calls that carry the configured
+    // `access_control` contract's own on-chain identity. Governance's
+    // token-weighted proposal/vote/execute flow (`create_proposal`,
+    // `vote`, `execute_proposal`) is a separate authorization model and is
+    // untouched — only the admin-key-gated config setters below move
+    // behind multisig.
+    pub fn set_access_control(
+        env: Env,
+        caller: Address,
+        access_control: Address,
+    ) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        let config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &access_control);
+        env.events()
+            .publish((EVT, symbol_short!("set_ac")), (caller, access_control));
+        Ok(())
+    }
+
+    pub fn get_access_control(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::AccessControl)
+    }
+
+    /// #1042: rotates the trust anchor itself through the currently
+    /// configured `access_control` contract rather than the legacy admin
+    /// key.
+    pub fn set_access_control_via_ac(
+        env: Env,
+        access_control: Address,
+        new_access_control: Address,
+    ) -> Result<(), GovernanceError> {
+        access_control.require_auth();
+        require_access_control(&env, &access_control)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessControl, &new_access_control);
+        env.events().publish(
+            (EVT, symbol_short!("ac_rot")),
+            (access_control, new_access_control),
+        );
+        Ok(())
+    }
+
+    pub fn update_config_via_ac(
+        env: Env,
+        access_control: Address,
+        quorum_bps: u32,
+        pass_bps: u32,
+    ) -> Result<(), GovernanceError> {
+        access_control.require_auth();
+        require_access_control(&env, &access_control)?;
+        let mut config = load_config(&env)?;
+        validate_bps(quorum_bps, pass_bps)?;
+
+        config.quorum_bps = quorum_bps;
+        config.pass_bps = pass_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("ac_cfg")),
+            (access_control, quorum_bps, pass_bps),
+        );
+        Ok(())
+    }
+
+    pub fn set_category_quorum_via_ac(
+        env: Env,
+        access_control: Address,
+        category: u32,
+        quorum_bps: u32,
+    ) -> Result<(), GovernanceError> {
+        access_control.require_auth();
+        require_access_control(&env, &access_control)?;
+        if quorum_bps == 0 || quorum_bps > 10_000 {
+            return Err(GovernanceError::InvalidConfig);
+        }
+        let category = category_from_discriminant(category)?;
+        let mut config = load_config(&env)?;
+
+        match category {
+            ProposalCategory::ParameterChange => config.quorum_bps = quorum_bps,
+            ProposalCategory::Treasury => config.treasury_quorum_bps = quorum_bps,
+            ProposalCategory::Critical => config.critical_quorum_bps = quorum_bps,
+        }
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("ac_cat_q")),
+            (access_control, category, quorum_bps),
+        );
+        Ok(())
     }
 }

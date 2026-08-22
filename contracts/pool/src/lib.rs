@@ -4570,6 +4570,14 @@ impl FundingPool {
         Ok(())
     }
 
+    // #1042: no set_access_control_via_ac (rotation) entrypoint here —
+    // pool's wasm binary is already within ~300 bytes of Soroban's 200KB
+    // per-contract deploy cap on main (see
+    // contracts/.wasm-size-baseline.json), so there's no room for a new
+    // public entrypoint until pool is split further (as secondary_market
+    // and auction already were). The legacy-admin-gated bootstrap above
+    // still works; only rotation through multisig is unavailable for now.
+
     pub fn get_access_control(env: Env) -> Option<Address> {
         env.storage().instance().get(&ACCESS_CONTROL)
     }

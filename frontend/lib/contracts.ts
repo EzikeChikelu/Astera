@@ -3841,6 +3841,73 @@ function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
         roleToScVal(action.values[0]),
         nativeToScVal(action.values[1], { type: 'u32' }),
       ]);
+    case 'SetOracleRegistryInvoiceContract':
+    case 'SetReferralPool':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
+    case 'SetOracleRegistryTreasury':
+      return xdr.ScVal.scvVec([
+        tag,
+        action.values[0] === undefined
+          ? xdr.ScVal.scvVoid()
+          : new Address(action.values[0]).toScVal(),
+      ]);
+    case 'SetOracleRegistryConfig':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'i128' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u32' }),
+        nativeToScVal(action.values[3], { type: 'u64' }),
+        nativeToScVal(action.values[4], { type: 'u64' }),
+      ]);
+    case 'SetOracleRegistryPaused':
+    case 'SetCompliancePaused':
+    case 'SetReferralPaused':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'bool' })]);
+    case 'SlashOracle':
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(action.values[0]).toScVal(),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u64' }),
+        nativeToScVal(action.values[3], { type: 'string' }),
+      ]);
+    case 'AdminResolveRound':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u64' }),
+        nativeToScVal(action.values[1], { type: 'bool' }),
+        nativeToScVal(action.values[2], { type: 'string' }),
+      ]);
+    case 'RegisterScreener':
+    case 'ConfirmScreenerRegistration':
+    case 'DeregisterScreener':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
+    case 'SetRescreeningInterval':
+    case 'SetScreenerTimelock':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u64' })]);
+    case 'UpdateGovernanceConfig':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u32' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+      ]);
+    case 'SetCategoryQuorum':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u32' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+      ]);
+    case 'SetBorrowRewardBps':
+    case 'SetDepositRewardBps':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u32' })]);
+    case 'SetInvoiceAccessControl':
+    case 'SetCreditScoreAccessControl':
+    case 'SetOracleRegistryAccessControl':
+    case 'SetComplianceAccessControl':
+    case 'SetGovernanceAccessControl':
+    case 'SetReferralAccessControl':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
   }
 }
 

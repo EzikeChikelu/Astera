@@ -106,6 +106,65 @@ pub enum ActionPayload {
     /// doesn't need to depend on credit_score's types (0=BusinessRegistry,
     /// 1=CreditBureau, 2=ExternalProtocol, 3=Manual).
     RegisterAttestor(Address, u32, u32),
+    // ── oracle_registry ──
+    SetOracleRegistryInvoiceContract(Address),
+    SetOracleRegistryTreasury(Option<Address>),
+    /// (min_stake, required_votes, quorum_bps, round_duration_secs, deregister_cooldown_secs)
+    SetOracleRegistryConfig(i128, u32, u32, u64, u64),
+    /// pause()/unpause() unified, same convention as `SetPaused` above.
+    SetOracleRegistryPaused(bool),
+    /// (operator, bps, round_id, evidence)
+    SlashOracle(Address, u32, u64, String),
+    /// (invoice_id, approved, reason)
+    AdminResolveRound(u64, bool, String),
+    // ── compliance ──
+    SetCompliancePaused(bool),
+    RegisterScreener(Address),
+    ConfirmScreenerRegistration(Address),
+    DeregisterScreener(Address),
+    SetRescreeningInterval(u64),
+    SetScreenerTimelock(u64),
+    // ── governance ──
+    /// (quorum_bps, pass_bps)
+    UpdateGovernanceConfig(u32, u32),
+    /// (category discriminant, quorum_bps) — decoded by governance's own
+    /// `ProposalCategory` mapping (0=ParameterChange, 1=Treasury, 2=Critical),
+    /// the same "decode by discriminant" convention `RegisterAttestor` above
+    /// uses for credit_score's `AttestorType`.
+    SetCategoryQuorum(u32, u32),
+    // ── referral ──
+    SetReferralPaused(bool),
+    SetReferralPool(Address),
+    SetBorrowRewardBps(u32),
+    SetDepositRewardBps(u32),
+    // ── admin-key rotation (SuperAdmin only) ──
+    //
+    // #1042: `set_access_control` on every target contract is itself gated
+    // only by that contract's single legacy admin key — a compromised admin
+    // key could otherwise repoint or strip the multisig trust anchor on an
+    // already-adopted contract, bypassing every other gate this crate adds.
+    // Routing rotation itself through a SuperAdmin-threshold proposal closes
+    // that hole. These carry the *new* access_control address as payload and
+    // are proposed with `target` = the contract whose trust anchor is being
+    // rotated (not this contract's own address), so they execute via
+    // `execute_cross_contract` like any other cross-contract action, but are
+    // restricted to `Role::SuperAdmin` the same way self-management is (see
+    // `requires_super_admin`).
+    //
+    // `pool` deliberately has no rotation variant here: its wasm binary is
+    // already within ~300 bytes of Soroban's 200KB per-contract deploy cap
+    // on main (see contracts/.wasm-size-baseline.json's `pool` entry) —
+    // there's no room left for a new public entrypoint until `pool` is
+    // split further (following the precedent already set by
+    // `secondary_market` and `auction`). `pool`'s `set_access_control`
+    // bootstrap still works via the legacy admin key; only rotation
+    // through multisig is unavailable for now.
+    SetInvoiceAccessControl(Address),
+    SetCreditScoreAccessControl(Address),
+    SetOracleRegistryAccessControl(Address),
+    SetComplianceAccessControl(Address),
+    SetGovernanceAccessControl(Address),
+    SetReferralAccessControl(Address),
     // ── self-management (SuperAdmin only) ──
     AddSigner(Role, Address),
     RemoveSigner(Role, Address),
@@ -195,6 +254,9 @@ pub trait PoolContract {
         approved: bool,
     );
     fn set_max_utilization_via_ac(env: Env, access_control: Address, max_bps: u32);
+    // No set_access_control_via_ac here — pool has no wasm size budget
+    // left for a rotation entrypoint; see the comment on `ActionPayload`
+    // above.
 }
 
 #[contractclient(name = "InvoiceClient")]
@@ -210,6 +272,7 @@ pub trait InvoiceContract {
     );
     fn deactivate_debtor_via_ac(env: Env, access_control: Address, debtor_id: String);
     fn add_keeper_via_ac(env: Env, access_control: Address, keeper: Address);
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
 }
 
 #[contractclient(name = "CreditScoreClient")]
@@ -231,6 +294,72 @@ pub trait CreditScoreContract {
         attestor_type: u32,
         weight_bps: u32,
     );
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
+}
+
+#[contractclient(name = "OracleRegistryClient")]
+pub trait OracleRegistryContractTrait {
+    fn set_invoice_contract_via_ac(env: Env, access_control: Address, invoice_contract: Address);
+    fn set_treasury_via_ac(env: Env, access_control: Address, treasury: Option<Address>);
+    #[allow(clippy::too_many_arguments)]
+    fn set_registry_config_via_ac(
+        env: Env,
+        access_control: Address,
+        min_stake: i128,
+        required_votes: u32,
+        quorum_bps: u32,
+        round_duration_secs: u64,
+        deregister_cooldown_secs: u64,
+    );
+    fn set_paused_via_ac(env: Env, access_control: Address, paused: bool);
+    fn slash_oracle_via_ac(
+        env: Env,
+        access_control: Address,
+        operator: Address,
+        bps: u32,
+        round_id: u64,
+        evidence: String,
+    );
+    fn admin_resolve_round_via_ac(
+        env: Env,
+        access_control: Address,
+        invoice_id: u64,
+        approved: bool,
+        reason: String,
+    );
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
+}
+
+#[contractclient(name = "ComplianceClient")]
+pub trait ComplianceContractTrait {
+    fn set_paused_via_ac(env: Env, access_control: Address, paused: bool);
+    fn register_screener_via_ac(env: Env, access_control: Address, screener: Address);
+    fn confirm_screener_via_ac(env: Env, access_control: Address, screener: Address);
+    fn deregister_screener_via_ac(env: Env, access_control: Address, screener: Address);
+    fn set_rescreening_interval_via_ac(env: Env, access_control: Address, secs: u64);
+    fn set_screener_timelock_via_ac(env: Env, access_control: Address, secs: u64);
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
+}
+
+#[contractclient(name = "GovernanceClient")]
+pub trait GovernanceContractTrait {
+    fn update_config_via_ac(env: Env, access_control: Address, quorum_bps: u32, pass_bps: u32);
+    fn set_category_quorum_via_ac(
+        env: Env,
+        access_control: Address,
+        category: u32,
+        quorum_bps: u32,
+    );
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
+}
+
+#[contractclient(name = "ReferralClient")]
+pub trait ReferralContractTrait {
+    fn set_paused_via_ac(env: Env, access_control: Address, paused: bool);
+    fn set_pool_via_ac(env: Env, access_control: Address, pool: Address);
+    fn set_borrow_reward_bps_via_ac(env: Env, access_control: Address, bps: u32);
+    fn set_deposit_reward_bps_via_ac(env: Env, access_control: Address, bps: u32);
+    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
 }
 
 // ─── Contract ───────────────────────────────────────────────────────────────
@@ -323,7 +452,7 @@ impl AccessControlContract {
         proposer.require_auth();
         bump_instance(&env);
 
-        if Self::is_self_management(&action) && !matches!(role, Role::SuperAdmin) {
+        if Self::requires_super_admin(&action) && !matches!(role, Role::SuperAdmin) {
             return Err(AccessControlError::SelfManagementRequiresSuperAdmin);
         }
 
@@ -635,6 +764,117 @@ impl AccessControlContract {
                     weight_bps,
                 );
             }
+            ActionPayload::SetOracleRegistryInvoiceContract(invoice_contract) => {
+                OracleRegistryClient::new(env, target)
+                    .set_invoice_contract_via_ac(this_contract, invoice_contract);
+            }
+            ActionPayload::SetOracleRegistryTreasury(treasury) => {
+                OracleRegistryClient::new(env, target).set_treasury_via_ac(this_contract, treasury);
+            }
+            ActionPayload::SetOracleRegistryConfig(
+                min_stake,
+                required_votes,
+                quorum_bps,
+                round_duration_secs,
+                deregister_cooldown_secs,
+            ) => {
+                OracleRegistryClient::new(env, target).set_registry_config_via_ac(
+                    this_contract,
+                    min_stake,
+                    required_votes,
+                    quorum_bps,
+                    round_duration_secs,
+                    deregister_cooldown_secs,
+                );
+            }
+            ActionPayload::SetOracleRegistryPaused(paused) => {
+                OracleRegistryClient::new(env, target).set_paused_via_ac(this_contract, paused);
+            }
+            ActionPayload::SlashOracle(operator, bps, round_id, evidence) => {
+                OracleRegistryClient::new(env, target).slash_oracle_via_ac(
+                    this_contract,
+                    operator,
+                    bps,
+                    round_id,
+                    evidence,
+                );
+            }
+            ActionPayload::AdminResolveRound(invoice_id, approved, reason) => {
+                OracleRegistryClient::new(env, target).admin_resolve_round_via_ac(
+                    this_contract,
+                    invoice_id,
+                    approved,
+                    reason,
+                );
+            }
+            ActionPayload::SetCompliancePaused(paused) => {
+                ComplianceClient::new(env, target).set_paused_via_ac(this_contract, paused);
+            }
+            ActionPayload::RegisterScreener(screener) => {
+                ComplianceClient::new(env, target)
+                    .register_screener_via_ac(this_contract, screener);
+            }
+            ActionPayload::ConfirmScreenerRegistration(screener) => {
+                ComplianceClient::new(env, target).confirm_screener_via_ac(this_contract, screener);
+            }
+            ActionPayload::DeregisterScreener(screener) => {
+                ComplianceClient::new(env, target)
+                    .deregister_screener_via_ac(this_contract, screener);
+            }
+            ActionPayload::SetRescreeningInterval(secs) => {
+                ComplianceClient::new(env, target)
+                    .set_rescreening_interval_via_ac(this_contract, secs);
+            }
+            ActionPayload::SetScreenerTimelock(secs) => {
+                ComplianceClient::new(env, target)
+                    .set_screener_timelock_via_ac(this_contract, secs);
+            }
+            ActionPayload::UpdateGovernanceConfig(quorum_bps, pass_bps) => {
+                GovernanceClient::new(env, target).update_config_via_ac(
+                    this_contract,
+                    quorum_bps,
+                    pass_bps,
+                );
+            }
+            ActionPayload::SetCategoryQuorum(category, quorum_bps) => {
+                GovernanceClient::new(env, target).set_category_quorum_via_ac(
+                    this_contract,
+                    category,
+                    quorum_bps,
+                );
+            }
+            ActionPayload::SetReferralPaused(paused) => {
+                ReferralClient::new(env, target).set_paused_via_ac(this_contract, paused);
+            }
+            ActionPayload::SetReferralPool(pool) => {
+                ReferralClient::new(env, target).set_pool_via_ac(this_contract, pool);
+            }
+            ActionPayload::SetBorrowRewardBps(bps) => {
+                ReferralClient::new(env, target).set_borrow_reward_bps_via_ac(this_contract, bps);
+            }
+            ActionPayload::SetDepositRewardBps(bps) => {
+                ReferralClient::new(env, target).set_deposit_reward_bps_via_ac(this_contract, bps);
+            }
+            ActionPayload::SetInvoiceAccessControl(new_ac) => {
+                InvoiceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
+            }
+            ActionPayload::SetCreditScoreAccessControl(new_ac) => {
+                CreditScoreClient::new(env, target)
+                    .set_access_control_via_ac(this_contract, new_ac);
+            }
+            ActionPayload::SetOracleRegistryAccessControl(new_ac) => {
+                OracleRegistryClient::new(env, target)
+                    .set_access_control_via_ac(this_contract, new_ac);
+            }
+            ActionPayload::SetComplianceAccessControl(new_ac) => {
+                ComplianceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
+            }
+            ActionPayload::SetGovernanceAccessControl(new_ac) => {
+                GovernanceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
+            }
+            ActionPayload::SetReferralAccessControl(new_ac) => {
+                ReferralClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
+            }
             ActionPayload::AddSigner(_, _)
             | ActionPayload::RemoveSigner(_, _)
             | ActionPayload::SetThreshold(_, _) => {
@@ -713,6 +953,24 @@ impl AccessControlContract {
                 | ActionPayload::RemoveSigner(_, _)
                 | ActionPayload::SetThreshold(_, _)
         )
+    }
+
+    /// Self-management actions (this contract's own role config) and
+    /// access-control-rotation actions (repointing a target contract's
+    /// trust anchor) both bypass every other role's threshold entirely if
+    /// left ungated — so both are restricted to `Role::SuperAdmin`, the
+    /// role with the highest bar to reconfigure.
+    fn requires_super_admin(action: &ActionPayload) -> bool {
+        Self::is_self_management(action)
+            || matches!(
+                action,
+                ActionPayload::SetInvoiceAccessControl(_)
+                    | ActionPayload::SetCreditScoreAccessControl(_)
+                    | ActionPayload::SetOracleRegistryAccessControl(_)
+                    | ActionPayload::SetComplianceAccessControl(_)
+                    | ActionPayload::SetGovernanceAccessControl(_)
+                    | ActionPayload::SetReferralAccessControl(_)
+            )
     }
 
     fn validate_config(signers: &Vec<Address>, threshold: u32) -> Result_ {
