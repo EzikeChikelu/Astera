@@ -4741,7 +4741,10 @@ mod test {
         let stranger = Address::generate(&env);
 
         let result = client.try_submit_risk_signal(&stranger, &sme, &6_000u32, &1_000u32);
-        assert_eq!(result.unwrap_err().unwrap(), CreditScoreError::Unauthorized.into());
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::Unauthorized.into()
+        );
 
         client.submit_risk_signal(&admin, &sme, &6_000u32, &1_000u32);
         let signal = client.get_risk_signal(&sme).unwrap();
@@ -4810,7 +4813,12 @@ mod test {
         let (client, admin, _invoice, _pool) = setup(&env);
         let attestor = register_test_attestor(&env, &client, &admin, 5_000);
 
-        client.register_attestor(&admin, &attestor, &AttestorType::BusinessRegistry, &9_000u32);
+        client.register_attestor(
+            &admin,
+            &attestor,
+            &AttestorType::BusinessRegistry,
+            &9_000u32,
+        );
         let info = client.get_attestor_info(&attestor).unwrap();
         assert_eq!(info.weight_bps, 9_000);
     }
