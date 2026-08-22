@@ -84,7 +84,8 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     // Registration only activates immediately when the timelock is zero —
     // the default is 24h (DEFAULT_SCREENER_TIMELOCK_SECS) — so zero it out
     // via the admin path first.
-    f.client.set_screener_timelock_via_ac(&access_control, &0u64);
+    f.client
+        .set_screener_timelock_via_ac(&access_control, &0u64);
 
     let screener = Address::generate(&f.env);
     f.client
