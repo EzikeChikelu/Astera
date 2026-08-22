@@ -32,6 +32,11 @@ export type {
   Listing,
   ListingStatus,
   ListingKind,
+  CollateralConfig,
+  CollateralDeposit,
+  CollateralRiskConfig,
+  CollateralSale,
+  CollateralSaleStatus,
 } from '../../packages/sdk/src/types';
 
 export * from './generated/tranche';
@@ -40,3 +45,4 @@ export { TrancheClient } from '../../packages/sdk/src/clients/tranche';
 export type { TrancheInvestorPosition } from '../../packages/sdk/src/clients/tranche';
 
 export { SecondaryMarketClient } from '../../packages/sdk/src/clients/secondary_market';
+export { AuctionClient } from '../../packages/sdk/src/clients/auction';
