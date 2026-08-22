@@ -324,7 +324,6 @@ export type ActionPayload =
   | { tag: 'SetBorrowRewardBps'; values: [number] }
   | { tag: 'SetDepositRewardBps'; values: [number] }
   // ── admin-key rotation (#1042) ──
-  | { tag: 'SetPoolAccessControl'; values: [string] }
   | { tag: 'SetInvoiceAccessControl'; values: [string] }
   | { tag: 'SetCreditScoreAccessControl'; values: [string] }
   | { tag: 'SetOracleRegistryAccessControl'; values: [string] }

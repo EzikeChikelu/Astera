@@ -202,7 +202,6 @@ function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
       const [bps] = action.values;
       return xdr.ScVal.scvVec([tag, nativeToScVal(bps, { type: 'u32' })]);
     }
-    case 'SetPoolAccessControl':
     case 'SetInvoiceAccessControl':
     case 'SetCreditScoreAccessControl':
     case 'SetOracleRegistryAccessControl':

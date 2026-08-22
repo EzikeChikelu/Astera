@@ -3901,7 +3901,6 @@ function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
     case 'SetBorrowRewardBps':
     case 'SetDepositRewardBps':
       return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u32' })]);
-    case 'SetPoolAccessControl':
     case 'SetInvoiceAccessControl':
     case 'SetCreditScoreAccessControl':
     case 'SetOracleRegistryAccessControl':

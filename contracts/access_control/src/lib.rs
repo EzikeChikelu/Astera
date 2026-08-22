@@ -150,7 +150,15 @@ pub enum ActionPayload {
     // `execute_cross_contract` like any other cross-contract action, but are
     // restricted to `Role::SuperAdmin` the same way self-management is (see
     // `requires_super_admin`).
-    SetPoolAccessControl(Address),
+    //
+    // `pool` deliberately has no rotation variant here: its wasm binary is
+    // already within ~300 bytes of Soroban's 200KB per-contract deploy cap
+    // on main (see contracts/.wasm-size-baseline.json's `pool` entry) —
+    // there's no room left for a new public entrypoint until `pool` is
+    // split further (following the precedent already set by
+    // `secondary_market` and `auction`). `pool`'s `set_access_control`
+    // bootstrap still works via the legacy admin key; only rotation
+    // through multisig is unavailable for now.
     SetInvoiceAccessControl(Address),
     SetCreditScoreAccessControl(Address),
     SetOracleRegistryAccessControl(Address),
@@ -246,7 +254,9 @@ pub trait PoolContract {
         approved: bool,
     );
     fn set_max_utilization_via_ac(env: Env, access_control: Address, max_bps: u32);
-    fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
+    // No set_access_control_via_ac here — pool has no wasm size budget
+    // left for a rotation entrypoint; see the comment on `ActionPayload`
+    // above.
 }
 
 #[contractclient(name = "InvoiceClient")]
@@ -845,9 +855,6 @@ impl AccessControlContract {
             ActionPayload::SetDepositRewardBps(bps) => {
                 ReferralClient::new(env, target).set_deposit_reward_bps_via_ac(this_contract, bps);
             }
-            ActionPayload::SetPoolAccessControl(new_ac) => {
-                PoolClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
-            }
             ActionPayload::SetInvoiceAccessControl(new_ac) => {
                 InvoiceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
             }
@@ -957,8 +964,7 @@ impl AccessControlContract {
         Self::is_self_management(action)
             || matches!(
                 action,
-                ActionPayload::SetPoolAccessControl(_)
-                    | ActionPayload::SetInvoiceAccessControl(_)
+                ActionPayload::SetInvoiceAccessControl(_)
                     | ActionPayload::SetCreditScoreAccessControl(_)
                     | ActionPayload::SetOracleRegistryAccessControl(_)
                     | ActionPayload::SetComplianceAccessControl(_)

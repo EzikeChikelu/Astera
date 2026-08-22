@@ -52,9 +52,12 @@ const TARGET_CONTRACTS: Record<TargetKey, { label: string; id: string }> = {
 
 // Which ActionPayload variants make sense for each target — mirrors the
 // `execute_cross_contract`/`execute_self_management` match arms in
-// contracts/access_control/src/lib.rs. Every target also accepts its own
-// `Set*AccessControl` rotation action (#1042) — proposed under
-// `Role::SuperAdmin`, same as the self-management actions.
+// contracts/access_control/src/lib.rs. Every target except `pool` also
+// accepts its own `Set*AccessControl` rotation action (#1042) — proposed
+// under `Role::SuperAdmin`, same as the self-management actions. `pool`
+// has no wasm size budget left for a new entrypoint (see
+// contracts/.wasm-size-baseline.json), so its rotation action was
+// dropped from this PR.
 const ACTIONS_BY_TARGET: Record<TargetKey, ActionPayload['tag'][]> = {
   pool: [
     'SetPaused',
@@ -65,7 +68,6 @@ const ACTIONS_BY_TARGET: Record<TargetKey, ActionPayload['tag'][]> = {
     'SetKycRequired',
     'SetInvestorKyc',
     'SetMaxUtilization',
-    'SetPoolAccessControl',
   ],
   invoice: [
     'SetPaused',
@@ -145,7 +147,6 @@ const ACTION_LABELS: Record<ActionPayload['tag'], string> = {
   SetReferralPool: 'Set Pool Address',
   SetBorrowRewardBps: 'Set Borrow Reward (bps)',
   SetDepositRewardBps: 'Set Deposit Reward (bps)',
-  SetPoolAccessControl: 'Rotate Access Control',
   SetInvoiceAccessControl: 'Rotate Access Control',
   SetCreditScoreAccessControl: 'Rotate Access Control',
   SetOracleRegistryAccessControl: 'Rotate Access Control',
@@ -231,7 +232,6 @@ function summarizeAction(action: ActionPayload): string {
       return `Set Borrow Reward → ${action.values[0]}bps`;
     case 'SetDepositRewardBps':
       return `Set Deposit Reward → ${action.values[0]}bps`;
-    case 'SetPoolAccessControl':
     case 'SetInvoiceAccessControl':
     case 'SetCreditScoreAccessControl':
     case 'SetOracleRegistryAccessControl':
@@ -402,7 +402,6 @@ export default function RolesAdminPage() {
       case 'SetBorrowRewardBps':
       case 'SetDepositRewardBps':
         return { tag: proposeAction, values: [num('bps')] };
-      case 'SetPoolAccessControl':
       case 'SetInvoiceAccessControl':
       case 'SetCreditScoreAccessControl':
       case 'SetOracleRegistryAccessControl':
@@ -950,7 +949,6 @@ function ActionFields({
       );
     case 'SetOracleRegistryInvoiceContract':
     case 'SetReferralPool':
-    case 'SetPoolAccessControl':
     case 'SetInvoiceAccessControl':
     case 'SetCreditScoreAccessControl':
     case 'SetOracleRegistryAccessControl':

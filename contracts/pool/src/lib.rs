@@ -4570,32 +4570,16 @@ impl FundingPool {
         Ok(())
     }
 
+    // #1042: no set_access_control_via_ac (rotation) entrypoint here —
+    // pool's wasm binary is already within ~300 bytes of Soroban's 200KB
+    // per-contract deploy cap on main (see
+    // contracts/.wasm-size-baseline.json), so there's no room for a new
+    // public entrypoint until pool is split further (as secondary_market
+    // and auction already were). The legacy-admin-gated bootstrap above
+    // still works; only rotation through multisig is unavailable for now.
+
     pub fn get_access_control(env: Env) -> Option<Address> {
         env.storage().instance().get(&ACCESS_CONTROL)
-    }
-
-    /// #1042: rotates the `access_control` trust anchor itself through the
-    /// currently-configured `access_control` contract rather than the
-    /// legacy admin key, so a compromised admin key alone can no longer
-    /// repoint or strip multisig gating once a deployment has adopted it.
-    /// `set_access_control` above (the single-key bootstrap path) is left
-    /// unchanged for first-time adoption.
-    pub fn set_access_control_via_ac(
-        env: Env,
-        access_control: Address,
-        new_access_control: Address,
-    ) -> Result<(), PoolError> {
-        access_control.require_auth();
-        Self::require_access_control(&env, &access_control)?;
-        bump_instance(&env);
-        env.storage()
-            .instance()
-            .set(&ACCESS_CONTROL, &new_access_control);
-        env.events().publish(
-            (EVT, symbol_short!("ac_rot")),
-            (access_control, new_access_control),
-        );
-        Ok(())
     }
 
     pub fn set_paused_via_ac(
