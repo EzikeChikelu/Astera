@@ -10,6 +10,11 @@ export const Errors = {
   8: { message: 'ListingNotSeller' },
   9: { message: 'TooManyListings' },
   10: { message: 'SettlementFailed' },
+  11: { message: 'OrderNotFound' },
+  12: { message: 'OrderNotOpen' },
+  13: { message: 'OrderNotOwner' },
+  14: { message: 'TooManyOrders' },
+  15: { message: 'InvalidExpiry' },
 } as const;
 
 export type SecondaryMarketErrorCode = keyof typeof Errors;

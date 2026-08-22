@@ -1,13 +1,21 @@
 #![no_std]
 
 // A `pool` satellite contract, split out because pool.wasm was over
-// Soroban's 200KB deploy limit. Covers two originally-pool-native features
-// that don't need pool's own trusted execution context:
+// Soroban's 200KB deploy limit. Covers three originally-pool-native
+// features that don't need pool's own trusted execution context:
 //   - the #1025 secondary market for pool positions and co-funding shares
 //     (listing lifecycle/storage lives here; the actual balance movement
 //     between buyer and seller happens on `pool` via the trusted
 //     `market_settle_listing` entrypoint, called after validating a listing
 //     is open)
+//   - the #1035 limit order book for the same pool positions/co-funding
+//     shares: resting bid/ask orders with partial fills and price-time
+//     priority, matched and settled (via the same `market_settle_listing`
+//     entrypoint, once per fill) directly inside `place_order`. Sits
+//     alongside the #1025 fixed-price listing flow above rather than
+//     replacing it — `list_position`/`buy_listing` are simpler
+//     take-it-or-leave-it listings some callers may still prefer, and nothing
+//     about the order book requires deprecating them.
 //   - the #865 withdrawal-wait/liquidity-forecast read-only analytics views,
 //     recomputed here from pool's public getters (`get_withdrawal_queue`,
 //     `get_token_totals`, `get_open_invoices_for_token`,
@@ -112,6 +120,11 @@ pub enum MarketError {
     /// contract's error domain (KYC, compliance, concentration cap, etc.) —
     /// callers that need the specific reason should simulate the transaction.
     SettlementFailed = 10,
+    OrderNotFound = 11,
+    OrderNotOpen = 12,
+    OrderNotOwner = 13,
+    TooManyOrders = 14,
+    InvalidExpiry = 15,
 }
 
 #[contracttype]
@@ -148,6 +161,63 @@ pub struct Listing {
     pub price: i128,
     pub created_at: u64,
     pub status: ListingStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OrderSide {
+    Bid,
+    Ask,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OrderStatus {
+    Open,
+    PartiallyFilled,
+    Filled,
+    Cancelled,
+    Expired,
+}
+
+/// A resting or partially-filled limit order placed by `place_order`.
+/// `price` is per-unit, scaled by `PRICE_SCALE` — e.g. a `price` of
+/// `PRICE_SCALE / 2` means half a token (or half a bps-unit's worth of
+/// token) per unit of `amount_or_bps`. Fills always execute at the resting
+/// (maker) order's price, never the incoming (taker) order's price, and are
+/// capped at `MAX_MATCHES_PER_CALL` per `place_order` call to bound gas —
+/// any unmatched remainder rests on the book rather than blocking on a full
+/// match. `expires_at` of `0` means the order never expires.
+#[contracttype]
+#[derive(Clone)]
+pub struct Order {
+    pub order_id: u64,
+    pub invoice_id: u64,
+    pub owner: Address,
+    pub token: Address,
+    pub kind: ListingKind,
+    pub side: OrderSide,
+    pub price: i128,
+    pub amount_or_bps: u64,
+    pub remaining: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub status: OrderStatus,
+}
+
+// Bundles `place_order`'s params (matches `OpenCoFundingRequest`'s existing
+// role of keeping multi-field contract entrypoints under clippy's
+// too-many-arguments threshold). `owner` stays a separate top-level param
+// since it's the one `require_auth()` is called on.
+#[contracttype]
+#[derive(Clone)]
+pub struct PlaceOrderRequest {
+    pub invoice_id: u64,
+    pub kind: ListingKind,
+    pub side: OrderSide,
+    pub amount_or_bps: u64,
+    pub price: i128,
+    pub expires_at: u64,
 }
 
 #[contracttype]
@@ -192,6 +262,24 @@ const EVT: Symbol = symbol_short!("market");
 // Maximum open listings per invoice to bound iteration gas cost.
 const MAX_LISTINGS_PER_INVOICE: u32 = 50;
 
+// #1035: order-book storage. Orders are keyed by their own id/counter,
+// separate from the #1025 listing id space above.
+const ORDER_DATA: Symbol = symbol_short!("ord_data"); // Map<u64 order_id, Order>
+const ORDER_COUNTER: Symbol = symbol_short!("ord_cnt");
+const ORDER_IDS_OWNER: Symbol = symbol_short!("ord_own"); // Map<Address owner, Vec<u64>>
+const BOOK_BIDS: Symbol = symbol_short!("bk_bids"); // Map<u64 book_key, Vec<u64> order_ids>
+const BOOK_ASKS: Symbol = symbol_short!("bk_asks"); // Map<u64 book_key, Vec<u64> order_ids>
+                                                    // Maximum resting orders per side of a single (invoice_id, kind) book, to
+                                                    // bound both book-depth reads and the matching-loop scan below.
+const MAX_ORDERS_PER_BOOK_SIDE: u32 = 30;
+// Maximum fills a single `place_order` call will attempt, to bound the
+// number of cross-contract settlement calls (and therefore gas) per call.
+const MAX_MATCHES_PER_CALL: u32 = 10;
+// `Order.price` is per-unit, scaled by this factor (matches Stellar's own
+// 7-decimal stroop convention) so fill prices for partial quantities don't
+// need fractional arithmetic.
+const PRICE_SCALE: i128 = 10_000_000;
+
 fn require_not_paused(env: &Env) {
     if env
         .storage()
@@ -200,6 +288,292 @@ fn require_not_paused(env: &Env) {
         .unwrap_or(false)
     {
         panic_with_error!(env, MarketError::ContractPaused);
+    }
+}
+
+/// Combines an invoice id and listing kind into a single order-book key —
+/// `CoFunding` and `SingleFunded` positions on the same invoice trade on
+/// separate books, since they're denominated differently (bps vs. raw
+/// token amount).
+fn book_key(invoice_id: u64, kind: &ListingKind) -> u64 {
+    let kind_bit = match kind {
+        ListingKind::CoFunding => 0u64,
+        ListingKind::SingleFunded => 1u64,
+    };
+    invoice_id.saturating_mul(2).saturating_add(kind_bit)
+}
+
+fn book_side_symbol(side: &OrderSide) -> Symbol {
+    match side {
+        OrderSide::Bid => BOOK_BIDS,
+        OrderSide::Ask => BOOK_ASKS,
+    }
+}
+
+fn load_order(env: &Env, order_id: u64) -> Option<Order> {
+    let all: Map<u64, Order> = env
+        .storage()
+        .persistent()
+        .get(&ORDER_DATA)
+        .unwrap_or_else(|| Map::new(env));
+    all.get(order_id)
+}
+
+fn save_order(env: &Env, order: &Order) {
+    let mut all: Map<u64, Order> = env
+        .storage()
+        .persistent()
+        .get(&ORDER_DATA)
+        .unwrap_or_else(|| Map::new(env));
+    all.set(order.order_id, order.clone());
+    env.storage().persistent().set(&ORDER_DATA, &all);
+}
+
+fn index_order_for_owner(env: &Env, owner: &Address, order_id: u64) {
+    let mut owner_map: Map<Address, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&ORDER_IDS_OWNER)
+        .unwrap_or_else(|| Map::new(env));
+    let mut ids: Vec<u64> = owner_map
+        .get(owner.clone())
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(order_id);
+    owner_map.set(owner.clone(), ids);
+    env.storage().instance().set(&ORDER_IDS_OWNER, &owner_map);
+}
+
+fn book_side_len(env: &Env, invoice_id: u64, kind: &ListingKind, side: &OrderSide) -> u32 {
+    let key = book_key(invoice_id, kind);
+    let book: Map<u64, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&book_side_symbol(side))
+        .unwrap_or_else(|| Map::new(env));
+    book.get(key).map(|ids| ids.len()).unwrap_or(0)
+}
+
+fn insert_into_book(env: &Env, order: &Order) {
+    let key = book_key(order.invoice_id, &order.kind);
+    let symbol = book_side_symbol(&order.side);
+    let mut book: Map<u64, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&symbol)
+        .unwrap_or_else(|| Map::new(env));
+    let mut ids: Vec<u64> = book.get(key).unwrap_or_else(|| Vec::new(env));
+    ids.push_back(order.order_id);
+    book.set(key, ids);
+    env.storage().instance().set(&symbol, &book);
+}
+
+fn remove_from_book(env: &Env, order: &Order) {
+    let key = book_key(order.invoice_id, &order.kind);
+    let symbol = book_side_symbol(&order.side);
+    let mut book: Map<u64, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&symbol)
+        .unwrap_or_else(|| Map::new(env));
+    if let Some(ids) = book.get(key) {
+        let mut updated = Vec::new(env);
+        for id in ids.iter() {
+            if id != order.order_id {
+                updated.push_back(id);
+            }
+        }
+        book.set(key, updated);
+        env.storage().instance().set(&symbol, &book);
+    }
+}
+
+/// Calls pool's trusted `market_settle_listing` entrypoint for a single
+/// fill. Returns `false` (rather than propagating an error) if settlement
+/// fails, so one unfillable counterparty (blocked by KYC, compliance, or
+/// the concentration cap) doesn't abort the whole matching pass — the
+/// caller just stops matching and leaves the resting order on the book for
+/// a future attempt.
+#[allow(clippy::too_many_arguments)]
+fn settle_fill(
+    env: &Env,
+    pool_id: &Address,
+    buyer: &Address,
+    seller: &Address,
+    invoice_id: u64,
+    is_co_funding: bool,
+    amount_or_bps: u64,
+    price: i128,
+) -> bool {
+    let settlement = PoolListingSettlement {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        invoice_id,
+        is_co_funding,
+        amount_or_bps,
+        price,
+    };
+    let args = Vec::from_array(
+        env,
+        [
+            env.current_contract_address().into_val(env),
+            settlement.into_val(env),
+        ],
+    );
+    let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+        pool_id,
+        &Symbol::new(env, "market_settle_listing"),
+        args,
+    );
+    matches!(result, Ok(Ok(())))
+}
+
+/// Bounded matching: scans the opposite side's resting orders for the same
+/// (invoice_id, kind) book — capped at `MAX_ORDERS_PER_BOOK_SIDE` candidates
+/// — and repeatedly settles against the best-priced crossing order (ties
+/// broken by lowest order id, i.e. time priority) until `taker` is fully
+/// filled, no crossing order remains, or `MAX_MATCHES_PER_CALL` fills have
+/// been made. Expired resting orders found along the way are pruned from
+/// the book as a side effect. Never returns an error: a Soroban transaction
+/// either commits or rolls back in full, so an error here would undo any
+/// fills already settled earlier in this same call — any unmatchable or
+/// unrepresentable candidate is skipped instead, same as a failed
+/// settlement.
+fn match_order(env: &Env, pool_id: &Address, taker: &mut Order, now: u64) {
+    let key = book_key(taker.invoice_id, &taker.kind);
+    let opposite_symbol = match taker.side {
+        OrderSide::Bid => BOOK_ASKS,
+        OrderSide::Ask => BOOK_BIDS,
+    };
+
+    let mut matches_made = 0u32;
+    while taker.remaining > 0 && matches_made < MAX_MATCHES_PER_CALL {
+        let ids: Vec<u64> = {
+            let book: Map<u64, Vec<u64>> = env
+                .storage()
+                .instance()
+                .get(&opposite_symbol)
+                .unwrap_or_else(|| Map::new(env));
+            book.get(key).unwrap_or_else(|| Vec::new(env))
+        };
+
+        let mut best: Option<Order> = None;
+        let mut expired: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            let Some(candidate) = load_order(env, id) else {
+                continue;
+            };
+            if candidate.status != OrderStatus::Open
+                && candidate.status != OrderStatus::PartiallyFilled
+            {
+                continue;
+            }
+            if candidate.expires_at != 0 && candidate.expires_at <= now {
+                expired.push_back(id);
+                continue;
+            }
+            let crosses = match taker.side {
+                OrderSide::Bid => candidate.price <= taker.price,
+                OrderSide::Ask => candidate.price >= taker.price,
+            };
+            if !crosses {
+                continue;
+            }
+            let is_better = match &best {
+                None => true,
+                Some(current) => match taker.side {
+                    OrderSide::Bid => {
+                        candidate.price < current.price
+                            || (candidate.price == current.price
+                                && candidate.order_id < current.order_id)
+                    }
+                    OrderSide::Ask => {
+                        candidate.price > current.price
+                            || (candidate.price == current.price
+                                && candidate.order_id < current.order_id)
+                    }
+                },
+            };
+            if is_better {
+                best = Some(candidate);
+            }
+        }
+
+        for id in expired.iter() {
+            if let Some(mut stale) = load_order(env, id) {
+                stale.status = OrderStatus::Expired;
+                save_order(env, &stale);
+                remove_from_book(env, &stale);
+                env.events().publish(
+                    (EVT, symbol_short!("ord_exp")),
+                    (stale.order_id, stale.invoice_id, stale.owner.clone()),
+                );
+            }
+        }
+
+        let Some(mut maker) = best else {
+            break;
+        };
+
+        let (buyer, seller) = match taker.side {
+            OrderSide::Bid => (taker.owner.clone(), maker.owner.clone()),
+            OrderSide::Ask => (maker.owner.clone(), taker.owner.clone()),
+        };
+        matches_made = matches_made.saturating_add(1);
+        if buyer == seller {
+            // Can't self-match (e.g. a taker crossing their own resting
+            // order) — skip this candidate for this pass and keep looking.
+            continue;
+        }
+
+        let fill_qty = taker.remaining.min(maker.remaining);
+        let Some(total_price) = maker
+            .price
+            .checked_mul(fill_qty as i128)
+            .and_then(|v| v.checked_div(PRICE_SCALE))
+        else {
+            // Price*qty doesn't fit an i128 — can't represent this fill.
+            // Stop matching rather than erroring out the whole call.
+            break;
+        };
+
+        let settled = settle_fill(
+            env,
+            pool_id,
+            &buyer,
+            &seller,
+            taker.invoice_id,
+            taker.kind == ListingKind::CoFunding,
+            fill_qty,
+            total_price,
+        );
+        if !settled {
+            break;
+        }
+
+        maker.remaining = maker.remaining.saturating_sub(fill_qty);
+        maker.status = if maker.remaining == 0 {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        save_order(env, &maker);
+        if maker.remaining == 0 {
+            remove_from_book(env, &maker);
+        }
+        taker.remaining = taker.remaining.saturating_sub(fill_qty);
+
+        env.events().publish(
+            (EVT, symbol_short!("ord_fill")),
+            (
+                taker.order_id,
+                maker.order_id,
+                taker.invoice_id,
+                buyer,
+                seller,
+                fill_qty,
+                total_price,
+            ),
+        );
     }
 }
 
@@ -516,6 +890,239 @@ impl SecondaryMarket {
             .get(&LISTING_IDS_SELLER)
             .unwrap_or_else(|| Map::new(&env));
         sel_listings.get(seller).unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Place a resting limit order (bid or ask) on the order book for an
+    /// invoice's pool position or co-funding share. Matches immediately
+    /// against crossing resting orders on the opposite side, best price
+    /// first with ties broken by time priority (lowest order id), up to
+    /// `MAX_MATCHES_PER_CALL` fills per call; any unfilled remainder rests
+    /// on the book. `price` is per-unit, scaled by `PRICE_SCALE`.
+    /// `expires_at` is a ledger timestamp after which the order can no
+    /// longer match (0 means no expiry). A match that fails settlement
+    /// (e.g. the counterparty no longer clears KYC/compliance, or the
+    /// concentration cap) is skipped rather than aborting the whole call.
+    pub fn place_order(
+        env: Env,
+        owner: Address,
+        request: PlaceOrderRequest,
+    ) -> Result<u64, MarketError> {
+        let PlaceOrderRequest {
+            invoice_id,
+            kind,
+            side,
+            amount_or_bps,
+            price,
+            expires_at,
+        } = request;
+        owner.require_auth();
+        require_not_paused(&env);
+
+        if amount_or_bps == 0 {
+            return Err(MarketError::ZeroAmount);
+        }
+        if price <= 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+        let now = env.ledger().timestamp();
+        if expires_at != 0 && expires_at <= now {
+            return Err(MarketError::InvalidExpiry);
+        }
+        // Bound the book upfront — if it's already full on this side, an
+        // order that doesn't fully match would have nowhere to rest. A
+        // fully-matching order is rejected too in that case; this mirrors
+        // `list_position`'s simple upfront gas-bound cap rather than trying
+        // to predict whether matching will free up room.
+        if book_side_len(&env, invoice_id, &kind, &side) >= MAX_ORDERS_PER_BOOK_SIDE {
+            return Err(MarketError::TooManyOrders);
+        }
+
+        let pool_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .ok_or(MarketError::NotInitialized)?;
+
+        let record: Option<FundedInvoiceView> = env.invoke_contract(
+            &pool_id,
+            &Symbol::new(&env, "get_funded_invoice"),
+            Vec::from_array(&env, [invoice_id.into_val(&env)]),
+        );
+        let record = record.ok_or(MarketError::InvalidAmount)?;
+        let token = record.token.clone();
+
+        // Best-effort holding check, ask side only — a bid only needs
+        // available cash, checked at settlement. Mirrors `list_position`'s
+        // ownership pre-check; settlement re-validates independently
+        // regardless.
+        if side == OrderSide::Ask {
+            match kind {
+                ListingKind::CoFunding => {
+                    let owner_bps: u32 = env.invoke_contract(
+                        &pool_id,
+                        &Symbol::new(&env, "get_co_fund_share"),
+                        Vec::from_array(&env, [invoice_id.into_val(&env), owner.into_val(&env)]),
+                    );
+                    if amount_or_bps as u32 > owner_bps || owner_bps == 0 {
+                        return Err(MarketError::InvalidAmount);
+                    }
+                }
+                ListingKind::SingleFunded => {
+                    if record.co_funding_round_id.is_some() {
+                        return Err(MarketError::InvalidAmount);
+                    }
+                    let (_available, deployed): (i128, i128) = env.invoke_contract(
+                        &pool_id,
+                        &Symbol::new(&env, "get_investor_position"),
+                        Vec::from_array(&env, [owner.into_val(&env), token.into_val(&env)]),
+                    );
+                    if (amount_or_bps as i128) > deployed || deployed == 0 {
+                        return Err(MarketError::InvalidAmount);
+                    }
+                }
+            }
+        }
+
+        let order_id: u64 = env
+            .storage()
+            .instance()
+            .get(&ORDER_COUNTER)
+            .unwrap_or(0u64)
+            .checked_add(1)
+            .ok_or(MarketError::InvalidAmount)?;
+        env.storage().instance().set(&ORDER_COUNTER, &order_id);
+
+        let mut order = Order {
+            order_id,
+            invoice_id,
+            owner: owner.clone(),
+            token,
+            kind,
+            side,
+            price,
+            amount_or_bps,
+            remaining: amount_or_bps,
+            created_at: now,
+            expires_at,
+            status: OrderStatus::Open,
+        };
+
+        env.events().publish(
+            (EVT, symbol_short!("ord_open")),
+            (
+                order.order_id,
+                order.invoice_id,
+                order.owner.clone(),
+                order.side.clone(),
+                order.amount_or_bps,
+                order.price,
+            ),
+        );
+
+        match_order(&env, &pool_id, &mut order, now);
+
+        order.status = if order.remaining == 0 {
+            OrderStatus::Filled
+        } else if order.remaining == order.amount_or_bps {
+            OrderStatus::Open
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        if order.remaining > 0 {
+            insert_into_book(&env, &order);
+        }
+        save_order(&env, &order);
+        index_order_for_owner(&env, &owner, order_id);
+
+        Ok(order_id)
+    }
+
+    /// Cancel a resting or partially-filled order. Only the original owner
+    /// may cancel.
+    pub fn cancel_order(env: Env, owner: Address, order_id: u64) -> Result<(), MarketError> {
+        owner.require_auth();
+        require_not_paused(&env);
+
+        let mut order = load_order(&env, order_id).ok_or(MarketError::OrderNotFound)?;
+        if order.owner != owner {
+            return Err(MarketError::OrderNotOwner);
+        }
+        if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+            return Err(MarketError::OrderNotOpen);
+        }
+
+        order.status = OrderStatus::Cancelled;
+        save_order(&env, &order);
+        remove_from_book(&env, &order);
+
+        env.events().publish(
+            (EVT, symbol_short!("ord_cncl")),
+            (order_id, order.invoice_id, owner),
+        );
+        Ok(())
+    }
+
+    /// Permissionlessly expire a resting order past its `expires_at`.
+    /// Anyone may call this — it only prunes stale book state, no funds
+    /// move. Mirrors this codebase's permissionless-trigger convention for
+    /// time-based state transitions nobody else is incentivized to trigger.
+    pub fn expire_order(env: Env, order_id: u64) -> Result<(), MarketError> {
+        require_not_paused(&env);
+
+        let mut order = load_order(&env, order_id).ok_or(MarketError::OrderNotFound)?;
+        if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+            return Err(MarketError::OrderNotOpen);
+        }
+        let now = env.ledger().timestamp();
+        if order.expires_at == 0 || order.expires_at > now {
+            return Err(MarketError::InvalidExpiry);
+        }
+
+        order.status = OrderStatus::Expired;
+        save_order(&env, &order);
+        remove_from_book(&env, &order);
+
+        env.events().publish(
+            (EVT, symbol_short!("ord_exp")),
+            (order_id, order.invoice_id, order.owner),
+        );
+        Ok(())
+    }
+
+    /// Read a single order by ID. Returns `None` if not found.
+    pub fn get_order(env: Env, order_id: u64) -> Option<Order> {
+        load_order(&env, order_id)
+    }
+
+    /// Current resting order IDs for an invoice's order book, as
+    /// `(bid_ids, ask_ids)` in insertion (time-priority) order. Bounded to
+    /// `MAX_ORDERS_PER_BOOK_SIDE` per side.
+    pub fn get_order_book(env: Env, invoice_id: u64, kind: ListingKind) -> (Vec<u64>, Vec<u64>) {
+        let key = book_key(invoice_id, &kind);
+        let bids: Map<u64, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&BOOK_BIDS)
+            .unwrap_or_else(|| Map::new(&env));
+        let asks: Map<u64, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&BOOK_ASKS)
+            .unwrap_or_else(|| Map::new(&env));
+        (
+            bids.get(key).unwrap_or_else(|| Vec::new(&env)),
+            asks.get(key).unwrap_or_else(|| Vec::new(&env)),
+        )
+    }
+
+    /// All order IDs ever placed by `owner` (any status).
+    pub fn list_orders_for_owner(env: Env, owner: Address) -> Vec<u64> {
+        let owner_map: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&ORDER_IDS_OWNER)
+            .unwrap_or_else(|| Map::new(&env));
+        owner_map.get(owner).unwrap_or_else(|| Vec::new(&env))
     }
 
     /// #865: predict how long `investor`'s (already-queued) withdrawal

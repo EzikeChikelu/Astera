@@ -121,6 +121,31 @@ export interface Listing {
   status: ListingStatus;
 }
 
+// #1035: limit order book, sitting alongside the #1025 fixed-price listing
+// flow above rather than replacing it.
+
+export type OrderSide = 'Bid' | 'Ask';
+
+export type OrderStatus = 'Open' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Expired';
+
+/** A resting or partially-filled limit order created by `place_order`. */
+export interface Order {
+  orderId: number;
+  invoiceId: number;
+  owner: string;
+  token: string;
+  kind: ListingKind;
+  side: OrderSide;
+  /** Per-unit price, scaled by 1e7 — not a flat total like `Listing.price`. */
+  price: bigint;
+  amountOrBps: bigint;
+  remaining: bigint;
+  createdAt: number;
+  /** Ledger timestamp after which the order can no longer match; 0 means no expiry. */
+  expiresAt: number;
+  status: OrderStatus;
+}
+
 // ── #863: utilization-driven kinked interest-rate model ─────────────────────
 
 /** Curve parameters for one token, as returned by `get_rate_model_config`. */
