@@ -1756,7 +1756,17 @@ impl InvoiceContract {
 
         env.events().publish(
             (EVT, symbol_short!("created")),
-            (id, owner, amount, metadata_uri, env.ledger().timestamp()),
+            // #1041: `debtor` appended as a new trailing field so existing
+            // positional consumers (indices 0-4) are unaffected — the indexer
+            // needs it to aggregate per-SME debtor-concentration risk off-chain.
+            (
+                id,
+                owner,
+                amount,
+                metadata_uri,
+                env.ledger().timestamp(),
+                invoice.debtor.clone(),
+            ),
         );
         id
     }
