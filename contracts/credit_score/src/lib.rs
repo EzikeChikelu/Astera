@@ -421,7 +421,6 @@ pub struct SimulateScoreCacheEntry {
 pub struct RiskSignalData {
     pub debtor_concentration_bps: u32,
     pub invoice_size_risk_bps: u32,
-    pub submitted_at: u64,
 }
 
 /// Returned by `get_credit_score`. Includes the current config version alongside the
@@ -1570,7 +1569,6 @@ impl CreditScoreContract {
         let signal = RiskSignalData {
             debtor_concentration_bps,
             invoice_size_risk_bps,
-            submitted_at: env.ledger().timestamp(),
         };
         env.storage()
             .persistent()
@@ -1579,11 +1577,6 @@ impl CreditScoreContract {
             (EVT, Symbol::new(&env, "risk_sig")),
             (sme, debtor_concentration_bps, invoice_size_risk_bps),
         );
-    }
-
-    /// #1041: the latest risk signal submitted for `sme`, if any.
-    pub fn get_risk_signal(env: Env, sme: Address) -> Option<RiskSignalData> {
-        env.storage().persistent().get(&DataKey::RiskSignal(sme))
     }
 
     /// Set the late-payment threshold (in days) used in score calculation.
@@ -4747,9 +4740,10 @@ mod test {
         );
 
         client.submit_risk_signal(&admin, &sme, &6_000u32, &1_000u32);
-        let signal = client.get_risk_signal(&sme).unwrap();
-        assert_eq!(signal.debtor_concentration_bps, 6_000);
-        assert_eq!(signal.invoice_size_risk_bps, 1_000);
+        // 6_000 bps exceeds the default 5_000 bps debtor-concentration
+        // threshold, so a successful submission is observable via the
+        // resulting risk_adjustment_pts penalty.
+        assert!(client.get_credit_score(&sme).risk_adjustment_pts < 0);
     }
 
     #[test]

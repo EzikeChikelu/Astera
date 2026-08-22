@@ -25,13 +25,6 @@ type CreditScoreResponse = Record<string, unknown> & {
   finalScore: number;
 };
 
-/** #1041: off-chain-computed risk signal for an SME (see `submit_risk_signal`). */
-interface RiskSignalData {
-  debtorConcentrationBps: number;
-  invoiceSizeRiskBps: number;
-  submittedAt: number;
-}
-
 // #1041: fixed to match the real contract enum (contracts/credit_score/src/lib.rs
 // `AttestorType`) — the previous union here didn't match any of the four real
 // variants except CreditBureau, silently misencoding the other three.
@@ -85,14 +78,6 @@ function creditScoreResponseFromScVal(raw: Record<string, unknown>): CreditScore
     riskAdjustmentPts: Number(raw.risk_adjustment_pts),
     trendAdjustmentPts: Number(raw.trend_adjustment_pts),
     finalScore: Number(raw.final_score),
-  };
-}
-
-function riskSignalDataFromScVal(raw: Record<string, unknown>): RiskSignalData {
-  return {
-    debtorConcentrationBps: Number(raw.debtor_concentration_bps),
-    invoiceSizeRiskBps: Number(raw.invoice_size_risk_bps),
-    submittedAt: Number(raw.submitted_at),
   };
 }
 
@@ -303,24 +288,13 @@ export class CreditScoreClient extends BaseClient {
       );
     }
 
-    /** #1041: the latest off-chain-computed risk signal for `sme`, if any. */
-    async getRiskSignal(sme: string): Promise<RiskSignalData | null> {
-      const sim = await this.simulate('get_risk_signal', [
-        new Address(sme).toScVal(),
-      ]);
-      if (StellarRpc.Api.isSimulationError(sim)) {
-        throw new Error(`Simulation failed: ${sim.error}`);
-      }
-      const raw = scValToNative(sim.result!.retval);
-      if (!raw) return null;
-      return riskSignalDataFromScVal(raw as Record<string, unknown>);
-    }
-
     /**
      * #1041: submit (or replace) an SME's off-chain-computed risk signal.
      * Admin-only (reuses the existing admin role rather than a dedicated
      * keeper address, to keep the contract's compiled size within CI's
-     * growth budget).
+     * growth budget). There is no on-chain read for this — read the
+     * indexer's `/credit-score/:sme/risk-signals` endpoint instead, which is
+     * the same data this submission is sourced from.
      */
     async submitRiskSignal(params: {
       signer: Signer;
