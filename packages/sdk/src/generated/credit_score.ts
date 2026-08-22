@@ -24,9 +24,8 @@ export const Errors = {
   22: { message: 'UnauthorizedDisputeCaller' },
   23: { message: 'DisputeNotFound' },
   24: { message: 'InvalidAttestationConfig' },
-  // #1041: credit_score v2 — risk signals + trend/attestor hardening
-  27: { message: 'UnauthorizedRiskKeeper' },
-  28: { message: 'InvalidRiskSignal' },
+  // #1041: credit_score v2 — risk signals + trend/dispute-cache hardening
+  27: { message: 'InvalidRiskSignal' },
 } as const;
 
 export type CreditScoreErrorCode = keyof typeof Errors;

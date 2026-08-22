@@ -224,9 +224,7 @@ proptest! {
             );
         }
 
-        let keeper = Address::generate(&env);
-        client.set_risk_signal_keeper(&admin, &keeper);
-        client.submit_risk_signal(&keeper, &sme, &debtor_concentration_bps, &invoice_size_risk_bps);
+        client.submit_risk_signal(&admin, &sme, &debtor_concentration_bps, &invoice_size_risk_bps);
 
         let resp = client.get_credit_score(&sme);
         prop_assert!(resp.final_score >= MIN_SCORE && resp.final_score <= MAX_SCORE);

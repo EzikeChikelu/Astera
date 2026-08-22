@@ -303,26 +303,6 @@ export class CreditScoreClient extends BaseClient {
       );
     }
 
-    /** #1041: governance-configurable credibility weight, settable after registration. */
-    async setAttestorWeight(params: {
-      signer: Signer;
-      admin: string;
-      address: string;
-      weightBps: number;
-      onProgress?: (progress: TransactionProgress) => void;
-    }): Promise<string> {
-      return this.buildAndSendTx(
-        params.admin,
-        'set_attestor_weight',
-        [
-          new Address(params.admin).toScVal(),
-          new Address(params.address).toScVal(),
-          nativeToScVal(params.weightBps, { type: 'u32' }),
-        ],
-        params.onProgress,
-      );
-    }
-
     /** #1041: the latest off-chain-computed risk signal for `sme`, if any. */
     async getRiskSignal(sme: string): Promise<RiskSignalData | null> {
       const sim = await this.simulate('get_risk_signal', [
@@ -336,38 +316,25 @@ export class CreditScoreClient extends BaseClient {
       return riskSignalDataFromScVal(raw as Record<string, unknown>);
     }
 
-    /** #1041: authorize the off-chain keeper permitted to call `submitRiskSignal`. */
-    async setRiskSignalKeeper(params: {
-      signer: Signer;
-      admin: string;
-      keeper: string;
-      onProgress?: (progress: TransactionProgress) => void;
-    }): Promise<string> {
-      return this.buildAndSendTx(
-        params.admin,
-        'set_risk_signal_keeper',
-        [
-          new Address(params.admin).toScVal(),
-          new Address(params.keeper).toScVal(),
-        ],
-        params.onProgress,
-      );
-    }
-
-    /** #1041: submit (or replace) an SME's off-chain-computed risk signal. Keeper-only. */
+    /**
+     * #1041: submit (or replace) an SME's off-chain-computed risk signal.
+     * Admin-only (reuses the existing admin role rather than a dedicated
+     * keeper address, to keep the contract's compiled size within CI's
+     * growth budget).
+     */
     async submitRiskSignal(params: {
       signer: Signer;
-      keeper: string;
+      admin: string;
       sme: string;
       debtorConcentrationBps: number;
       invoiceSizeRiskBps: number;
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> {
       return this.buildAndSendTx(
-        params.keeper,
+        params.admin,
         'submit_risk_signal',
         [
-          new Address(params.keeper).toScVal(),
+          new Address(params.admin).toScVal(),
           new Address(params.sme).toScVal(),
           nativeToScVal(params.debtorConcentrationBps, { type: 'u32' }),
           nativeToScVal(params.invoiceSizeRiskBps, { type: 'u32' }),
