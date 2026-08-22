@@ -20,6 +20,18 @@ interface Props {
   paymentHistory?: PaymentRecord[];
   previousScore?: number;
   isStale?: boolean;
+  /**
+   * #1041: the contract's real `final_score` (blended score + debtor-
+   * concentration/invoice-size risk + repayment-trend adjustments), when the
+   * caller has already fetched it (e.g. via `getCreditScoreStatus`). When
+   * provided, this replaces the locally-estimated `score` below as the
+   * headline number — the local estimate remains the fallback for callers
+   * that haven't wired up the real fetch, so existing behavior is unchanged
+   * when this prop is omitted.
+   */
+  finalScore?: number;
+  riskAdjustmentPts?: number;
+  trendAdjustmentPts?: number;
 }
 
 const SCORE_TIERS = [
@@ -52,13 +64,17 @@ export default function CreditScore({
   paymentHistory = [],
   previousScore,
   isStale = false,
+  finalScore,
+  riskAdjustmentPts = 0,
+  trendAdjustmentPts = 0,
 }: Props) {
   const total = paid + funded + defaulted;
   const [showImprovement, setShowImprovement] = useState(false);
 
   const repaymentRate = total > 0 ? paid / total : 0;
   const volumeBonus = Math.min(Number(totalVolume) / 1e10, 50);
-  const score = Math.round(300 + repaymentRate * 500 + volumeBonus);
+  const estimatedScore = Math.round(300 + repaymentRate * 500 + volumeBonus);
+  const score = finalScore ?? estimatedScore;
 
   const scoreChange = previousScore ? score - previousScore : null;
   const hasHistory = total > 0;
@@ -239,6 +255,15 @@ export default function CreditScore({
             >
               {scoreChange >= 0 ? '+' : ''}
               {scoreChange} since last invoice
+            </div>
+          )}
+          {(riskAdjustmentPts !== 0 || trendAdjustmentPts !== 0) && (
+            <div className="text-xs text-[var(--muted)] mt-1">
+              {riskAdjustmentPts !== 0 &&
+                `Risk adjustment: ${riskAdjustmentPts > 0 ? '+' : ''}${riskAdjustmentPts} pts`}
+              {riskAdjustmentPts !== 0 && trendAdjustmentPts !== 0 && ' · '}
+              {trendAdjustmentPts !== 0 &&
+                `Trend: ${trendAdjustmentPts > 0 ? '+' : ''}${trendAdjustmentPts} pts`}
             </div>
           )}
           <div className="text-xs text-[var(--muted)]/60 mt-2">Based on {total} invoice(s)</div>

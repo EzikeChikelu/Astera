@@ -2380,9 +2380,13 @@ export async function buildLiquidateCollateralTx(params: {
 
 // ---- Credit Score Contract ----
 
-export async function getCreditScoreStatus(
-  sme: string,
-): Promise<{ isStale: boolean; score: number } | null> {
+export async function getCreditScoreStatus(sme: string): Promise<{
+  isStale: boolean;
+  score: number;
+  finalScore: number;
+  riskAdjustmentPts: number;
+  trendAdjustmentPts: number;
+} | null> {
   if (!CREDIT_SCORE_CONTRACT_ID) return null;
   try {
     const sim = await simulateTx(
@@ -2392,8 +2396,21 @@ export async function getCreditScoreStatus(
       sme,
     );
     const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-    const data = scValToNative(result!.retval) as { score: number; is_stale: boolean };
-    return { isStale: Boolean(data.is_stale), score: Number(data.score) };
+    const data = scValToNative(result!.retval) as {
+      score: number;
+      is_stale: boolean;
+      final_score?: number;
+      risk_adjustment_pts?: number;
+      trend_adjustment_pts?: number;
+    };
+    return {
+      isStale: Boolean(data.is_stale),
+      score: Number(data.score),
+      // #1041: fall back to `score` for a contract predating these fields.
+      finalScore: Number(data.final_score ?? data.score),
+      riskAdjustmentPts: Number(data.risk_adjustment_pts ?? 0),
+      trendAdjustmentPts: Number(data.trend_adjustment_pts ?? 0),
+    };
   } catch {
     return null;
   }
@@ -2453,6 +2470,9 @@ function fullCreditScoreFromScVal(raw: Record<string, unknown>): FullCreditScore
     configVersion: Number(raw.config_version),
     isStale: Boolean(raw.is_stale),
     blendedScore: Number(raw.blended_score),
+    riskAdjustmentPts: Number(raw.risk_adjustment_pts),
+    trendAdjustmentPts: Number(raw.trend_adjustment_pts),
+    finalScore: Number(raw.final_score),
   };
 }
 

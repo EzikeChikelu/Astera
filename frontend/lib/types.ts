@@ -365,6 +365,12 @@ export interface FullCreditScore {
   configVersion: number;
   isStale: boolean;
   blendedScore: number;
+  /** #1041: point delta from debtor-concentration/invoice-size risk signals. */
+  riskAdjustmentPts: number;
+  /** #1041: point delta from the repayment-trend factor. */
+  trendAdjustmentPts: number;
+  /** #1041: blendedScore + riskAdjustmentPts + trendAdjustmentPts, clamped. */
+  finalScore: number;
 }
 
 /** #799: referral program stats for a referrer, from `referral.get_stats()`. */

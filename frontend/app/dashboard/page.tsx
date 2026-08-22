@@ -63,6 +63,11 @@ function DashboardContent() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isScoreStale, setIsScoreStale] = useState(false);
+  const [scoreFactors, setScoreFactors] = useState<{
+    finalScore: number;
+    riskAdjustmentPts: number;
+    trendAdjustmentPts: number;
+  } | null>(null);
   const [dashboardTab, setDashboardTab] = useState<'borrower' | 'lender'>('borrower');
 
   const [search, setSearch] = useState('');
@@ -273,7 +278,13 @@ function DashboardContent() {
   useEffect(() => {
     if (!wallet.address) return;
     getCreditScoreStatus(wallet.address).then((result) => {
-      if (result) setIsScoreStale(result.isStale);
+      if (!result) return;
+      setIsScoreStale(result.isStale);
+      setScoreFactors({
+        finalScore: result.finalScore,
+        riskAdjustmentPts: result.riskAdjustmentPts,
+        trendAdjustmentPts: result.trendAdjustmentPts,
+      });
     });
   }, [wallet.address]);
 
@@ -698,6 +709,9 @@ function DashboardContent() {
                       defaulted={stats.defaulted}
                       totalVolume={stats.totalVolume}
                       isStale={isScoreStale}
+                      finalScore={scoreFactors?.finalScore}
+                      riskAdjustmentPts={scoreFactors?.riskAdjustmentPts}
+                      trendAdjustmentPts={scoreFactors?.trendAdjustmentPts}
                       paymentHistory={invoices
                         .filter(
                           (row) =>
