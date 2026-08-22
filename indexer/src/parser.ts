@@ -62,14 +62,20 @@ const ORACLE_REGISTRY_EVENT_TYPES = new Set([
   'unpaused',
 ]);
 
-// #1025: secondary market events, now emitted by the secondary_market
+// #1025/#1035: secondary market events, now emitted by the secondary_market
 // contract (see #1044) under its own "market" topic rather than pool's
-// "pool" topic. Classified as 'pool' below to keep the existing API
-// category consumers already filter on.
+// "pool" topic — the #1025 fixed-price listing lifecycle (lst_*) and the
+// #1035 limit order book (ord_*) sit side by side in the same contract.
+// Classified as 'pool' below to keep the existing API category consumers
+// already filter on.
 const SECONDARY_MARKET_EVENT_TYPES = new Set([
   'lst_open',
   'lst_cncl',
   'lst_buy',
+  'ord_open',
+  'ord_cncl',
+  'ord_fill',
+  'ord_exp',
 ]);
 
 // #867: compliance contract emits under the "COMPLY" topic
@@ -269,6 +275,22 @@ function extractActor(contractType: string, eventType: string, value: any): stri
           if (isStellarAddress(value[2])) return value[2];
           break;
         case 'lst_buy':
+          if (isStellarAddress(value[3])) return value[3];
+          break;
+      }
+    } else if (contractType === 'market') {
+      // #1035: secondary_market publishes its own events under a "market"
+      // topic (not "POOL") — ord_open/ord_cncl/ord_exp carry the order
+      // owner at value[2] (order_id, invoice_id, owner, ...), and ord_fill
+      // carries both sides of the trade, with the buyer first at value[3]
+      // (taker_order_id, maker_order_id, invoice_id, buyer, seller, ...).
+      switch (eventType) {
+        case 'ord_open':
+        case 'ord_cncl':
+        case 'ord_exp':
+          if (isStellarAddress(value[2])) return value[2];
+          break;
+        case 'ord_fill':
           if (isStellarAddress(value[3])) return value[3];
           break;
       }
