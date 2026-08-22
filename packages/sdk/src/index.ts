@@ -8,6 +8,7 @@ export { ArbitrationClient, computeCommitHash, generateSalt } from './clients/ar
 export { TrancheClient } from './clients/tranche';
 export type { TrancheInvestorPosition } from './clients/tranche';
 export { AccessControlClient } from './clients/access_control';
+export { AuctionClient } from './clients/auction';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';

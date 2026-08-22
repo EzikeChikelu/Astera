@@ -121,6 +121,31 @@ export interface Listing {
   status: ListingStatus;
 }
 
+// #1035: limit order book, sitting alongside the #1025 fixed-price listing
+// flow above rather than replacing it.
+
+export type OrderSide = 'Bid' | 'Ask';
+
+export type OrderStatus = 'Open' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Expired';
+
+/** A resting or partially-filled limit order created by `place_order`. */
+export interface Order {
+  orderId: number;
+  invoiceId: number;
+  owner: string;
+  token: string;
+  kind: ListingKind;
+  side: OrderSide;
+  /** Per-unit price, scaled by 1e7 — not a flat total like `Listing.price`. */
+  price: bigint;
+  amountOrBps: bigint;
+  remaining: bigint;
+  createdAt: number;
+  /** Ledger timestamp after which the order can no longer match; 0 means no expiry. */
+  expiresAt: number;
+  status: OrderStatus;
+}
+
 // ── #863: utilization-driven kinked interest-rate model ─────────────────────
 
 /** Curve parameters for one token, as returned by `get_rate_model_config`. */
@@ -250,6 +275,17 @@ export interface CollateralDeposit {
   token: string;
   amount: bigint;
   settled: boolean;
+  postedAt: number;
+  releasedAt: number;
+  seizedAt: number;
+  collateralBpsAtDeposit: number;
+  thresholdAtDeposit: bigint;
+}
+
+// #1036: multi-asset, oracle-priced collateral risk response
+export interface CollateralRiskConfig {
+  dangerBps: number;
+  gracePeriodSecs: number;
 }
 
 // #861: N-of-M staked oracle consensus network
@@ -387,6 +423,38 @@ export type ActionPayload =
   | { tag: 'SetLateThreshold'; values: [bigint] }
   | { tag: 'SetScoreThresholds'; values: [number, number, number, number] }
   | { tag: 'RegisterAttestor'; values: [string, number, number] }
+  // ── oracle_registry (#1042) ──
+  | { tag: 'SetOracleRegistryInvoiceContract'; values: [string] }
+  | { tag: 'SetOracleRegistryTreasury'; values: [string | undefined] }
+  | {
+      tag: 'SetOracleRegistryConfig';
+      values: [bigint, number, number, bigint, bigint];
+    }
+  | { tag: 'SetOracleRegistryPaused'; values: [boolean] }
+  | { tag: 'SlashOracle'; values: [string, number, bigint, string] }
+  | { tag: 'AdminResolveRound'; values: [bigint, boolean, string] }
+  // ── compliance (#1042) ──
+  | { tag: 'SetCompliancePaused'; values: [boolean] }
+  | { tag: 'RegisterScreener'; values: [string] }
+  | { tag: 'ConfirmScreenerRegistration'; values: [string] }
+  | { tag: 'DeregisterScreener'; values: [string] }
+  | { tag: 'SetRescreeningInterval'; values: [bigint] }
+  | { tag: 'SetScreenerTimelock'; values: [bigint] }
+  // ── governance (#1042) ──
+  | { tag: 'UpdateGovernanceConfig'; values: [number, number] }
+  | { tag: 'SetCategoryQuorum'; values: [number, number] }
+  // ── referral (#1042) ──
+  | { tag: 'SetReferralPaused'; values: [boolean] }
+  | { tag: 'SetReferralPool'; values: [string] }
+  | { tag: 'SetBorrowRewardBps'; values: [number] }
+  | { tag: 'SetDepositRewardBps'; values: [number] }
+  // ── admin-key rotation (#1042) ──
+  | { tag: 'SetInvoiceAccessControl'; values: [string] }
+  | { tag: 'SetCreditScoreAccessControl'; values: [string] }
+  | { tag: 'SetOracleRegistryAccessControl'; values: [string] }
+  | { tag: 'SetComplianceAccessControl'; values: [string] }
+  | { tag: 'SetGovernanceAccessControl'; values: [string] }
+  | { tag: 'SetReferralAccessControl'; values: [string] }
   | { tag: 'AddSigner'; values: [Role, string] }
   | { tag: 'RemoveSigner'; values: [Role, string] }
   | { tag: 'SetThreshold'; values: [Role, number] };

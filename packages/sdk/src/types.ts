@@ -108,7 +108,14 @@ export interface FundedInvoice {
   coFundingRoundId?: bigint;
 }
 
-/** #1037: seize/liquidation status for a funded invoice's posted collateral. */
+export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
+
+// #1036: multi-asset, oracle-priced collateral risk response
+export interface CollateralConfig {
+  threshold: bigint;
+  collateralBps: number;
+}
+
 export interface CollateralDeposit {
   invoiceId: bigint;
   depositor: string;
@@ -118,9 +125,36 @@ export interface CollateralDeposit {
   postedAt: number;
   releasedAt: number;
   seizedAt: number;
+  collateralBpsAtDeposit: number;
+  thresholdAtDeposit: bigint;
 }
 
-export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
+export interface CollateralRiskConfig {
+  /** Live collateral ratio (bps) below which a position is flagged at-risk. */
+  dangerBps: number;
+  /** Seconds a depositor has to top up before liquidateCollateral is callable. */
+  gracePeriodSecs: number;
+}
+
+export type CollateralSaleStatus = 'Open' | 'Settled' | 'Expired';
+
+/** #1036: a seized collateral asset up for sale on the auction contract's
+ * Dutch/declining-price liquidation mechanism. */
+export interface CollateralSale {
+  saleId: bigint;
+  seller: string;
+  token: string;
+  amount: bigint;
+  proceedsToken: string;
+  proceedsRecipient: string;
+  startPrice: bigint;
+  floorPrice: bigint;
+  openedAt: number;
+  durationSecs: number;
+  status: CollateralSaleStatus;
+  taker?: string;
+  settledPrice?: bigint;
+}
 
 // #1025: secondary market
 export type ListingStatus = 'Open' | 'Filled' | 'Cancelled';
@@ -137,6 +171,27 @@ export interface Listing {
   price: bigint;
   createdAt: number;
   status: ListingStatus;
+}
+
+// #1035: order-book, sitting alongside the #1025 fixed-price listing flow above.
+export type OrderSide = 'Bid' | 'Ask';
+export type OrderStatus = 'Open' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Expired';
+
+export interface Order {
+  orderId: bigint;
+  invoiceId: bigint;
+  owner: string;
+  token: string;
+  kind: ListingKind;
+  side: OrderSide;
+  /** Per-unit price, scaled by 1e7 (`PRICE_SCALE` on-chain) — not a flat total like `Listing.price`. */
+  price: bigint;
+  amountOrBps: bigint;
+  remaining: bigint;
+  createdAt: number;
+  /** Ledger timestamp after which the order can no longer match; 0 means no expiry. */
+  expiresAt: number;
+  status: OrderStatus;
 }
 
 export interface CoFundingRound {
@@ -169,6 +224,8 @@ export interface AsteraConfig {
   poolContractId: string;
   /** #1044: secondary-market listing + withdrawal-wait/liquidity-forecast satellite contract. */
   secondaryMarketContractId?: string;
+  /** #1036: collateral-liquidation Dutch auction + risk-response satellite contract. */
+  auctionContractId?: string;
   creditScoreContractId?: string;
   oracleRegistryContractId?: string;
   complianceContractId?: string;
@@ -229,6 +286,38 @@ export type ActionPayload =
   | { tag: 'SetLateThreshold'; values: [bigint] }
   | { tag: 'SetScoreThresholds'; values: [number, number, number, number] }
   | { tag: 'RegisterAttestor'; values: [string, number, number] }
+  // ── oracle_registry (#1042) ──
+  | { tag: 'SetOracleRegistryInvoiceContract'; values: [string] }
+  | { tag: 'SetOracleRegistryTreasury'; values: [string | undefined] }
+  | {
+      tag: 'SetOracleRegistryConfig';
+      values: [bigint, number, number, bigint, bigint];
+    }
+  | { tag: 'SetOracleRegistryPaused'; values: [boolean] }
+  | { tag: 'SlashOracle'; values: [string, number, bigint, string] }
+  | { tag: 'AdminResolveRound'; values: [bigint, boolean, string] }
+  // ── compliance (#1042) ──
+  | { tag: 'SetCompliancePaused'; values: [boolean] }
+  | { tag: 'RegisterScreener'; values: [string] }
+  | { tag: 'ConfirmScreenerRegistration'; values: [string] }
+  | { tag: 'DeregisterScreener'; values: [string] }
+  | { tag: 'SetRescreeningInterval'; values: [bigint] }
+  | { tag: 'SetScreenerTimelock'; values: [bigint] }
+  // ── governance (#1042) ──
+  | { tag: 'UpdateGovernanceConfig'; values: [number, number] }
+  | { tag: 'SetCategoryQuorum'; values: [number, number] }
+  // ── referral (#1042) ──
+  | { tag: 'SetReferralPaused'; values: [boolean] }
+  | { tag: 'SetReferralPool'; values: [string] }
+  | { tag: 'SetBorrowRewardBps'; values: [number] }
+  | { tag: 'SetDepositRewardBps'; values: [number] }
+  // ── admin-key rotation (#1042) ──
+  | { tag: 'SetInvoiceAccessControl'; values: [string] }
+  | { tag: 'SetCreditScoreAccessControl'; values: [string] }
+  | { tag: 'SetOracleRegistryAccessControl'; values: [string] }
+  | { tag: 'SetComplianceAccessControl'; values: [string] }
+  | { tag: 'SetGovernanceAccessControl'; values: [string] }
+  | { tag: 'SetReferralAccessControl'; values: [string] }
   | { tag: 'AddSigner'; values: [Role, string] }
   | { tag: 'RemoveSigner'; values: [Role, string] }
   | { tag: 'SetThreshold'; values: [Role, number] };

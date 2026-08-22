@@ -5,6 +5,7 @@ import {
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   SECONDARY_MARKET_CONTRACT_ID,
+  AUCTION_CONTRACT_ID,
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ORACLE_REGISTRY_CONTRACT_ID,
@@ -37,6 +38,7 @@ import type {
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
+  CollateralRiskConfig,
   GovernanceConfig,
   GovernanceProposal,
   StellarAddress,
@@ -58,6 +60,9 @@ import type {
   Listing,
   ListingKind,
   ListingStatus,
+  Order,
+  OrderSide,
+  OrderStatus,
   DisputeRecord,
   DisputeResolution,
   DisputeCase,
@@ -576,6 +581,202 @@ export async function listListingsForInvestor(seller: string): Promise<number[]>
   return raw.map((id) => Number(id));
 }
 
+// ---- #1035: limit order book, sitting alongside the #1025 listing flow above ----
+
+function orderSideToScVal(side: OrderSide): xdr.ScVal {
+  return xdr.ScVal.scvVec([nativeToScVal(side, { type: 'symbol' })]);
+}
+
+// `place_order` takes a single PlaceOrderRequest struct rather than
+// individual scalar params (mirrors `openCoFundingRequestToScVal` above).
+// Soroban encodes named-field #[contracttype] structs as an ScMap keyed by
+// field-name Symbols in alphabetical order — NOT declaration order — so
+// the entries below are deliberately sorted (amount_or_bps, expires_at,
+// invoice_id, kind, price, side).
+function placeOrderRequestToScVal(params: {
+  invoiceId: number;
+  kind: ListingKind;
+  side: OrderSide;
+  amountOrBps: bigint;
+  price: bigint;
+  expiresAt?: number;
+}): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('amount_or_bps', nativeToScVal(params.amountOrBps, { type: 'u64' })),
+    entry('expires_at', nativeToScVal(params.expiresAt ?? 0, { type: 'u64' })),
+    entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    entry('kind', listingKindToScVal(params.kind)),
+    entry('price', nativeToScVal(params.price, { type: 'i128' })),
+    entry('side', orderSideToScVal(params.side)),
+  ]);
+}
+
+function orderFromRaw(raw: Record<string, unknown>): Order {
+  return {
+    orderId: Number(raw.order_id),
+    invoiceId: Number(raw.invoice_id),
+    owner: raw.owner as string,
+    token: raw.token as string,
+    kind: enumTagFromNative<ListingKind>(raw.kind),
+    side: enumTagFromNative<OrderSide>(raw.side),
+    price: BigInt(String(raw.price)),
+    amountOrBps: BigInt(String(raw.amount_or_bps)),
+    remaining: BigInt(String(raw.remaining)),
+    createdAt: Number(raw.created_at),
+    expiresAt: Number(raw.expires_at),
+    status: enumTagFromNative<OrderStatus>(raw.status),
+  };
+}
+
+/**
+ * Place a resting limit order (bid or ask). Matches immediately against
+ * crossing resting orders on the opposite side; any unfilled remainder
+ * rests on the book. `price` is per-unit, scaled by 1e7 — not a flat total
+ * like `buildListPositionTx`'s `price`. `expiresAt` of `0` means no expiry.
+ */
+export async function buildPlaceOrderTx(params: {
+  owner: string;
+  invoiceId: number;
+  kind: ListingKind;
+  side: OrderSide;
+  amountOrBps: bigint;
+  price: bigint;
+  expiresAt?: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.owner);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'place_order',
+        new Address(params.owner).toScVal(),
+        placeOrderRequestToScVal(params),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Cancel a resting or partially-filled order. Only the original owner may cancel. */
+export async function buildCancelOrderTx(owner: string, orderId: number): Promise<string> {
+  const account = await getRpcAccount(owner);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_order',
+        new Address(owner).toScVal(),
+        nativeToScVal(orderId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/**
+ * Permissionlessly expire a resting order past its `expiresAt`. Anyone
+ * (the connected wallet, in the frontend's case) can submit this — it only
+ * prunes stale book state, no funds move.
+ */
+export async function buildExpireOrderTx(caller: string, orderId: number): Promise<string> {
+  const account = await getRpcAccount(caller);
+  const contract = new Contract(SECONDARY_MARKET_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('expire_order', nativeToScVal(orderId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Fetch a single order by ID. Returns null if not found. */
+export async function getOrder(orderId: number): Promise<Order | null> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'get_order',
+    [nativeToScVal(orderId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  return orderFromRaw(raw as Record<string, unknown>);
+}
+
+/** Resting bid/ask order IDs for an invoice's order book, as `{ bidIds, askIds }`. */
+export async function getOrderBook(
+  invoiceId: number,
+  kind: ListingKind,
+): Promise<{ bidIds: number[]; askIds: number[] }> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'get_order_book',
+    [nativeToScVal(invoiceId, { type: 'u64' }), listingKindToScVal(kind)],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as [unknown[], unknown[]];
+  if (!Array.isArray(raw)) return { bidIds: [], askIds: [] };
+  const [bids, asks] = raw;
+  return {
+    bidIds: (bids ?? []).map((id) => Number(id)),
+    askIds: (asks ?? []).map((id) => Number(id)),
+  };
+}
+
+/** All order IDs ever placed by `owner` (any status). */
+export async function listOrdersForOwner(owner: string): Promise<number[]> {
+  const sim = await simulateTx(
+    SECONDARY_MARKET_CONTRACT_ID,
+    'list_orders_for_owner',
+    [new Address(owner).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((id) => Number(id));
+}
+
 export async function getAcceptedTokens(): Promise<string[]> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
@@ -587,6 +788,22 @@ export async function getAcceptedTokens(): Promise<string[]> {
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   const raw = scValToNative(result!.retval) as string[];
   return Array.isArray(raw) ? raw : [];
+}
+
+// #1036: read-only Reflector-oracle price lookup for a single accepted token
+// (same scale/precision as every other call to this contract fn — only ratios
+// between two calls' results are meaningful, not the raw magnitude). Used by
+// the collateral-asset selector to convert "value required in the funding
+// token" into "how much of the asset I actually pick do I need to post."
+export async function getAssetPrice(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_asset_price',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval)));
 }
 
 export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals> {
@@ -1983,6 +2200,58 @@ export async function getCollateralDeposit(invoiceId: number): Promise<Collatera
     token: r.token as string,
     amount: BigInt(String(r.amount)),
     settled: Boolean(r.settled),
+    postedAt: Number(r.posted_at),
+    releasedAt: Number(r.released_at),
+    seizedAt: Number(r.seized_at),
+    collateralBpsAtDeposit: Number(r.collateral_bps_at_deposit),
+    thresholdAtDeposit: BigInt(String(r.threshold_at_deposit)),
+  };
+}
+
+// #1036: read-only — the ledger timestamp a position was first flagged
+// at-risk, or null if not currently flagged. Tracked entirely in the auction
+// satellite's own storage — it's monitoring state, not fund-movement state,
+// so pool's CollateralDeposit doesn't carry it.
+export async function getAtRiskSince(invoiceId: number): Promise<number | null> {
+  const sim = await simulateTx(
+    AUCTION_CONTRACT_ID,
+    'get_at_risk_since',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  return raw != null ? Number(raw) : null;
+}
+
+// #1036: read-only — the live, oracle-priced collateral ratio (bps) for a
+// funded invoice's posted collateral. 10_000 = exactly covers the requirement
+// at today's prices. Requires the invoice to already be funded. Served by the
+// auction satellite contract now, not pool directly — see
+// contracts/auction's collateral-risk-response entrypoints.
+export async function getLiveCollateralRatio(invoiceId: number): Promise<number> {
+  const sim = await simulateTx(
+    AUCTION_CONTRACT_ID,
+    'get_live_collateral_ratio',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+export async function getCollateralRiskConfig(): Promise<CollateralRiskConfig> {
+  const sim = await simulateTx(
+    AUCTION_CONTRACT_ID,
+    'get_collateral_risk_config',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
+    dangerBps: Number(raw.danger_bps),
+    gracePeriodSecs: Number(raw.grace_period_secs),
   };
 }
 
@@ -2037,6 +2306,67 @@ export async function buildTopUpCollateralTx(params: {
         new Address(params.depositor).toScVal(),
         new Address(params.token).toScVal(),
         nativeToScVal(params.amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// #1036: permissionless keeper call — recomputes the live ratio and flips the
+// at-risk flag, tracked entirely in the auction satellite's own storage.
+// `caller` is an explicit argument (not just the fee-paying source account)
+// since it's re-authorized as the transaction signer, not implied by the
+// source account.
+export async function buildCheckCollateralRiskTx(params: {
+  invoiceId: number;
+  caller: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(AUCTION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'check_collateral_risk',
+        new Address(params.caller).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// #1036: permissionless keeper call — seizes a deposit that's been at-risk
+// for at least the configured grace period and is still below the danger
+// threshold on a fresh price recheck. Routed through the auction satellite
+// contract (see buildCheckCollateralRiskTx for why `caller` is explicit).
+export async function buildLiquidateCollateralTx(params: {
+  invoiceId: number;
+  caller: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.caller);
+  const contract = new Contract(AUCTION_CONTRACT_ID);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'liquidate_collateral',
+        new Address(params.caller).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
       ),
     )
     .setTimeout(30)
@@ -3511,6 +3841,73 @@ function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
         roleToScVal(action.values[0]),
         nativeToScVal(action.values[1], { type: 'u32' }),
       ]);
+    case 'SetOracleRegistryInvoiceContract':
+    case 'SetReferralPool':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
+    case 'SetOracleRegistryTreasury':
+      return xdr.ScVal.scvVec([
+        tag,
+        action.values[0] === undefined
+          ? xdr.ScVal.scvVoid()
+          : new Address(action.values[0]).toScVal(),
+      ]);
+    case 'SetOracleRegistryConfig':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'i128' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u32' }),
+        nativeToScVal(action.values[3], { type: 'u64' }),
+        nativeToScVal(action.values[4], { type: 'u64' }),
+      ]);
+    case 'SetOracleRegistryPaused':
+    case 'SetCompliancePaused':
+    case 'SetReferralPaused':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'bool' })]);
+    case 'SlashOracle':
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(action.values[0]).toScVal(),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+        nativeToScVal(action.values[2], { type: 'u64' }),
+        nativeToScVal(action.values[3], { type: 'string' }),
+      ]);
+    case 'AdminResolveRound':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u64' }),
+        nativeToScVal(action.values[1], { type: 'bool' }),
+        nativeToScVal(action.values[2], { type: 'string' }),
+      ]);
+    case 'RegisterScreener':
+    case 'ConfirmScreenerRegistration':
+    case 'DeregisterScreener':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
+    case 'SetRescreeningInterval':
+    case 'SetScreenerTimelock':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u64' })]);
+    case 'UpdateGovernanceConfig':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u32' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+      ]);
+    case 'SetCategoryQuorum':
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(action.values[0], { type: 'u32' }),
+        nativeToScVal(action.values[1], { type: 'u32' }),
+      ]);
+    case 'SetBorrowRewardBps':
+    case 'SetDepositRewardBps':
+      return xdr.ScVal.scvVec([tag, nativeToScVal(action.values[0], { type: 'u32' })]);
+    case 'SetInvoiceAccessControl':
+    case 'SetCreditScoreAccessControl':
+    case 'SetOracleRegistryAccessControl':
+    case 'SetComplianceAccessControl':
+    case 'SetGovernanceAccessControl':
+    case 'SetReferralAccessControl':
+      return xdr.ScVal.scvVec([tag, new Address(action.values[0]).toScVal()]);
   }
 }
 

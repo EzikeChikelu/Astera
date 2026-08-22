@@ -121,6 +121,96 @@ function actionPayloadToScVal(action: ActionPayload): xdr.ScVal {
       const [role, threshold] = action.values;
       return xdr.ScVal.scvVec([tag, roleToScVal(role), nativeToScVal(threshold, { type: 'u32' })]);
     }
+    case 'SetOracleRegistryInvoiceContract':
+    case 'SetReferralPool': {
+      const [address] = action.values;
+      return xdr.ScVal.scvVec([tag, new Address(address).toScVal()]);
+    }
+    case 'SetOracleRegistryTreasury': {
+      const [treasury] = action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        treasury === undefined ? xdr.ScVal.scvVoid() : new Address(treasury).toScVal(),
+      ]);
+    }
+    case 'SetOracleRegistryConfig': {
+      const [minStake, requiredVotes, quorumBps, roundDurationSecs, deregisterCooldownSecs] =
+        action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(minStake, { type: 'i128' }),
+        nativeToScVal(requiredVotes, { type: 'u32' }),
+        nativeToScVal(quorumBps, { type: 'u32' }),
+        nativeToScVal(roundDurationSecs, { type: 'u64' }),
+        nativeToScVal(deregisterCooldownSecs, { type: 'u64' }),
+      ]);
+    }
+    case 'SetOracleRegistryPaused':
+    case 'SetCompliancePaused':
+    case 'SetReferralPaused': {
+      const [paused] = action.values;
+      return xdr.ScVal.scvVec([tag, nativeToScVal(paused, { type: 'bool' })]);
+    }
+    case 'SlashOracle': {
+      const [operator, bps, roundId, evidence] = action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        new Address(operator).toScVal(),
+        nativeToScVal(bps, { type: 'u32' }),
+        nativeToScVal(roundId, { type: 'u64' }),
+        nativeToScVal(evidence, { type: 'string' }),
+      ]);
+    }
+    case 'AdminResolveRound': {
+      const [invoiceId, approved, reason] = action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(invoiceId, { type: 'u64' }),
+        nativeToScVal(approved, { type: 'bool' }),
+        nativeToScVal(reason, { type: 'string' }),
+      ]);
+    }
+    case 'RegisterScreener':
+    case 'ConfirmScreenerRegistration':
+    case 'DeregisterScreener': {
+      const [screener] = action.values;
+      return xdr.ScVal.scvVec([tag, new Address(screener).toScVal()]);
+    }
+    case 'SetRescreeningInterval':
+    case 'SetScreenerTimelock': {
+      const [secs] = action.values;
+      return xdr.ScVal.scvVec([tag, nativeToScVal(secs, { type: 'u64' })]);
+    }
+    case 'UpdateGovernanceConfig': {
+      const [quorumBps, passBps] = action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(quorumBps, { type: 'u32' }),
+        nativeToScVal(passBps, { type: 'u32' }),
+      ]);
+    }
+    case 'SetCategoryQuorum': {
+      const [category, quorumBps] = action.values;
+      return xdr.ScVal.scvVec([
+        tag,
+        nativeToScVal(category, { type: 'u32' }),
+        nativeToScVal(quorumBps, { type: 'u32' }),
+      ]);
+    }
+    case 'SetBorrowRewardBps':
+    case 'SetDepositRewardBps': {
+      const [bps] = action.values;
+      return xdr.ScVal.scvVec([tag, nativeToScVal(bps, { type: 'u32' })]);
+    }
+    case 'SetInvoiceAccessControl':
+    case 'SetCreditScoreAccessControl':
+    case 'SetOracleRegistryAccessControl':
+    case 'SetComplianceAccessControl':
+    case 'SetGovernanceAccessControl':
+    case 'SetReferralAccessControl': {
+      const [newAccessControl] = action.values;
+      return xdr.ScVal.scvVec([tag, new Address(newAccessControl).toScVal()]);
+    }
   }
 }
 

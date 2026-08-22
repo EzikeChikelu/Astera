@@ -121,6 +121,34 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     assert!(f.client.list_keepers().contains(&keeper));
 }
 
+// ── #1042: admin-key rotation itself requires access_control, not admin ────
+
+#[test]
+fn test_set_access_control_via_ac_rotates_the_trust_anchor() {
+    let f = setup();
+    let access_control = Address::generate(&f.env);
+    f.client.set_access_control(&f.admin, &access_control);
+
+    let new_access_control = Address::generate(&f.env);
+    f.client
+        .set_access_control_via_ac(&access_control, &new_access_control);
+    assert_eq!(
+        f.client.get_access_control(),
+        Some(new_access_control.clone())
+    );
+
+    let result = f
+        .client
+        .try_set_access_control_via_ac(&access_control, &access_control);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        InvoiceError::Unauthorized.into()
+    );
+
+    f.client.set_paused_via_ac(&new_access_control, &true);
+    assert!(f.client.is_paused());
+}
+
 // ── real access_control contract driving a genuine 2-of-2 proposal ─────────
 
 #[test]

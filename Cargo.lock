@@ -189,6 +189,7 @@ dependencies = [
 name = "auction"
 version = "0.1.0"
 dependencies = [
+ "pool",
  "soroban-sdk",
 ]
 
@@ -380,6 +381,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "compliance"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "soroban-sdk",
 ]
 
@@ -889,6 +891,7 @@ dependencies = [
 name = "governance"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "share",
  "soroban-sdk",
 ]
@@ -1190,6 +1193,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 name = "oracle_registry"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "proptest",
  "soroban-sdk",
 ]
@@ -1468,6 +1472,7 @@ dependencies = [
 name = "referral"
 version = "0.1.0"
 dependencies = [
+ "access_control",
  "soroban-sdk",
 ]
 

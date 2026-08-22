@@ -47,12 +47,17 @@ POOL_CONTRACT_ID=$(deploy_contract "pool" "$WASM_DIR/pool.wasm")
 # contract, split out of pool to clear the 200KB wasm deploy limit.
 SECONDARY_MARKET_CONTRACT_ID=$(deploy_contract "secondary_market" "$WASM_DIR/secondary_market.wasm")
 CREDIT_CONTRACT_ID=$(deploy_contract "credit_score" "$WASM_DIR/credit_score.wasm")
+# #1042: role-based multisig access control, additive to every contract's
+# legacy single-admin path. See scripts/init-contracts.sh for how each
+# contract adopts it via set_access_control.
+ACCESS_CONTROL_CONTRACT_ID=$(deploy_contract "access_control" "$WASM_DIR/access_control.wasm")
 
 echo "==> Contract IDs:"
 echo "    Invoice:          $INVOICE_CONTRACT_ID"
 echo "    Pool:             $POOL_CONTRACT_ID"
 echo "    Secondary Market: $SECONDARY_MARKET_CONTRACT_ID"
 echo "    Credit Score:     $CREDIT_CONTRACT_ID"
+echo "    Access Control:   $ACCESS_CONTROL_CONTRACT_ID"
 
 # Write IDs to shared volume so other containers can source them
 mkdir -p "$(dirname "$OUTPUT_FILE")"
@@ -61,6 +66,7 @@ INVOICE_CONTRACT_ID=$INVOICE_CONTRACT_ID
 POOL_CONTRACT_ID=$POOL_CONTRACT_ID
 SECONDARY_MARKET_CONTRACT_ID=$SECONDARY_MARKET_CONTRACT_ID
 CREDIT_CONTRACT_ID=$CREDIT_CONTRACT_ID
+ACCESS_CONTROL_CONTRACT_ID=$ACCESS_CONTROL_CONTRACT_ID
 EOF
 
 echo "==> Contract IDs written to $OUTPUT_FILE"

@@ -12,6 +12,15 @@
 #   export POOL_CONTRACT_ID=...
 #   export CREDIT_SCORE_CONTRACT_ID=...
 #   export GOVERNANCE_CONTRACT_ID=...
+#   export ACCESS_CONTROL_CONTRACT_ID=...
+#
+#   # #1042: optional — who the access_control SuperAdmin role starts with.
+#   # Defaults to a single-signer "multisig" of just ADMIN_ADDRESS so a
+#   # fresh deployment can adopt access_control without extra setup; ops
+#   # MUST raise this to a real M-of-N signer set (via AddSigner/SetThreshold
+#   # proposals) before relying on it as the actual security boundary.
+#   export SUPER_ADMIN_SIGNERS='["G...","G..."]'   # optional, JSON array
+#   export SUPER_ADMIN_THRESHOLD=1                  # optional
 #
 #   sh scripts/init-contracts.sh
 
@@ -24,8 +33,11 @@ set -eu
 : "${POOL_CONTRACT_ID:?POOL_CONTRACT_ID not set}"
 : "${CREDIT_SCORE_CONTRACT_ID:?CREDIT_SCORE_CONTRACT_ID not set}"
 : "${GOVERNANCE_CONTRACT_ID:?GOVERNANCE_CONTRACT_ID not set}"
+: "${ACCESS_CONTROL_CONTRACT_ID:?ACCESS_CONTROL_CONTRACT_ID not set}"
 : "${ADMIN_ADDRESS:?ADMIN_ADDRESS not set}"
 : "${USDC_TOKEN_ID:?USDC_TOKEN_ID not set}"
+: "${SUPER_ADMIN_SIGNERS:="[\"$ADMIN_ADDRESS\"]"}"
+: "${SUPER_ADMIN_THRESHOLD:=1}"
 
 STELLAR_ARGS="--source $DEPLOYER_KEY --network $NETWORK"
 if [ -n "${RPC_URL:-}" ]; then
@@ -42,9 +54,9 @@ invoke() {
   fi
 }
 
-# Order: share -> invoice -> pool -> credit_score -> governance
+# Order: share -> invoice -> pool -> credit_score -> governance -> access_control
 
-echo "=== Initializing contracts (order: share -> invoice -> pool -> credit_score -> governance) ==="
+echo "=== Initializing contracts (order: share -> invoice -> pool -> credit_score -> governance -> access_control) ==="
 
 invoke "$SHARE_CONTRACT_ID" \
   initialize \
@@ -83,5 +95,36 @@ invoke "$GOVERNANCE_CONTRACT_ID" \
   --pass_bps 5100 \
   --execution_delay_secs 86400 \
   --min_share_balance 10000000
+
+invoke "$ACCESS_CONTROL_CONTRACT_ID" \
+  initialize \
+  --super_admin_signers "$SUPER_ADMIN_SIGNERS" \
+  --super_admin_threshold "$SUPER_ADMIN_THRESHOLD" \
+  --proposal_expiry_secs 604800
+
+# #1042: adopt access_control as an additional, additive admin path on every
+# contract that supports it. The legacy ADMIN_ADDRESS-gated path above stays
+# fully functional on all of them — this does not disable or replace it.
+echo "=== Wiring access_control into invoice/pool/credit_score/governance ==="
+
+invoke "$INVOICE_CONTRACT_ID" \
+  set_access_control \
+  --admin "$ADMIN_ADDRESS" \
+  --access_control "$ACCESS_CONTROL_CONTRACT_ID"
+
+invoke "$POOL_CONTRACT_ID" \
+  set_access_control \
+  --admin "$ADMIN_ADDRESS" \
+  --access_control "$ACCESS_CONTROL_CONTRACT_ID"
+
+invoke "$CREDIT_SCORE_CONTRACT_ID" \
+  set_access_control \
+  --admin "$ADMIN_ADDRESS" \
+  --access_control "$ACCESS_CONTROL_CONTRACT_ID"
+
+invoke "$GOVERNANCE_CONTRACT_ID" \
+  set_access_control \
+  --caller "$ADMIN_ADDRESS" \
+  --access_control "$ACCESS_CONTROL_CONTRACT_ID"
 
 echo "=== All contracts initialized successfully ==="

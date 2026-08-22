@@ -11,6 +11,10 @@ import {
   POOL_CONTRACT_ID,
   INVOICE_CONTRACT_ID,
   CREDIT_SCORE_CONTRACT_ID,
+  ORACLE_REGISTRY_CONTRACT_ID,
+  COMPLIANCE_CONTRACT_ID,
+  GOVERNANCE_CONTRACT_ID,
+  REFERRAL_CONTRACT_ID,
   ACCESS_CONTROL_CONTRACT_ID,
 } from '@/lib/stellar';
 import {
@@ -25,18 +29,35 @@ import {
   getContractErrorMessage,
 } from '@/lib/contracts';
 
-type TargetKey = 'pool' | 'invoice' | 'credit_score' | 'self';
+type TargetKey =
+  | 'pool'
+  | 'invoice'
+  | 'credit_score'
+  | 'oracle_registry'
+  | 'compliance'
+  | 'governance'
+  | 'referral'
+  | 'self';
 
 const TARGET_CONTRACTS: Record<TargetKey, { label: string; id: string }> = {
   pool: { label: 'Pool', id: POOL_CONTRACT_ID },
   invoice: { label: 'Invoice', id: INVOICE_CONTRACT_ID },
   credit_score: { label: 'Credit Score', id: CREDIT_SCORE_CONTRACT_ID },
+  oracle_registry: { label: 'Oracle Registry', id: ORACLE_REGISTRY_CONTRACT_ID },
+  compliance: { label: 'Compliance', id: COMPLIANCE_CONTRACT_ID },
+  governance: { label: 'Governance', id: GOVERNANCE_CONTRACT_ID },
+  referral: { label: 'Referral', id: REFERRAL_CONTRACT_ID },
   self: { label: 'Access Control (self-management)', id: ACCESS_CONTROL_CONTRACT_ID },
 };
 
 // Which ActionPayload variants make sense for each target — mirrors the
 // `execute_cross_contract`/`execute_self_management` match arms in
-// contracts/access_control/src/lib.rs.
+// contracts/access_control/src/lib.rs. Every target except `pool` also
+// accepts its own `Set*AccessControl` rotation action (#1042) — proposed
+// under `Role::SuperAdmin`, same as the self-management actions. `pool`
+// has no wasm size budget left for a new entrypoint (see
+// contracts/.wasm-size-baseline.json), so its rotation action was
+// dropped from this PR.
 const ACTIONS_BY_TARGET: Record<TargetKey, ActionPayload['tag'][]> = {
   pool: [
     'SetPaused',
@@ -48,8 +69,47 @@ const ACTIONS_BY_TARGET: Record<TargetKey, ActionPayload['tag'][]> = {
     'SetInvestorKyc',
     'SetMaxUtilization',
   ],
-  invoice: ['SetPaused', 'SetOracle', 'RegisterDebtor', 'DeactivateDebtor', 'AddKeeper'],
-  credit_score: ['SetPaused', 'SetLateThreshold', 'SetScoreThresholds', 'RegisterAttestor'],
+  invoice: [
+    'SetPaused',
+    'SetOracle',
+    'RegisterDebtor',
+    'DeactivateDebtor',
+    'AddKeeper',
+    'SetInvoiceAccessControl',
+  ],
+  credit_score: [
+    'SetPaused',
+    'SetLateThreshold',
+    'SetScoreThresholds',
+    'RegisterAttestor',
+    'SetCreditScoreAccessControl',
+  ],
+  oracle_registry: [
+    'SetOracleRegistryPaused',
+    'SetOracleRegistryInvoiceContract',
+    'SetOracleRegistryTreasury',
+    'SetOracleRegistryConfig',
+    'SlashOracle',
+    'AdminResolveRound',
+    'SetOracleRegistryAccessControl',
+  ],
+  compliance: [
+    'SetCompliancePaused',
+    'RegisterScreener',
+    'ConfirmScreenerRegistration',
+    'DeregisterScreener',
+    'SetRescreeningInterval',
+    'SetScreenerTimelock',
+    'SetComplianceAccessControl',
+  ],
+  governance: ['UpdateGovernanceConfig', 'SetCategoryQuorum', 'SetGovernanceAccessControl'],
+  referral: [
+    'SetReferralPaused',
+    'SetReferralPool',
+    'SetBorrowRewardBps',
+    'SetDepositRewardBps',
+    'SetReferralAccessControl',
+  ],
   self: ['AddSigner', 'RemoveSigner', 'SetThreshold'],
 };
 
@@ -69,6 +129,30 @@ const ACTION_LABELS: Record<ActionPayload['tag'], string> = {
   SetLateThreshold: 'Set Late Threshold (days)',
   SetScoreThresholds: 'Set Score Thresholds',
   RegisterAttestor: 'Register Attestor',
+  SetOracleRegistryInvoiceContract: 'Set Invoice Contract',
+  SetOracleRegistryTreasury: 'Set Treasury Address',
+  SetOracleRegistryConfig: 'Set Registry Config',
+  SetOracleRegistryPaused: 'Set Paused',
+  SlashOracle: 'Slash Oracle',
+  AdminResolveRound: 'Admin Resolve Round',
+  SetCompliancePaused: 'Set Paused',
+  RegisterScreener: 'Register Screener',
+  ConfirmScreenerRegistration: 'Confirm Screener Registration',
+  DeregisterScreener: 'Deregister Screener',
+  SetRescreeningInterval: 'Set Rescreening Interval (secs)',
+  SetScreenerTimelock: 'Set Screener Timelock (secs)',
+  UpdateGovernanceConfig: 'Update Config (quorum/pass bps)',
+  SetCategoryQuorum: 'Set Category Quorum',
+  SetReferralPaused: 'Set Paused',
+  SetReferralPool: 'Set Pool Address',
+  SetBorrowRewardBps: 'Set Borrow Reward (bps)',
+  SetDepositRewardBps: 'Set Deposit Reward (bps)',
+  SetInvoiceAccessControl: 'Rotate Access Control',
+  SetCreditScoreAccessControl: 'Rotate Access Control',
+  SetOracleRegistryAccessControl: 'Rotate Access Control',
+  SetComplianceAccessControl: 'Rotate Access Control',
+  SetGovernanceAccessControl: 'Rotate Access Control',
+  SetReferralAccessControl: 'Rotate Access Control',
   AddSigner: 'Add Signer',
   RemoveSigner: 'Remove Signer',
   SetThreshold: 'Set Threshold',
@@ -112,6 +196,49 @@ function summarizeAction(action: ActionPayload): string {
       return `Remove Signer ${action.values[1]} from ${ROLE_LABELS[action.values[0]]}`;
     case 'SetThreshold':
       return `Set ${ROLE_LABELS[action.values[0]]} Threshold → ${action.values[1]}`;
+    case 'SetOracleRegistryInvoiceContract':
+      return `Set Invoice Contract → ${action.values[0]}`;
+    case 'SetOracleRegistryTreasury':
+      return `Set Treasury → ${action.values[0] ?? '(none)'}`;
+    case 'SetOracleRegistryConfig':
+      return `Set Registry Config → min_stake ${action.values[0]}, required_votes ${action.values[1]}, quorum_bps ${action.values[2]}, round_duration_secs ${action.values[3]}, deregister_cooldown_secs ${action.values[4]}`;
+    case 'SetOracleRegistryPaused':
+      return `Set Paused → ${action.values[0]}`;
+    case 'SlashOracle':
+      return `Slash Oracle ${action.values[0]} by ${action.values[1]}bps (round ${action.values[2]}): ${action.values[3]}`;
+    case 'AdminResolveRound':
+      return `Admin Resolve Round for invoice ${action.values[0]} → ${action.values[1]} (${action.values[2]})`;
+    case 'SetCompliancePaused':
+      return `Set Paused → ${action.values[0]}`;
+    case 'RegisterScreener':
+      return `Register Screener ${action.values[0]}`;
+    case 'ConfirmScreenerRegistration':
+      return `Confirm Screener Registration ${action.values[0]}`;
+    case 'DeregisterScreener':
+      return `Deregister Screener ${action.values[0]}`;
+    case 'SetRescreeningInterval':
+      return `Set Rescreening Interval → ${action.values[0]}s`;
+    case 'SetScreenerTimelock':
+      return `Set Screener Timelock → ${action.values[0]}s`;
+    case 'UpdateGovernanceConfig':
+      return `Update Config → quorum ${action.values[0]}bps, pass ${action.values[1]}bps`;
+    case 'SetCategoryQuorum':
+      return `Set Category Quorum (category ${action.values[0]}) → ${action.values[1]}bps`;
+    case 'SetReferralPaused':
+      return `Set Paused → ${action.values[0]}`;
+    case 'SetReferralPool':
+      return `Set Pool → ${action.values[0]}`;
+    case 'SetBorrowRewardBps':
+      return `Set Borrow Reward → ${action.values[0]}bps`;
+    case 'SetDepositRewardBps':
+      return `Set Deposit Reward → ${action.values[0]}bps`;
+    case 'SetInvoiceAccessControl':
+    case 'SetCreditScoreAccessControl':
+    case 'SetOracleRegistryAccessControl':
+    case 'SetComplianceAccessControl':
+    case 'SetGovernanceAccessControl':
+    case 'SetReferralAccessControl':
+      return `Rotate Access Control → ${action.values[0]}`;
   }
 }
 
@@ -217,6 +344,71 @@ export default function RolesAdminPage() {
         };
       case 'SetThreshold':
         return { tag: 'SetThreshold', values: [str('role') as Role, num('threshold')] };
+      case 'SetOracleRegistryInvoiceContract':
+      case 'SetReferralPool':
+        return { tag: proposeAction, values: [parseStellarAddress(str('address'))] };
+      case 'SetOracleRegistryTreasury':
+        return {
+          tag: 'SetOracleRegistryTreasury',
+          values: [str('treasury') ? parseStellarAddress(str('treasury')) : undefined],
+        };
+      case 'SetOracleRegistryConfig':
+        return {
+          tag: 'SetOracleRegistryConfig',
+          values: [
+            BigInt(str('minStake') || '0'),
+            num('requiredVotes'),
+            num('quorumBps'),
+            BigInt(str('roundDurationSecs') || '0'),
+            BigInt(str('deregisterCooldownSecs') || '0'),
+          ],
+        };
+      case 'SetOracleRegistryPaused':
+      case 'SetCompliancePaused':
+      case 'SetReferralPaused':
+        return { tag: proposeAction, values: [fields[`${proposeAction}_value`] === 'true'] };
+      case 'SlashOracle':
+        return {
+          tag: 'SlashOracle',
+          values: [
+            parseStellarAddress(str('operator')),
+            num('bps'),
+            BigInt(str('roundId') || '0'),
+            str('evidence'),
+          ],
+        };
+      case 'AdminResolveRound':
+        return {
+          tag: 'AdminResolveRound',
+          values: [BigInt(str('invoiceId') || '0'), fields.approved === 'true', str('reason')],
+        };
+      case 'RegisterScreener':
+      case 'ConfirmScreenerRegistration':
+      case 'DeregisterScreener':
+        return { tag: proposeAction, values: [parseStellarAddress(str('screener'))] };
+      case 'SetRescreeningInterval':
+      case 'SetScreenerTimelock':
+        return { tag: proposeAction, values: [BigInt(str('secs') || '0')] };
+      case 'UpdateGovernanceConfig':
+        return {
+          tag: 'UpdateGovernanceConfig',
+          values: [num('quorumBps'), num('passBps')],
+        };
+      case 'SetCategoryQuorum':
+        return {
+          tag: 'SetCategoryQuorum',
+          values: [num('category'), num('quorumBps')],
+        };
+      case 'SetBorrowRewardBps':
+      case 'SetDepositRewardBps':
+        return { tag: proposeAction, values: [num('bps')] };
+      case 'SetInvoiceAccessControl':
+      case 'SetCreditScoreAccessControl':
+      case 'SetOracleRegistryAccessControl':
+      case 'SetComplianceAccessControl':
+      case 'SetGovernanceAccessControl':
+      case 'SetReferralAccessControl':
+        return { tag: proposeAction, values: [parseStellarAddress(str('address'))] };
     }
   }
 
@@ -295,9 +487,9 @@ export default function RolesAdminPage() {
       <div>
         <h1 className="text-3xl font-bold mb-2">Roles & Multisig Access Control</h1>
         <p className="text-brand-muted text-sm">
-          Sensitive admin actions across Pool, Invoice, and Credit Score now route through
-          role-based multisig proposals: propose, gather approvals up to each role&apos;s threshold,
-          then execute.
+          Sensitive admin actions across Pool, Invoice, Credit Score, Oracle Registry, Compliance,
+          Governance, and Referral now route through role-based multisig proposals: propose, gather
+          approvals up to each role&apos;s threshold, then execute.
         </p>
       </div>
 
@@ -754,6 +946,211 @@ function ActionFields({
             className={inputClass}
           />
         </div>
+      );
+    case 'SetOracleRegistryInvoiceContract':
+    case 'SetReferralPool':
+    case 'SetInvoiceAccessControl':
+    case 'SetCreditScoreAccessControl':
+    case 'SetOracleRegistryAccessControl':
+    case 'SetComplianceAccessControl':
+    case 'SetGovernanceAccessControl':
+    case 'SetReferralAccessControl':
+      return (
+        <input
+          type="text"
+          placeholder="Address (G... or C...)"
+          value={fields.address ?? ''}
+          onChange={set('address')}
+          className={`${inputClass} font-mono w-full`}
+        />
+      );
+    case 'SetOracleRegistryTreasury':
+      return (
+        <input
+          type="text"
+          placeholder="Treasury address (blank to clear)"
+          value={fields.treasury ?? ''}
+          onChange={set('treasury')}
+          className={`${inputClass} font-mono w-full`}
+        />
+      );
+    case 'SetOracleRegistryConfig':
+      return (
+        <div className="grid grid-cols-5 gap-3">
+          <input
+            placeholder="Min stake"
+            value={fields.minStake ?? ''}
+            onChange={set('minStake')}
+            className={inputClass}
+          />
+          <input
+            placeholder="Required votes"
+            value={fields.requiredVotes ?? ''}
+            onChange={set('requiredVotes')}
+            className={inputClass}
+          />
+          <input
+            placeholder="Quorum bps"
+            value={fields.quorumBps ?? ''}
+            onChange={set('quorumBps')}
+            className={inputClass}
+          />
+          <input
+            placeholder="Round duration (secs)"
+            value={fields.roundDurationSecs ?? ''}
+            onChange={set('roundDurationSecs')}
+            className={inputClass}
+          />
+          <input
+            placeholder="Deregister cooldown (secs)"
+            value={fields.deregisterCooldownSecs ?? ''}
+            onChange={set('deregisterCooldownSecs')}
+            className={inputClass}
+          />
+        </div>
+      );
+    case 'SetOracleRegistryPaused':
+    case 'SetCompliancePaused':
+    case 'SetReferralPaused':
+      return (
+        <select
+          value={fields[`${action}_value`] ?? 'true'}
+          onChange={set(`${action}_value`)}
+          className={inputClass}
+        >
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      );
+    case 'SlashOracle':
+      return (
+        <div className="grid grid-cols-4 gap-3">
+          <input
+            type="text"
+            placeholder="Operator address"
+            value={fields.operator ?? ''}
+            onChange={set('operator')}
+            className={`${inputClass} font-mono`}
+          />
+          <input
+            type="number"
+            placeholder="Bps"
+            value={fields.bps ?? ''}
+            onChange={set('bps')}
+            className={inputClass}
+          />
+          <input
+            type="text"
+            placeholder="Round ID"
+            value={fields.roundId ?? ''}
+            onChange={set('roundId')}
+            className={inputClass}
+          />
+          <input
+            type="text"
+            placeholder="Evidence"
+            value={fields.evidence ?? ''}
+            onChange={set('evidence')}
+            className={inputClass}
+          />
+        </div>
+      );
+    case 'AdminResolveRound':
+      return (
+        <div className="grid grid-cols-3 gap-3">
+          <input
+            type="text"
+            placeholder="Invoice ID"
+            value={fields.invoiceId ?? ''}
+            onChange={set('invoiceId')}
+            className={inputClass}
+          />
+          <select
+            value={fields.approved ?? 'true'}
+            onChange={set('approved')}
+            className={inputClass}
+          >
+            <option value="true">Approved</option>
+            <option value="false">Rejected</option>
+          </select>
+          <input
+            type="text"
+            placeholder="Reason"
+            value={fields.reason ?? ''}
+            onChange={set('reason')}
+            className={inputClass}
+          />
+        </div>
+      );
+    case 'RegisterScreener':
+    case 'ConfirmScreenerRegistration':
+    case 'DeregisterScreener':
+      return (
+        <input
+          type="text"
+          placeholder="Screener address"
+          value={fields.screener ?? ''}
+          onChange={set('screener')}
+          className={`${inputClass} font-mono w-full`}
+        />
+      );
+    case 'SetRescreeningInterval':
+    case 'SetScreenerTimelock':
+      return (
+        <input
+          type="number"
+          placeholder="Seconds"
+          value={fields.secs ?? ''}
+          onChange={set('secs')}
+          className={inputClass}
+        />
+      );
+    case 'UpdateGovernanceConfig':
+      return (
+        <div className="grid grid-cols-2 gap-3">
+          <input
+            type="number"
+            placeholder="Quorum bps"
+            value={fields.quorumBps ?? ''}
+            onChange={set('quorumBps')}
+            className={inputClass}
+          />
+          <input
+            type="number"
+            placeholder="Pass bps"
+            value={fields.passBps ?? ''}
+            onChange={set('passBps')}
+            className={inputClass}
+          />
+        </div>
+      );
+    case 'SetCategoryQuorum':
+      return (
+        <div className="grid grid-cols-2 gap-3">
+          <select value={fields.category ?? '0'} onChange={set('category')} className={inputClass}>
+            <option value="0">Parameter Change</option>
+            <option value="1">Treasury</option>
+            <option value="2">Critical</option>
+          </select>
+          <input
+            type="number"
+            placeholder="Quorum bps"
+            value={fields.quorumBps ?? ''}
+            onChange={set('quorumBps')}
+            className={inputClass}
+          />
+        </div>
+      );
+    case 'SetBorrowRewardBps':
+    case 'SetDepositRewardBps':
+      return (
+        <input
+          type="number"
+          placeholder="Basis points"
+          value={fields.bps ?? ''}
+          onChange={set('bps')}
+          className={inputClass}
+        />
       );
   }
 }
