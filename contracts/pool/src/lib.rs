@@ -3547,9 +3547,9 @@ impl FundingPool {
         invoice_id: u64,
     ) -> Result<(), PoolError> {
         caller.require_auth();
+        Self::require_risk_contract(&env, &caller)?;
         bump_instance(&env);
         Self::require_not_paused(&env);
-        Self::require_risk_contract(&env, &caller)?;
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
@@ -3582,9 +3582,12 @@ impl FundingPool {
                 SETTLEMENT_COLLATERAL_TTL,
                 SETTLEMENT_COLLATERAL_TTL,
             );
+            // #1036: matches execute_seize_collateral's own seizure event
+            // (col_seiz_default/liq_seized), which also doesn't carry token —
+            // this seizure record mirrors that established shape.
             env.events().publish(
                 (EVT, symbol_short!("col_liq")),
-                (invoice_id, deposit.depositor, deposit.token, deposit.amount),
+                (invoice_id, deposit.depositor, deposit.amount),
             );
             Ok(())
         })
@@ -3667,15 +3670,12 @@ impl FundingPool {
             // to carry twice (once at index 1, once again at the end) — a
             // leftover redundancy from before this branch's history, not a
             // deliberate two-actor encoding; index 1 already carries it.
+            // Also drops the trailing timestamp col_dep used to carry —
+            // already recorded as posted_at on the persisted record, and
+            // col_topup (the closest sibling event) never carried one either.
             env.events().publish(
                 (EVT, symbol_short!("col_dep")),
-                (
-                    invoice_id,
-                    depositor,
-                    token,
-                    amount,
-                    env.ledger().timestamp(),
-                ),
+                (invoice_id, depositor, token, amount),
             );
             Ok(())
         })

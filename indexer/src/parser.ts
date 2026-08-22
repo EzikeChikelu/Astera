@@ -299,9 +299,10 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         // value[0], which is invoice_id here, not an address)
         case 'col_dep':
         case 'col_topup':
-        // (invoice_id, depositor, token, amount, timestamp) — published by
-        // pool's trusted risk_liquidate_collateral, called by the auction
-        // risk-response satellite
+        // (invoice_id, depositor, amount) — published by pool's trusted
+        // risk_liquidate_collateral, called by the auction risk-response
+        // satellite (matches execute_seize_collateral's own seizure event
+        // shape, which also doesn't carry token)
         case 'col_liq':
           if (isStellarAddress(value[1])) return value[1];
           break;
