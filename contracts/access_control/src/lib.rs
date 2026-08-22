@@ -324,11 +324,7 @@ pub trait OracleRegistryContractTrait {
 pub trait ComplianceContractTrait {
     fn set_paused_via_ac(env: Env, access_control: Address, paused: bool);
     fn register_screener_via_ac(env: Env, access_control: Address, screener: Address);
-    fn confirm_screener_registration_via_ac(
-        env: Env,
-        access_control: Address,
-        screener: Address,
-    );
+    fn confirm_screener_via_ac(env: Env, access_control: Address, screener: Address);
     fn deregister_screener_via_ac(env: Env, access_control: Address, screener: Address);
     fn set_rescreening_interval_via_ac(env: Env, access_control: Address, secs: u64);
     fn set_screener_timelock_via_ac(env: Env, access_control: Address, secs: u64);
@@ -337,12 +333,7 @@ pub trait ComplianceContractTrait {
 
 #[contractclient(name = "GovernanceClient")]
 pub trait GovernanceContractTrait {
-    fn update_config_via_ac(
-        env: Env,
-        access_control: Address,
-        quorum_bps: u32,
-        pass_bps: u32,
-    );
+    fn update_config_via_ac(env: Env, access_control: Address, quorum_bps: u32, pass_bps: u32);
     fn set_category_quorum_via_ac(
         env: Env,
         access_control: Address,
@@ -814,8 +805,7 @@ impl AccessControlContract {
                     .register_screener_via_ac(this_contract, screener);
             }
             ActionPayload::ConfirmScreenerRegistration(screener) => {
-                ComplianceClient::new(env, target)
-                    .confirm_screener_registration_via_ac(this_contract, screener);
+                ComplianceClient::new(env, target).confirm_screener_via_ac(this_contract, screener);
             }
             ActionPayload::DeregisterScreener(screener) => {
                 ComplianceClient::new(env, target)
@@ -850,12 +840,10 @@ impl AccessControlContract {
                 ReferralClient::new(env, target).set_pool_via_ac(this_contract, pool);
             }
             ActionPayload::SetBorrowRewardBps(bps) => {
-                ReferralClient::new(env, target)
-                    .set_borrow_reward_bps_via_ac(this_contract, bps);
+                ReferralClient::new(env, target).set_borrow_reward_bps_via_ac(this_contract, bps);
             }
             ActionPayload::SetDepositRewardBps(bps) => {
-                ReferralClient::new(env, target)
-                    .set_deposit_reward_bps_via_ac(this_contract, bps);
+                ReferralClient::new(env, target).set_deposit_reward_bps_via_ac(this_contract, bps);
             }
             ActionPayload::SetPoolAccessControl(new_ac) => {
                 PoolClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
@@ -872,16 +860,13 @@ impl AccessControlContract {
                     .set_access_control_via_ac(this_contract, new_ac);
             }
             ActionPayload::SetComplianceAccessControl(new_ac) => {
-                ComplianceClient::new(env, target)
-                    .set_access_control_via_ac(this_contract, new_ac);
+                ComplianceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
             }
             ActionPayload::SetGovernanceAccessControl(new_ac) => {
-                GovernanceClient::new(env, target)
-                    .set_access_control_via_ac(this_contract, new_ac);
+                GovernanceClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
             }
             ActionPayload::SetReferralAccessControl(new_ac) => {
-                ReferralClient::new(env, target)
-                    .set_access_control_via_ac(this_contract, new_ac);
+                ReferralClient::new(env, target).set_access_control_via_ac(this_contract, new_ac);
             }
             ActionPayload::AddSigner(_, _)
             | ActionPayload::RemoveSigner(_, _)

@@ -144,7 +144,10 @@ fn test_set_access_control_via_ac_rotates_the_trust_anchor() {
     let new_access_control = Address::generate(&f.env);
     f.pool_client
         .set_access_control_via_ac(&access_control, &new_access_control);
-    assert_eq!(f.pool_client.get_access_control(), Some(new_access_control.clone()));
+    assert_eq!(
+        f.pool_client.get_access_control(),
+        Some(new_access_control.clone())
+    );
 
     // The old access_control address can no longer rotate or act — only the
     // newly-configured one can.

@@ -74,7 +74,9 @@ fn test_via_ac_entrypoint_rejected_from_a_non_matching_address() {
     let result = f.client.try_set_paused_via_ac(&impostor, &true);
     assert_eq!(
         result,
-        Err(Ok::<soroban_sdk::Error, _>(ReferralError::Unauthorized.into()))
+        Err(Ok::<soroban_sdk::Error, _>(
+            ReferralError::Unauthorized.into()
+        ))
     );
     assert!(!f.client.is_paused());
 }
@@ -107,8 +109,7 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     // Rotating the trust anchor itself must also go through the currently
     // configured access_control, not the legacy admin key.
     let new_ac = Address::generate(&f.env);
-    f.client
-        .set_access_control_via_ac(&access_control, &new_ac);
+    f.client.set_access_control_via_ac(&access_control, &new_ac);
     assert_eq!(f.client.get_access_control(), Some(new_ac));
 }
 

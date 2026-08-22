@@ -328,7 +328,11 @@ impl ReferralContract {
     /// #1042: rotates the trust anchor itself through the currently
     /// configured `access_control` contract rather than the legacy admin
     /// key.
-    pub fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address) {
+    pub fn set_access_control_via_ac(
+        env: Env,
+        access_control: Address,
+        new_access_control: Address,
+    ) {
         access_control.require_auth();
         require_access_control(&env, &access_control);
         env.storage()

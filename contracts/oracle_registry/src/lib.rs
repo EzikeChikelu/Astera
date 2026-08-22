@@ -1068,10 +1068,8 @@ impl OracleRegistryContract {
         access_control.require_auth();
         Self::require_access_control(&env, &access_control)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
-        env.events().publish(
-            (EVT, symbol_short!("ac_pause")),
-            (access_control, paused),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
         Ok(())
     }
 

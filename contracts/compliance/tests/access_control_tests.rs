@@ -68,9 +68,7 @@ fn test_via_ac_entrypoint_rejected_from_a_non_matching_address() {
 
     let impostor = Address::generate(&f.env);
     let screener = Address::generate(&f.env);
-    let result = f
-        .client
-        .try_register_screener_via_ac(&impostor, &screener);
+    let result = f.client.try_register_screener_via_ac(&impostor, &screener);
     assert_eq!(result.unwrap_err().unwrap(), ComplianceError::Unauthorized);
     assert!(!f.client.is_screener(&screener));
 }
@@ -83,7 +81,11 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     let access_control = Address::generate(&f.env);
     f.client.set_access_control(&f.admin, &access_control);
 
-    // Zero timelock (default) so registration activates immediately.
+    // Registration only activates immediately when the timelock is zero —
+    // the default is 24h (DEFAULT_SCREENER_TIMELOCK_SECS) — so zero it out
+    // via the admin path first.
+    f.client.set_screener_timelock_via_ac(&access_control, &0u64);
+
     let screener = Address::generate(&f.env);
     f.client
         .register_screener_via_ac(&access_control, &screener);
@@ -110,8 +112,7 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     // Rotating the trust anchor itself must also go through the currently
     // configured access_control, not the legacy admin key.
     let new_ac = Address::generate(&f.env);
-    f.client
-        .set_access_control_via_ac(&access_control, &new_ac);
+    f.client.set_access_control_via_ac(&access_control, &new_ac);
     assert_eq!(f.client.get_access_control(), Some(new_ac));
 }
 
@@ -129,6 +130,10 @@ fn test_real_access_control_contract_2_of_3_compliance_officer_registers_real_sc
     let _ = ac_client.initialize(&vec![&f.env, super1.clone(), super2.clone()], &2, &604_800);
 
     f.client.set_access_control(&f.admin, &ac_id);
+    // Zero the screener timelock (default is 24h) so a registration
+    // proposal's effect is directly observable via is_screener() below,
+    // without a second confirm_screener_via_ac step.
+    f.client.set_screener_timelock(&f.admin, &0u64);
 
     let c1 = Address::generate(&f.env);
     let c2 = Address::generate(&f.env);

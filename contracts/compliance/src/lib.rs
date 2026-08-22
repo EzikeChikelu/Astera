@@ -792,10 +792,8 @@ impl ComplianceContract {
         access_control.require_auth();
         Self::require_access_control(&env, &access_control)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
-        env.events().publish(
-            (EVT, symbol_short!("ac_pause")),
-            (access_control, paused),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
         Ok(())
     }
 
@@ -809,7 +807,7 @@ impl ComplianceContract {
         Self::register_screener_internal(&env, screener, access_control)
     }
 
-    pub fn confirm_screener_registration_via_ac(
+    pub fn confirm_screener_via_ac(
         env: Env,
         access_control: Address,
         screener: Address,

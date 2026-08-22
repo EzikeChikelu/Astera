@@ -1501,7 +1501,11 @@ impl CreditScoreContract {
     /// configured `access_control` contract rather than the legacy admin
     /// key, so a compromised admin key alone can no longer repoint or
     /// strip multisig gating once this contract has adopted it.
-    pub fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address) {
+    pub fn set_access_control_via_ac(
+        env: Env,
+        access_control: Address,
+        new_access_control: Address,
+    ) {
         access_control.require_auth();
         Self::require_access_control(&env, &access_control);
         env.storage()
