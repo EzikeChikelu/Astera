@@ -196,4 +196,39 @@ proptest! {
             low, blended_low, high, blended_high
         );
     }
+
+    /// #1041: `final_score` (blended_score + risk + trend adjustments) stays
+    /// within [MIN_SCORE, MAX_SCORE] for any risk-signal input and any amount
+    /// of payment history.
+    #[test]
+    fn prop_final_score_bounds(
+        internal_payment_count in 0u32..15u32,
+        debtor_concentration_bps in 0u32..=10_000u32,
+        invoice_size_risk_bps in 0u32..=10_000u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for i in 0..internal_payment_count {
+            client.record_payment(
+                &pool,
+                &(i as u64 + 1),
+                &sme,
+                &1_000_000_000i128,
+                &due_date,
+                &(due_date - 1000),
+            );
+        }
+
+        let keeper = Address::generate(&env);
+        client.set_risk_signal_keeper(&admin, &keeper);
+        client.submit_risk_signal(&keeper, &sme, &debtor_concentration_bps, &invoice_size_risk_bps);
+
+        let resp = client.get_credit_score(&sme);
+        prop_assert!(resp.final_score >= MIN_SCORE && resp.final_score <= MAX_SCORE);
+    }
 }

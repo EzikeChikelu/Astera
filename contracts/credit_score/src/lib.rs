@@ -69,6 +69,10 @@ pub enum CreditScoreError {
     /// #864: attestor_type discriminant passed to register_attestor_via_ac
     /// didn't match any known AttestorType variant.
     InvalidAttestorType = 26,
+    /// #1041: caller is not the configured risk-signal keeper.
+    UnauthorizedRiskKeeper = 27,
+    /// #1041: risk-signal basis-point fields must be in [0, 10_000].
+    InvalidRiskSignal = 28,
 }
 
 /// Semantic version of this credit-score contract (#237).
@@ -138,7 +142,13 @@ const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 /// here — an operator upgrading a live contract must call `set_scoring_config`
 /// once with a `ScoreAttestationConfig` populated (e.g. the v2 defaults) to
 /// re-persist a config the new WASM can decode.
-const CURRENT_MIGRATION_VERSION: u32 = 2;
+///
+/// #1041: bumped to 3 for the `ScoringConfig.risk`/`ScoringConfig.trend`
+/// fields. Same rule applies: an operator upgrading a live contract that has
+/// ever called `set_scoring_config` must call it again with `risk`/`trend`
+/// populated (e.g. `ScoringConfig::defaults()`'s values) before `get_credit_score`
+/// will decode successfully again.
+const CURRENT_MIGRATION_VERSION: u32 = 3;
 pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
 /// Max page size for list_all_sme_stats to prevent gas exhaustion.
@@ -252,6 +262,36 @@ pub struct ScoreAttestationConfig {
     pub external_weight_bps: u32,
 }
 
+/// #1041: penalty knobs for the off-chain-sourced debtor-concentration and
+/// invoice-size risk signals (see `RiskSignalData`, `submit_risk_signal`).
+/// Both penalties are 0 for any SME with no submitted signal, so existing
+/// SMEs are never regressed until a keeper actually submits data for them.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreRiskConfig {
+    /// Above this share (bps) of an SME's volume tied to a single debtor,
+    /// `debtor_concentration_penalty_pts` applies.
+    pub debtor_concentration_threshold_bps: u32,
+    pub debtor_concentration_penalty_pts: i32,
+    /// Above this share (bps) of an SME's volume sitting in unusually large
+    /// invoices, `invoice_size_risk_penalty_pts` applies.
+    pub invoice_size_risk_threshold_bps: u32,
+    pub invoice_size_risk_penalty_pts: i32,
+}
+
+/// #1041: repayment-trend adjustment — rewards/penalizes a recent on-time
+/// rate that diverges from the SME's lifetime on-time rate, so a borrower's
+/// trajectory (not just a flat lifetime aggregate) affects their score.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreTrendConfig {
+    /// Number of most-recent payment records considered "recent". Fewer than
+    /// this many total records yields no trend adjustment (too noisy).
+    pub trend_window: u32,
+    pub improving_bonus_pts: i32,
+    pub degrading_penalty_pts: i32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoringConfig {
@@ -259,6 +299,10 @@ pub struct ScoringConfig {
     pub averages: ScoreAverageConfig,
     pub bonuses: ScoreBonusConfig,
     pub attestation: ScoreAttestationConfig,
+    /// #1041
+    pub risk: ScoreRiskConfig,
+    /// #1041
+    pub trend: ScoreTrendConfig,
 }
 
 impl ScoringConfig {
@@ -301,6 +345,19 @@ impl ScoringConfig {
             attestation: ScoreAttestationConfig {
                 internal_weight_bps: 7_000,
                 external_weight_bps: 3_000,
+            },
+            // #1041: defaults are inert for any SME with no submitted risk
+            // signal / insufficient payment history — see the fields' docs.
+            risk: ScoreRiskConfig {
+                debtor_concentration_threshold_bps: 5_000,
+                debtor_concentration_penalty_pts: -15,
+                invoice_size_risk_threshold_bps: 5_000,
+                invoice_size_risk_penalty_pts: -10,
+            },
+            trend: ScoreTrendConfig {
+                trend_window: 10,
+                improving_bonus_pts: 10,
+                degrading_penalty_pts: -15,
             },
         }
     }
@@ -387,6 +444,19 @@ pub struct SimulateScoreCacheEntry {
     pub cached_at: u64,
 }
 
+/// #1041: off-chain-computed risk signal for an SME, submitted by the
+/// authorized risk-signal keeper (see `submit_risk_signal`). Sourced from the
+/// indexer's aggregation of `invoice` contract events (debtor concentration,
+/// invoice-size distribution) — this contract does not call into `invoice`
+/// directly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RiskSignalData {
+    pub debtor_concentration_bps: u32,
+    pub invoice_size_risk_bps: u32,
+    pub submitted_at: u64,
+}
+
 /// Returned by `get_credit_score`. Includes the current config version alongside the
 /// stored score so callers can detect staleness in a single call without a separate
 /// `get_scoring_config()` round-trip.
@@ -417,6 +487,17 @@ pub struct CreditScoreResponse {
     /// (`ScoreAttestationConfig` weights). Equal to `score` when the SME has
     /// zero active attestations — existing SMEs are never regressed by v2.
     pub blended_score: u32,
+    /// #1041: point delta from debtor-concentration + invoice-size risk
+    /// signals. 0 when no `RiskSignalData` has been submitted for this SME.
+    pub risk_adjustment_pts: i32,
+    /// #1041: point delta from the repayment-trend factor. 0 when the SME
+    /// has fewer than `ScoreTrendConfig.trend_window` payment records.
+    pub trend_adjustment_pts: i32,
+    /// #1041: `blended_score` + `risk_adjustment_pts` + `trend_adjustment_pts`,
+    /// clamped to `[min_score, max_score]`. The headline v2 score — surfaces
+    /// all contributing factors rather than one opaque number when combined
+    /// with the fields above.
+    pub final_score: u32,
 }
 
 #[contracttype]
@@ -474,8 +555,17 @@ pub enum DataKey {
     /// most recent payment was recorded. Enables forward-only threshold changes.
     SmeLateThreshold(Address),
     /// Short-lived cache for `simulate_score_with_attestations`, keyed by
-    /// (sme_address, hash_of_hypothetical_attestation_pairs).
+    /// (sme_address, hash_of_hypothetical_attestation_pairs_and_generation).
     SimulateScoreCache(Address, u64),
+    /// #1041: authorized off-chain address permitted to call `submit_risk_signal`.
+    RiskSignalKeeper,
+    /// #1041: latest off-chain-computed risk signal, keyed by SME.
+    RiskSignal(Address),
+    /// #1041: monotonic per-SME counter bumped on every attestation status
+    /// change (dispute/resolve). Folded into the `SimulateScoreCache` key so a
+    /// disputed-or-resolved attestation can never be served from a stale
+    /// pre-change cache entry — see `dispute_attestation`/`resolve_attestation_dispute`.
+    AttestationGeneration(Address),
 }
 
 const EVT: Symbol = symbol_short!("credit");
@@ -709,16 +799,114 @@ fn blend_score(
     blended.clamp(min_score as i128, max_score as i128) as u32
 }
 
-/// Deterministic hash of a `(weight_bps, score_contribution)` vector for
-/// cache-key derivation. Not a cryptographic hash — we only need collision
-/// resistance within a single SME's attestation set, which is tiny (<100).
-fn hash_attestation_pairs(pairs: &Vec<(u32, u32)>) -> u64 {
+/// Deterministic hash of a `(weight_bps, score_contribution)` vector plus the
+/// SME's current attestation generation, for cache-key derivation. Not a
+/// cryptographic hash — we only need collision resistance within a single
+/// SME's attestation set, which is tiny (<100).
+///
+/// #1041: folding in `generation` (bumped on every `dispute_attestation`/
+/// `resolve_attestation_dispute` call, see those functions) ensures a
+/// dispute or resolution always produces a fresh cache key — a stale
+/// pre-change `SimulateScoreCacheEntry` becomes permanently unreachable
+/// instead of being served for up to `SIMULATE_CACHE_TTL_SECS` after the
+/// attestation set it was computed from has changed.
+fn hash_attestation_pairs(pairs: &Vec<(u32, u32)>, generation: u32) -> u64 {
     let mut h: u64 = 0;
     for (w, s) in pairs.iter() {
         h = h.wrapping_mul(31).wrapping_add(w as u64);
         h = h.wrapping_mul(31).wrapping_add(s as u64);
     }
+    h = h.wrapping_mul(31).wrapping_add(generation as u64);
     h
+}
+
+/// #1041: point delta from the debtor-concentration + invoice-size risk
+/// signal last submitted for `sme` by the risk-signal keeper. Returns 0 when
+/// no signal has ever been submitted, so an SME is never regressed simply by
+/// this feature existing.
+fn compute_risk_adjustment(env: &Env, sme: &Address, config: &ScoreRiskConfig) -> i32 {
+    let signal: Option<RiskSignalData> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::RiskSignal(sme.clone()));
+    let signal = match signal {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    let mut adjustment = 0i32;
+    if signal.debtor_concentration_bps >= config.debtor_concentration_threshold_bps {
+        adjustment += config.debtor_concentration_penalty_pts;
+    }
+    if signal.invoice_size_risk_bps >= config.invoice_size_risk_threshold_bps {
+        adjustment += config.invoice_size_risk_penalty_pts;
+    }
+    adjustment
+}
+
+/// #1041: point delta from comparing the SME's on-time rate over the most
+/// recent `config.trend_window` payment records against their lifetime
+/// on-time rate. Returns 0 when the SME has fewer than `trend_window` total
+/// records (too little history for a meaningful trend) or when the recent
+/// rate is within 1 percentage point of the lifetime rate (flat).
+fn compute_trend_adjustment(
+    env: &Env,
+    sme: &Address,
+    total_invoices: u32,
+    paid_on_time: u32,
+    config: &ScoreTrendConfig,
+) -> i32 {
+    if config.trend_window == 0 || total_invoices < config.trend_window {
+        return 0;
+    }
+
+    let history_len: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistory(sme.clone()))
+        .unwrap_or(0);
+    if history_len < config.trend_window {
+        return 0;
+    }
+    let start_idx: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentHistoryStart(sme.clone()))
+        .unwrap_or(0);
+    let max_history = max_payment_history(env);
+
+    // Walk the most recent `trend_window` records in the ring buffer.
+    let mut recent_on_time: u32 = 0;
+    let mut recent_total: u32 = 0;
+    let skip = history_len - config.trend_window;
+    for offset in skip..history_len {
+        let i = (start_idx + offset) % max_history;
+        if let Some(record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PaymentRecord>(&DataKey::PaymentRecordIdx(sme.clone(), i))
+        {
+            recent_total += 1;
+            if record.status == PaymentStatus::PaidOnTime {
+                recent_on_time += 1;
+            }
+        }
+    }
+    if recent_total == 0 {
+        return 0;
+    }
+
+    let recent_rate_bps = (recent_on_time as i64 * 10_000) / recent_total as i64;
+    let lifetime_rate_bps = (paid_on_time as i64 * 10_000) / total_invoices as i64;
+    // 1 percentage point (100 bps) of dead zone around the lifetime rate
+    // avoids noisy adjustments from single-payment swings.
+    if recent_rate_bps > lifetime_rate_bps + 100 {
+        config.improving_bonus_pts
+    } else if recent_rate_bps < lifetime_rate_bps - 100 {
+        config.degrading_penalty_pts
+    } else {
+        0
+    }
 }
 
 #[contractimpl]
@@ -1113,8 +1301,22 @@ impl CreditScoreContract {
     /// SME has no on-chain history yet. Never panics for an unknown address.
     pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
         let data = Self::get_or_create_credit_data(&env, &sme);
-        let config_version = load_scoring_config(&env).core.score_version;
+        let config = load_scoring_config(&env);
+        let config_version = config.core.score_version;
         let blended_score = Self::compute_blended_score(&env, &sme, data.score);
+        let risk_adjustment_pts = compute_risk_adjustment(&env, &sme, &config.risk);
+        let trend_adjustment_pts = compute_trend_adjustment(
+            &env,
+            &sme,
+            data.total_invoices,
+            data.paid_on_time,
+            &config.trend,
+        );
+        let final_score = (blended_score as i64
+            + risk_adjustment_pts as i64
+            + trend_adjustment_pts as i64)
+            .clamp(config.core.min_score as i64, config.core.max_score as i64)
+            as u32;
         CreditScoreResponse {
             sme: data.sme,
             score: data.score,
@@ -1129,6 +1331,9 @@ impl CreditScoreContract {
             config_version,
             is_stale: data.score_version != config_version,
             blended_score,
+            risk_adjustment_pts,
+            trend_adjustment_pts,
+            final_score,
         }
     }
 
@@ -1319,6 +1524,22 @@ impl CreditScoreContract {
         {
             panic_with_error!(&env, CreditScoreError::InvalidAttestationConfig);
         }
+        // #1041: risk/trend thresholds are bps (0–10_000); penalty/bonus points
+        // bounded to the same order of magnitude as the existing point knobs
+        // above so a misconfigured value can't dwarf the rest of the formula.
+        if config.risk.debtor_concentration_threshold_bps > MAX_WEIGHT_BPS
+            || config.risk.invoice_size_risk_threshold_bps > MAX_WEIGHT_BPS
+            || config.risk.debtor_concentration_penalty_pts.unsigned_abs() > 100
+            || config.risk.invoice_size_risk_penalty_pts.unsigned_abs() > 100
+        {
+            panic!("invalid scoring config: risk config out of range");
+        }
+        if config.trend.trend_window == 0
+            || config.trend.improving_bonus_pts.unsigned_abs() > 100
+            || config.trend.degrading_penalty_pts.unsigned_abs() > 100
+        {
+            panic!("invalid scoring config: trend config out of range");
+        }
 
         let old = load_scoring_config(&env);
         if config.core.score_version <= old.core.score_version {
@@ -1382,6 +1603,60 @@ impl CreditScoreContract {
             .set(&DataKey::PoolContract, &pool_contract);
         env.events()
             .publish((EVT, symbol_short!("set_pc")), (admin, pool_contract));
+    }
+
+    /// #1041: authorize the off-chain address permitted to call
+    /// `submit_risk_signal`. Admin-only. This is the indexer-side aggregator
+    /// that computes debtor-concentration/invoice-size risk from `invoice`
+    /// contract events — this contract never calls into `invoice` directly.
+    pub fn set_risk_signal_keeper(env: Env, admin: Address, keeper: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::RiskSignalKeeper, &keeper);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "set_risk_kpr")), (admin, keeper));
+    }
+
+    /// #1041: submit (or replace) an SME's off-chain-computed risk signal.
+    /// Callable only by the configured `RiskSignalKeeper`.
+    pub fn submit_risk_signal(
+        env: Env,
+        keeper: Address,
+        sme: Address,
+        debtor_concentration_bps: u32,
+        invoice_size_risk_bps: u32,
+    ) {
+        keeper.require_auth();
+        require_not_paused(&env);
+        let stored_keeper: Option<Address> =
+            env.storage().instance().get(&DataKey::RiskSignalKeeper);
+        if stored_keeper != Some(keeper) {
+            panic_with_error!(&env, CreditScoreError::UnauthorizedRiskKeeper);
+        }
+        if debtor_concentration_bps > MAX_WEIGHT_BPS || invoice_size_risk_bps > MAX_WEIGHT_BPS {
+            panic_with_error!(&env, CreditScoreError::InvalidRiskSignal);
+        }
+
+        let signal = RiskSignalData {
+            debtor_concentration_bps,
+            invoice_size_risk_bps,
+            submitted_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RiskSignal(sme.clone()), &signal);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "risk_sig")),
+            (sme, debtor_concentration_bps, invoice_size_risk_bps),
+        );
+    }
+
+    /// #1041: the latest risk signal submitted for `sme`, if any.
+    pub fn get_risk_signal(env: Env, sme: Address) -> Option<RiskSignalData> {
+        env.storage().persistent().get(&DataKey::RiskSignal(sme))
     }
 
     /// Set the late-payment threshold (in days) used in score calculation.
@@ -1830,6 +2105,32 @@ impl CreditScoreContract {
             .publish((EVT, Symbol::new(&env, "att_deact")), address);
     }
 
+    /// #1041: change a registered attestor's credibility weight without a
+    /// full re-registration. Admin-only — an attestor can never set its own
+    /// weight, at registration or afterward.
+    pub fn set_attestor_weight(env: Env, admin: Address, address: Address, weight_bps: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        if weight_bps == 0 || weight_bps > MAX_WEIGHT_BPS {
+            panic_with_error!(&env, CreditScoreError::InvalidAttestorWeight);
+        }
+
+        let mut info: AttestorInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestor(address.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, CreditScoreError::AttestorNotFound));
+
+        info.weight_bps = weight_bps;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestor(address.clone()), &info);
+
+        env.events()
+            .publish((EVT, Symbol::new(&env, "att_weight")), (address, weight_bps));
+    }
+
     fn add_active_attestor(env: &Env, address: &Address) {
         let mut list: Vec<Address> = env
             .storage()
@@ -2055,7 +2356,8 @@ impl CreditScoreContract {
         sme: Address,
         hypothetical: Vec<(u32, u32)>,
     ) -> u32 {
-        let cache_key = hash_attestation_pairs(&hypothetical);
+        let generation = Self::attestation_generation(&env, &sme);
+        let cache_key = hash_attestation_pairs(&hypothetical, generation);
         let now = env.ledger().timestamp();
         // Cache hit? Return the stale-or-miss path only when needed.
         if let Some(entry) = env
@@ -2131,6 +2433,7 @@ impl CreditScoreContract {
             &DataKey::AttestationDisputeReason(attestation_id),
             &reason_hash,
         );
+        Self::bump_attestation_generation(&env, &attestation.sme);
 
         env.events().publish(
             (EVT, Symbol::new(&env, "att_disp")),
@@ -2165,11 +2468,34 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestation(attestation.id), &attestation);
+        Self::bump_attestation_generation(&env, &attestation.sme);
 
         env.events().publish(
             (EVT, Symbol::new(&env, "att_res")),
             (attestation_id, upheld),
         );
+    }
+
+    /// #1041: current attestation-generation counter for `sme`, defaulting to
+    /// 0 for an SME that has never had a dispute filed or resolved.
+    fn attestation_generation(env: &Env, sme: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AttestationGeneration(sme.clone()))
+            .unwrap_or(0)
+    }
+
+    /// #1041: bump `sme`'s attestation-generation counter. Called on every
+    /// dispute filed or resolved so `simulate_score_with_attestations`'s
+    /// cache key (see `hash_attestation_pairs`) can never serve a result
+    /// computed before the status change — see the module-level bug note on
+    /// why this fix is needed (the read-time `get_credit_score`/
+    /// `compute_blended_score` path has no such cache and was never affected).
+    fn bump_attestation_generation(env: &Env, sme: &Address) {
+        let next = Self::attestation_generation(env, sme).saturating_add(1);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AttestationGeneration(sme.clone()), &next);
     }
 }
 
@@ -4501,5 +4827,242 @@ mod test {
             result.unwrap_err().unwrap(),
             CreditScoreError::InvalidAttestationConfig.into()
         );
+    }
+
+    // === #1041: risk signal, trend, attestor-weight, and simulate-cache tests ===
+
+    #[test]
+    fn test_submit_risk_signal_requires_authorized_keeper() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        client.set_risk_signal_keeper(&admin, &keeper);
+
+        let result = client.try_submit_risk_signal(&stranger, &sme, &6_000u32, &1_000u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::UnauthorizedRiskKeeper.into()
+        );
+
+        client.submit_risk_signal(&keeper, &sme, &6_000u32, &1_000u32);
+        let signal = client.get_risk_signal(&sme).unwrap();
+        assert_eq!(signal.debtor_concentration_bps, 6_000);
+        assert_eq!(signal.invoice_size_risk_bps, 1_000);
+    }
+
+    #[test]
+    fn test_submit_risk_signal_rejects_out_of_range_bps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        client.set_risk_signal_keeper(&admin, &keeper);
+
+        let result = client.try_submit_risk_signal(&keeper, &sme, &10_001u32, &0u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidRiskSignal.into()
+        );
+    }
+
+    #[test]
+    fn test_risk_signal_applies_concentration_penalty_to_final_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let before = client.get_credit_score(&sme);
+        assert_eq!(before.risk_adjustment_pts, 0, "no signal submitted yet");
+        assert_eq!(before.final_score, before.blended_score);
+
+        let keeper = Address::generate(&env);
+        client.set_risk_signal_keeper(&admin, &keeper);
+        // Above the default 5_000 bps debtor-concentration threshold.
+        client.submit_risk_signal(&keeper, &sme, &6_000u32, &0u32);
+
+        let after = client.get_credit_score(&sme);
+        assert!(
+            after.risk_adjustment_pts < 0,
+            "concentration above threshold must apply a penalty"
+        );
+        assert_eq!(
+            after.final_score,
+            (after.blended_score as i64 + after.risk_adjustment_pts as i64)
+                .clamp(MIN_SCORE as i64, MAX_SCORE as i64) as u32
+        );
+    }
+
+    #[test]
+    fn test_set_attestor_weight_updates_existing_registration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        client.set_attestor_weight(&admin, &attestor, &9_000u32);
+        let info = client.get_attestor_info(&attestor).unwrap();
+        assert_eq!(info.weight_bps, 9_000);
+    }
+
+    #[test]
+    fn test_set_attestor_weight_rejects_unregistered_attestor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        let result = client.try_set_attestor_weight(&admin, &stranger, &5_000u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::AttestorNotFound.into()
+        );
+    }
+
+    #[test]
+    fn test_simulate_cache_invalidated_by_attestation_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let id = client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        let hypothetical = Vec::new(&env);
+        let before = client.simulate_score_with_attestations(&sme, &hypothetical);
+        assert!(
+            before > client.get_credit_score(&sme).score,
+            "baseline simulate should reflect the active attestation"
+        );
+
+        // Still well within SIMULATE_CACHE_TTL_SECS — a naive cache key of
+        // just (sme, hash(hypothetical)) would serve the pre-dispute value
+        // here. The attestation-generation bump in dispute_attestation must
+        // force a fresh computation instead.
+        client.dispute_attestation(&sme, &id, &String::from_str(&env, "reason"));
+        let after = client.simulate_score_with_attestations(&sme, &hypothetical);
+        assert_eq!(
+            after,
+            client.get_credit_score(&sme).score,
+            "simulate must not serve a stale cache entry computed before the dispute"
+        );
+    }
+
+    #[test]
+    fn test_final_score_sane_when_all_attestations_disputed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let id = client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        client.dispute_attestation(&sme, &id, &String::from_str(&env, "reason"));
+
+        let resp = client.get_credit_score(&sme);
+        assert_eq!(
+            resp.blended_score, resp.score,
+            "a borrower with only disputed attestations must get no external blend"
+        );
+        assert_eq!(resp.risk_adjustment_pts, 0);
+        assert_eq!(
+            resp.final_score, resp.blended_score,
+            "no risk/trend signal means final_score == blended_score"
+        );
+    }
+
+    #[test]
+    fn test_trend_adjustment_rewards_improving_recent_performance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        // Lifetime: first 10 invoices paid late.
+        for i in 0..10u64 {
+            let due = 1_000_000 + i * 10_000;
+            client.record_payment(&pool, &(i + 1), &sme, &1_000_000i128, &due, &(due + 1_000));
+        }
+        // Recent window (trend_window = 10 by default): all paid on time.
+        for i in 10..20u64 {
+            let due = 1_000_000 + i * 10_000;
+            client.record_payment(&pool, &(i + 1), &sme, &1_000_000i128, &due, &(due - 1_000));
+        }
+
+        let resp = client.get_credit_score(&sme);
+        assert!(
+            resp.trend_adjustment_pts > 0,
+            "a recent on-time streak after a late-heavy start should be rewarded, got {}",
+            resp.trend_adjustment_pts
+        );
+    }
+
+    #[test]
+    fn test_trend_adjustment_zero_with_insufficient_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+
+        // Fewer than the default trend_window (10) records.
+        for i in 0..3u64 {
+            let due = 1_000_000 + i * 10_000;
+            client.record_payment(&pool, &(i + 1), &sme, &1_000_000i128, &due, &(due - 1_000));
+        }
+
+        let resp = client.get_credit_score(&sme);
+        assert_eq!(resp.trend_adjustment_pts, 0);
     }
 }
