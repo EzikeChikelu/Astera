@@ -17,9 +17,25 @@ type CreditScoreResponse = Record<string, unknown> & {
   configVersion: number;
   isStale: boolean;
   blendedScore: number;
+  /** #1041: point delta from debtor-concentration/invoice-size risk signals. */
+  riskAdjustmentPts: number;
+  /** #1041: point delta from the repayment-trend factor. */
+  trendAdjustmentPts: number;
+  /** #1041: blendedScore + riskAdjustmentPts + trendAdjustmentPts, clamped. */
+  finalScore: number;
 };
 
-type AttestorType = 'CreditBureau' | 'TradeReference' | 'BusinessReference' | 'BankReference';
+/** #1041: off-chain-computed risk signal for an SME (see `submit_risk_signal`). */
+interface RiskSignalData {
+  debtorConcentrationBps: number;
+  invoiceSizeRiskBps: number;
+  submittedAt: number;
+}
+
+// #1041: fixed to match the real contract enum (contracts/credit_score/src/lib.rs
+// `AttestorType`) — the previous union here didn't match any of the four real
+// variants except CreditBureau, silently misencoding the other three.
+type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
 
 type AttestationStatus = 'Active' | 'Expired' | 'Revoked';
 
@@ -66,6 +82,17 @@ function creditScoreResponseFromScVal(raw: Record<string, unknown>): CreditScore
     configVersion: Number(raw.config_version),
     isStale: Boolean(raw.is_stale),
     blendedScore: Number(raw.blended_score),
+    riskAdjustmentPts: Number(raw.risk_adjustment_pts),
+    trendAdjustmentPts: Number(raw.trend_adjustment_pts),
+    finalScore: Number(raw.final_score),
+  };
+}
+
+function riskSignalDataFromScVal(raw: Record<string, unknown>): RiskSignalData {
+  return {
+    debtorConcentrationBps: Number(raw.debtor_concentration_bps),
+    invoiceSizeRiskBps: Number(raw.invoice_size_risk_bps),
+    submittedAt: Number(raw.submitted_at),
   };
 }
 
@@ -271,6 +298,79 @@ export class CreditScoreClient extends BaseClient {
           new Address(params.admin).toScVal(),
           nativeToScVal(params.attestationId, { type: 'u64' }),
           nativeToScVal(params.upheld, { type: 'bool' }),
+        ],
+        params.onProgress,
+      );
+    }
+
+    /** #1041: governance-configurable credibility weight, settable after registration. */
+    async setAttestorWeight(params: {
+      signer: Signer;
+      admin: string;
+      address: string;
+      weightBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> {
+      return this.buildAndSendTx(
+        params.admin,
+        'set_attestor_weight',
+        [
+          new Address(params.admin).toScVal(),
+          new Address(params.address).toScVal(),
+          nativeToScVal(params.weightBps, { type: 'u32' }),
+        ],
+        params.onProgress,
+      );
+    }
+
+    /** #1041: the latest off-chain-computed risk signal for `sme`, if any. */
+    async getRiskSignal(sme: string): Promise<RiskSignalData | null> {
+      const sim = await this.simulate('get_risk_signal', [
+        new Address(sme).toScVal(),
+      ]);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return riskSignalDataFromScVal(raw as Record<string, unknown>);
+    }
+
+    /** #1041: authorize the off-chain keeper permitted to call `submitRiskSignal`. */
+    async setRiskSignalKeeper(params: {
+      signer: Signer;
+      admin: string;
+      keeper: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> {
+      return this.buildAndSendTx(
+        params.admin,
+        'set_risk_signal_keeper',
+        [
+          new Address(params.admin).toScVal(),
+          new Address(params.keeper).toScVal(),
+        ],
+        params.onProgress,
+      );
+    }
+
+    /** #1041: submit (or replace) an SME's off-chain-computed risk signal. Keeper-only. */
+    async submitRiskSignal(params: {
+      signer: Signer;
+      keeper: string;
+      sme: string;
+      debtorConcentrationBps: number;
+      invoiceSizeRiskBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> {
+      return this.buildAndSendTx(
+        params.keeper,
+        'submit_risk_signal',
+        [
+          new Address(params.keeper).toScVal(),
+          new Address(params.sme).toScVal(),
+          nativeToScVal(params.debtorConcentrationBps, { type: 'u32' }),
+          nativeToScVal(params.invoiceSizeRiskBps, { type: 'u32' }),
         ],
         params.onProgress,
       );
