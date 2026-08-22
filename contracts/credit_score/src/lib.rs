@@ -270,13 +270,13 @@ pub struct ScoreAttestationConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoreRiskConfig {
     /// Above this share (bps) of an SME's volume tied to a single debtor,
-    /// `debtor_concentration_penalty_pts` applies.
-    pub debtor_concentration_threshold_bps: u32,
-    pub debtor_concentration_penalty_pts: i32,
+    /// `debtor_concen_penalty_pts` applies.
+    pub debtor_concen_thresh_bps: u32,
+    pub debtor_concen_penalty_pts: i32,
     /// Above this share (bps) of an SME's volume sitting in unusually large
-    /// invoices, `invoice_size_risk_penalty_pts` applies.
-    pub invoice_size_risk_threshold_bps: u32,
-    pub invoice_size_risk_penalty_pts: i32,
+    /// invoices, `size_risk_penalty_pts` applies.
+    pub size_risk_thresh_bps: u32,
+    pub size_risk_penalty_pts: i32,
 }
 
 /// #1041: repayment-trend adjustment — rewards/penalizes a recent on-time
@@ -349,10 +349,10 @@ impl ScoringConfig {
             // #1041: defaults are inert for any SME with no submitted risk
             // signal / insufficient payment history — see the fields' docs.
             risk: ScoreRiskConfig {
-                debtor_concentration_threshold_bps: 5_000,
-                debtor_concentration_penalty_pts: -15,
-                invoice_size_risk_threshold_bps: 5_000,
-                invoice_size_risk_penalty_pts: -10,
+                debtor_concen_thresh_bps: 5_000,
+                debtor_concen_penalty_pts: -15,
+                size_risk_thresh_bps: 5_000,
+                size_risk_penalty_pts: -10,
             },
             trend: ScoreTrendConfig {
                 trend_window: 10,
@@ -835,11 +835,11 @@ fn compute_risk_adjustment(env: &Env, sme: &Address, config: &ScoreRiskConfig) -
     };
 
     let mut adjustment = 0i32;
-    if signal.debtor_concentration_bps >= config.debtor_concentration_threshold_bps {
-        adjustment += config.debtor_concentration_penalty_pts;
+    if signal.debtor_concentration_bps >= config.debtor_concen_thresh_bps {
+        adjustment += config.debtor_concen_penalty_pts;
     }
-    if signal.invoice_size_risk_bps >= config.invoice_size_risk_threshold_bps {
-        adjustment += config.invoice_size_risk_penalty_pts;
+    if signal.invoice_size_risk_bps >= config.size_risk_thresh_bps {
+        adjustment += config.size_risk_penalty_pts;
     }
     adjustment
 }
@@ -1312,11 +1312,10 @@ impl CreditScoreContract {
             data.paid_on_time,
             &config.trend,
         );
-        let final_score = (blended_score as i64
-            + risk_adjustment_pts as i64
-            + trend_adjustment_pts as i64)
-            .clamp(config.core.min_score as i64, config.core.max_score as i64)
-            as u32;
+        let final_score =
+            (blended_score as i64 + risk_adjustment_pts as i64 + trend_adjustment_pts as i64)
+                .clamp(config.core.min_score as i64, config.core.max_score as i64)
+                as u32;
         CreditScoreResponse {
             sme: data.sme,
             score: data.score,
@@ -1527,10 +1526,10 @@ impl CreditScoreContract {
         // #1041: risk/trend thresholds are bps (0–10_000); penalty/bonus points
         // bounded to the same order of magnitude as the existing point knobs
         // above so a misconfigured value can't dwarf the rest of the formula.
-        if config.risk.debtor_concentration_threshold_bps > MAX_WEIGHT_BPS
-            || config.risk.invoice_size_risk_threshold_bps > MAX_WEIGHT_BPS
-            || config.risk.debtor_concentration_penalty_pts.unsigned_abs() > 100
-            || config.risk.invoice_size_risk_penalty_pts.unsigned_abs() > 100
+        if config.risk.debtor_concen_thresh_bps > MAX_WEIGHT_BPS
+            || config.risk.size_risk_thresh_bps > MAX_WEIGHT_BPS
+            || config.risk.debtor_concen_penalty_pts.unsigned_abs() > 100
+            || config.risk.size_risk_penalty_pts.unsigned_abs() > 100
         {
             panic!("invalid scoring config: risk config out of range");
         }
@@ -2127,8 +2126,10 @@ impl CreditScoreContract {
             .persistent()
             .set(&DataKey::Attestor(address.clone()), &info);
 
-        env.events()
-            .publish((EVT, Symbol::new(&env, "att_weight")), (address, weight_bps));
+        env.events().publish(
+            (EVT, Symbol::new(&env, "att_weight")),
+            (address, weight_bps),
+        );
     }
 
     fn add_active_attestor(env: &Env, address: &Address) {
