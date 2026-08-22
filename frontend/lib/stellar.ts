@@ -57,6 +57,10 @@ export const ACCESS_CONTROL_CONTRACT_ID = process.env.NEXT_PUBLIC_ACCESS_CONTROL
 
 // #1043: structured multi-party dispute arbitration — optional, unset until deployed.
 export const ARBITRATION_CONTRACT_ID = process.env.NEXT_PUBLIC_ARBITRATION_CONTRACT_ID ?? '';
+// #1036: collateral-liquidation Dutch auction + oracle-priced, multi-asset
+// collateral risk-response satellite, split out of `pool` to clear the 200KB
+// wasm deploy limit.
+export const AUCTION_CONTRACT_ID = process.env.NEXT_PUBLIC_AUCTION_CONTRACT_ID ?? '';
 
 export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';

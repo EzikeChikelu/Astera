@@ -189,6 +189,7 @@ dependencies = [
 name = "auction"
 version = "0.1.0"
 dependencies = [
+ "pool",
  "soroban-sdk",
 ]
 

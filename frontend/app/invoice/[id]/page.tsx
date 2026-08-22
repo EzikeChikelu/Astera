@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
@@ -22,6 +22,11 @@ import {
   buildDisputeTx,
   getCollateralConfig,
   getCollateralDeposit,
+  getLiveCollateralRatio,
+  getCollateralRiskConfig,
+  getAtRiskSince,
+  getAcceptedTokens,
+  getAssetPrice,
   buildDepositCollateralTx,
   buildTopUpCollateralTx,
   isInvoicePrivate,
@@ -52,6 +57,8 @@ import {
   Address,
   scValToNative,
   xdr,
+  stablecoinLabel,
+  fromStroops,
 } from '@/lib/stellar';
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
@@ -66,6 +73,7 @@ import type {
   PoolConfig,
   CollateralConfig,
   CollateralDeposit,
+  CollateralRiskConfig,
   CoFundingRound,
   FullCreditScore,
   DisputeRecord,
@@ -216,9 +224,26 @@ export default function InvoiceDetailPage() {
   const [newEvidenceHash, setNewEvidenceHash] = useState('');
   const [collateralConfig, setCollateralConfig] = useState<CollateralConfig | null>(null);
   const [collateralDeposit, setCollateralDeposit] = useState<CollateralDeposit | null>(null);
+  // #1036: live, oracle-priced ratio (bps) and the risk config it's judged
+  // against — null when the invoice isn't funded yet or no oracle is configured.
+  const [liveCollateralRatioBps, setLiveCollateralRatioBps] = useState<number | null>(null);
+  const [collateralRiskConfig, setCollateralRiskConfig] = useState<CollateralRiskConfig | null>(
+    null,
+  );
+  // #1036: ledger timestamp the position was first flagged at-risk — tracked
+  // entirely in the auction satellite's own storage, not on pool's
+  // CollateralDeposit (it's monitoring state, not fund-movement state).
+  const [atRiskSince, setAtRiskSince] = useState<number | null>(null);
   const [collateralAmount, setCollateralAmount] = useState<string>('');
   const [collateralLoading, setCollateralLoading] = useState(false);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
+  // #1036: which accepted token the SME is posting as collateral — may differ
+  // from the invoice's funding token (assumed USDC throughout this page, same
+  // as every other amount already rendered via formatUSDC).
+  const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
+  const [collateralToken, setCollateralToken] = useState<string>(USDC_TOKEN_ID);
+  const [crossAssetRequiredAmount, setCrossAssetRequiredAmount] = useState<bigint | null>(null);
+  const [crossAssetPriceLoading, setCrossAssetPriceLoading] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
   const [privacyLoading, setPrivacyLoading] = useState(false);
@@ -226,6 +251,51 @@ export default function InvoiceDetailPage() {
   const [coFundingRound, setCoFundingRound] = useState<CoFundingRound | null>(null);
   const [commitAmount, setCommitAmount] = useState<string>('');
   const [commitLoading, setCommitLoading] = useState(false);
+
+  // #1036: required collateral in the invoice's funding token (assumed USDC —
+  // see the comment on `collateralToken` above), independent of which asset
+  // is actually being posted.
+  const requiredCollateralAmount = useMemo(() => {
+    if (!collateralConfig || !metadata) return null;
+    return (metadata.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
+  }, [collateralConfig, metadata]);
+
+  // #1036: when the SME picks a collateral asset other than the funding
+  // token, convert the funding-token-denominated requirement into that
+  // asset's native amount via live oracle prices, so the form can show/submit
+  // a sensible default instead of forcing manual price math.
+  useEffect(() => {
+    if (!requiredCollateralAmount || requiredCollateralAmount <= 0n) {
+      setCrossAssetRequiredAmount(null);
+      return;
+    }
+    if (!collateralToken || !USDC_TOKEN_ID || collateralToken === USDC_TOKEN_ID) {
+      setCrossAssetRequiredAmount(null);
+      return;
+    }
+    let cancelled = false;
+    setCrossAssetPriceLoading(true);
+    (async () => {
+      try {
+        const [fundingPrice, assetPrice] = await Promise.all([
+          getAssetPrice(USDC_TOKEN_ID),
+          getAssetPrice(collateralToken),
+        ]);
+        if (cancelled) return;
+        setCrossAssetRequiredAmount(
+          assetPrice > 0n ? (requiredCollateralAmount * fundingPrice) / assetPrice : null,
+        );
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setCrossAssetRequiredAmount(null);
+      } finally {
+        if (!cancelled) setCrossAssetPriceLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [collateralToken, requiredCollateralAmount]);
 
   const loadHistory = useCallback(async (invoiceId: number) => {
     if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
@@ -281,6 +351,10 @@ export default function InvoiceDetailPage() {
         fundedResult,
         collateralConfigResult,
         collateralDepositResult,
+        liveRatioResult,
+        collateralRiskConfigResult,
+        atRiskSinceResult,
+        acceptedTokensResult,
         privateResult,
         creditScoreResult,
         coFundingResult,
@@ -291,6 +365,10 @@ export default function InvoiceDetailPage() {
         getFundedInvoice(numId),
         getCollateralConfig(),
         getCollateralDeposit(numId),
+        getLiveCollateralRatio(numId),
+        getCollateralRiskConfig(),
+        getAtRiskSince(numId),
+        getAcceptedTokens(),
         isInvoicePrivate(numId),
         getFullCreditScore(inv.owner),
         getCoFundingRound(numId),
@@ -306,6 +384,26 @@ export default function InvoiceDetailPage() {
       const deposit =
         collateralDepositResult.status === 'fulfilled' ? collateralDepositResult.value : null;
       setCollateralDeposit(deposit);
+      // #1036: getLiveCollateralRatio reverts (e.g. no oracle configured, or the
+      // invoice isn't funded yet) far more often than it succeeds today — that's
+      // expected, not an error, so it's swallowed the same way the other
+      // best-effort reads above are.
+      setLiveCollateralRatioBps(
+        liveRatioResult.status === 'fulfilled' ? liveRatioResult.value : null,
+      );
+      setCollateralRiskConfig(
+        collateralRiskConfigResult.status === 'fulfilled' ? collateralRiskConfigResult.value : null,
+      );
+      setAtRiskSince(atRiskSinceResult.status === 'fulfilled' ? atRiskSinceResult.value : null);
+      const tokens =
+        acceptedTokensResult.status === 'fulfilled' && Array.isArray(acceptedTokensResult.value)
+          ? acceptedTokensResult.value
+          : [];
+      setAcceptedTokens(tokens);
+      setCollateralToken((prev) => {
+        if (prev && tokens.includes(prev)) return prev;
+        return USDC_TOKEN_ID && tokens.includes(USDC_TOKEN_ID) ? USDC_TOKEN_ID : (tokens[0] ?? '');
+      });
       setIsPrivate(privateResult.status === 'fulfilled' ? privateResult.value : false);
       setCreditScore(creditScoreResult.status === 'fulfilled' ? creditScoreResult.value : null);
       setCoFundingRound(coFundingResult.status === 'fulfilled' ? coFundingResult.value : null);
@@ -465,16 +563,22 @@ export default function InvoiceDetailPage() {
   async function handleDepositCollateral() {
     if (!wallet.address || !invoice || !collateralConfig) return;
 
-    const requiredAmount = (metadata!.amount * BigInt(collateralConfig.collateralBps)) / 10_000n;
-    const amount = collateralAmount ? BigInt(collateralAmount) : requiredAmount;
-    if (amount <= 0n) {
-      toast.error('Please enter a valid collateral amount.');
+    // #1036: a top-up must match the asset already posted (the contract
+    // enforces this); only a fresh deposit lets the SME pick which accepted
+    // asset to post via the selector below.
+    const token = collateralDeposit ? collateralDeposit.token : collateralToken;
+    if (!token) {
+      toast.error('No accepted token configured.');
       return;
     }
 
-    const token = USDC_TOKEN_ID;
-    if (!token) {
-      toast.error('No accepted token configured. Check NEXT_PUBLIC_USDC_TOKEN_ID.');
+    const defaultAmount =
+      !collateralDeposit && token !== USDC_TOKEN_ID && crossAssetRequiredAmount != null
+        ? crossAssetRequiredAmount
+        : (requiredCollateralAmount ?? 0n);
+    const amount = collateralAmount ? BigInt(collateralAmount) : defaultAmount;
+    if (amount <= 0n) {
+      toast.error('Please enter a valid collateral amount.');
       return;
     }
 
@@ -1004,14 +1108,33 @@ export default function InvoiceDetailPage() {
                 );
 
                 if (collateralDeposit && collateralDeposit.settled) {
-                  if (metadata.status === 'Defaulted') {
+                  // #1036: releasedAt/seizedAt are the authoritative signal for
+                  // which outcome happened — metadata.status === 'Defaulted'
+                  // only covers the admin default-seizure path, not a
+                  // price-triggered liquidate_collateral call (which doesn't
+                  // touch the invoice's own status at all).
+                  if (collateralDeposit.seizedAt > 0) {
+                    const wasPriceLiquidated = metadata.status !== 'Defaulted';
                     return (
                       <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl text-sm">
-                        <p className="font-semibold text-red-400 mb-1">Collateral Seized</p>
+                        <p className="font-semibold text-red-400 mb-1">
+                          {wasPriceLiquidated ? 'Collateral Liquidated' : 'Collateral Seized'}
+                        </p>
                         <p className="text-brand-muted">
-                          Your collateral of {formatUSDC(collateralDeposit.amount)} was seized
-                          because this invoice was not repaid. The funds were redistributed to pool
-                          investors to offset the default loss.
+                          {wasPriceLiquidated ? (
+                            <>
+                              Your collateral of {formatUSDC(collateralDeposit.amount)} was
+                              liquidated on {formatDate(collateralDeposit.seizedAt)} after its
+                              oracle-priced value fell below the danger threshold and wasn&apos;t
+                              topped up in time.
+                            </>
+                          ) : (
+                            <>
+                              Your collateral of {formatUSDC(collateralDeposit.amount)} was seized
+                              because this invoice was not repaid. The funds were redistributed to
+                              pool investors to offset the default loss.
+                            </>
+                          )}
                         </p>
                       </div>
                     );
@@ -1032,8 +1155,45 @@ export default function InvoiceDetailPage() {
                       : 0;
                   const targetRatio = collateralConfig.collateralBps / 100;
                   const isAtRisk = ratio < targetRatio * 1.2;
+
+                  // #1036: on-chain, oracle-priced ratio — the authoritative
+                  // signal (covers collateral posted in an asset other than the
+                  // invoice's funding token, unlike the client-side estimate
+                  // above which assumes a 1:1 same-token comparison). Only
+                  // available once the invoice is funded and an oracle is
+                  // configured for both tokens.
+                  const liveRatioPct =
+                    liveCollateralRatioBps != null ? liveCollateralRatioBps / 100 : null;
+                  const dangerPct = collateralRiskConfig
+                    ? collateralRiskConfig.dangerBps / 100
+                    : null;
+                  const onChainAtRisk = atRiskSince != null;
+                  const topUpDeadline =
+                    onChainAtRisk && collateralRiskConfig
+                      ? atRiskSince! + collateralRiskConfig.gracePeriodSecs
+                      : null;
+
                   return (
                     <div className="space-y-3 text-sm">
+                      {onChainAtRisk && (
+                        <div className="p-4 bg-red-900/20 border border-red-800/50 rounded-xl">
+                          <p className="font-semibold text-red-400 mb-1">
+                            ⚠ Collateral at risk of liquidation
+                          </p>
+                          <p className="text-brand-muted text-xs">
+                            The oracle-priced value of your collateral has fallen below the danger
+                            threshold{dangerPct != null ? ` (${dangerPct.toFixed(0)}%)` : ''}.
+                            {topUpDeadline != null && (
+                              <>
+                                {' '}
+                                Top up before{' '}
+                                <span className="text-white">{formatDate(topUpDeadline)}</span> or
+                                it may be liquidated by any keeper.
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between">
                         <span className="text-brand-muted">Current ratio</span>
                         <span
@@ -1047,6 +1207,20 @@ export default function InvoiceDetailPage() {
                           {targetRatio.toFixed(0)}%)
                         </span>
                       </div>
+                      {liveRatioPct != null && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-brand-muted">Live ratio (oracle-priced)</span>
+                          <span
+                            className={
+                              onChainAtRisk
+                                ? 'font-semibold text-red-400'
+                                : 'font-semibold text-green-400'
+                            }
+                          >
+                            {liveRatioPct.toFixed(0)}% {onChainAtRisk ? '⚠' : '✓'}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-brand-muted">{requiredLabel}</span>
                         <span className="font-medium">{formatUSDC(requiredAmount)}</span>
@@ -1064,9 +1238,13 @@ export default function InvoiceDetailPage() {
                       {isOwner && !fullyRepaid && (
                         <button
                           onClick={() => setCollateralModalOpen(true)}
-                          className="w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+                          className={
+                            onChainAtRisk
+                              ? 'w-full px-5 py-3 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-500 transition-colors'
+                              : 'w-full px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors'
+                          }
                         >
-                          + Add Collateral
+                          {onChainAtRisk ? 'Top Up Now' : '+ Add Collateral'}
                         </button>
                       )}
                     </div>
@@ -1085,6 +1263,13 @@ export default function InvoiceDetailPage() {
                   );
                 }
 
+                const isCrossAsset = collateralToken !== USDC_TOKEN_ID;
+                const crossAssetPlaceholder = crossAssetPriceLoading
+                  ? 'Fetching live price...'
+                  : crossAssetRequiredAmount != null
+                    ? `Required: ~${fromStroops(crossAssetRequiredAmount).toLocaleString()} ${stablecoinLabel(collateralToken)}`
+                    : 'Enter amount';
+
                 return (
                   <div className="space-y-4">
                     <div className="flex justify-between text-sm">
@@ -1094,15 +1279,45 @@ export default function InvoiceDetailPage() {
                       </span>
                       <span className="font-medium">{formatUSDC(requiredAmount)}</span>
                     </div>
+                    {acceptedTokens.length > 1 && (
+                      <div>
+                        <label className="block text-xs text-brand-muted mb-1">
+                          Collateral Asset
+                        </label>
+                        <select
+                          value={collateralToken}
+                          onChange={(e) => {
+                            setCollateralToken(e.target.value);
+                            setCollateralAmount('');
+                          }}
+                          disabled={collateralLoading}
+                          className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white focus:border-brand-gold focus:outline-none disabled:opacity-60"
+                        >
+                          {acceptedTokens.map((tok) => (
+                            <option key={tok} value={tok}>
+                              {stablecoinLabel(tok)}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-brand-muted mt-1">
+                          Posting an asset other than the invoice&apos;s funding token is priced via
+                          the pool&apos;s oracle — the required amount updates live with its price.
+                        </p>
+                      </div>
+                    )}
                     <div>
                       <label className="block text-xs text-brand-muted mb-1">
-                        Collateral Amount (USDC)
+                        Collateral Amount ({stablecoinLabel(collateralToken)})
                       </label>
                       <input
                         type="text"
                         value={collateralAmount}
                         onChange={(e) => setCollateralAmount(e.target.value)}
-                        placeholder={`Required: ${formatUSDC(requiredAmount)}`}
+                        placeholder={
+                          isCrossAsset
+                            ? crossAssetPlaceholder
+                            : `Required: ${formatUSDC(requiredAmount)}`
+                        }
                         disabled={collateralLoading}
                         className="w-full px-4 py-2 bg-brand-dark border border-brand-border rounded-lg text-white placeholder-brand-muted focus:border-brand-gold focus:outline-none disabled:opacity-60"
                       />

@@ -43,6 +43,11 @@ const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || 
 const COMPLIANCE_CONTRACT_ID = (process.env.COMPLIANCE_CONTRACT_ID || '').trim();
 // #862: invoice tranching (senior/junior) with waterfall repayment and loss allocation
 const TRANCHE_CONTRACT_ID = (process.env.TRANCHE_CONTRACT_ID || '').trim();
+// #1036: collateral-liquidation Dutch auction + oracle-priced, multi-asset
+// collateral risk-response satellite, split out of pool to clear the 200KB
+// wasm deploy limit. Emits under its own "auction" topic — see
+// AUCTION_EVENT_TYPES below.
+const AUCTION_CONTRACT_ID = (process.env.AUCTION_CONTRACT_ID || '').trim();
 
 // #861: oracle_registry contract emits these event subtypes under the
 // "ORACLE" topic (see `EVT` in contracts/oracle_registry/src/lib.rs).
@@ -76,6 +81,19 @@ const SECONDARY_MARKET_EVENT_TYPES = new Set([
   'ord_cncl',
   'ord_fill',
   'ord_exp',
+]);
+
+// #1036: auction contract events (Dutch collateral sale + risk-response
+// monitoring), classified as 'pool' below — same satellite-of-pool rationale
+// as secondary_market above.
+const AUCTION_EVENT_TYPES = new Set([
+  'col_risk',
+  'col_safe',
+  'auc_liq',
+  'risk_cfg',
+  'sale_open',
+  'sale_take',
+  'sale_exp',
 ]);
 
 // #867: compliance contract emits under the "COMPLY" topic
@@ -142,6 +160,12 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (TRANCHE_CONTRACT_ID && contractId === TRANCHE_CONTRACT_ID) {
     return 'tranche';
   }
+  // #1036: auction's events are still surfaced as 'pool' category events —
+  // it's a satellite of pool, not a distinct product area (same rationale
+  // as secondary_market above).
+  if (AUCTION_CONTRACT_ID && contractId === AUCTION_CONTRACT_ID) {
+    return 'pool';
+  }
   // Fallback: infer from topic. credit_score events publish under "CREDIT",
   // oracle_registry events publish under "ORACLE" (#861),
   // compliance events publish under "COMPLY" (#867),
@@ -161,6 +185,7 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (contractType === 'invoice') return 'invoice';
   if (contractType === 'pool') return 'pool';
   if (SECONDARY_MARKET_EVENT_TYPES.has(eventType)) return 'pool';
+  if (contractType === 'auction' || AUCTION_EVENT_TYPES.has(eventType)) return 'pool';
   return 'unknown';
 }
 
@@ -266,7 +291,23 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         case 'wd_full':
         case 'wd_queue':
         case 'wd_cncl':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+        // #1036: (invoice_id, depositor, token, amount, ...) — depositor is value[1]
+        // (col_dep used to also carry a second, duplicate depositor at the
+        // end of the tuple; this case previously — incorrectly — checked
+        // value[0], which is invoice_id here, not an address)
         case 'col_dep':
+        case 'col_topup':
+        // (invoice_id, depositor, amount) — published by pool's trusted
+        // risk_liquidate_collateral, called by the auction risk-response
+        // satellite (matches execute_seize_collateral's own seizure event
+        // shape, which also doesn't carry token)
+        case 'col_liq':
+          if (isStellarAddress(value[1])) return value[1];
+          break;
+        // #1036: (admin, risk_contract) — admin is value[0]
+        case 'set_risk':
           if (isStellarAddress(value[0])) return value[0];
           break;
         // #1025: secondary market — seller is value[2], buyer is value[3]
@@ -277,6 +318,26 @@ function extractActor(contractType: string, eventType: string, value: any): stri
         case 'lst_buy':
           if (isStellarAddress(value[3])) return value[3];
           break;
+      }
+    } else if (contractType === 'auction') {
+      // #1036: auction (collateral-liquidation Dutch sale + risk-response
+      // monitoring) publishes under its own lowercase "auction" topic — see
+      // `EVT` in contracts/auction/src/lib.rs.
+      switch (eventType) {
+        case 'sale_open':
+        case 'sale_take':
+        case 'sale_exp':
+        case 'auc_liq':
+          if (isStellarAddress(value[1])) return value[1];
+          break;
+        case 'risk_cfg':
+          if (isStellarAddress(value[0])) return value[0];
+          break;
+        // (invoice_id, ratio_bps) — system-triggered by a permissionless
+        // keeper call, no actor address in the payload
+        case 'col_risk':
+        case 'col_safe':
+          return null;
       }
     } else if (contractType === 'market') {
       // #1035: secondary_market publishes its own events under a "market"

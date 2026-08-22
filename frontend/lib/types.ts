@@ -275,6 +275,17 @@ export interface CollateralDeposit {
   token: string;
   amount: bigint;
   settled: boolean;
+  postedAt: number;
+  releasedAt: number;
+  seizedAt: number;
+  collateralBpsAtDeposit: number;
+  thresholdAtDeposit: bigint;
+}
+
+// #1036: multi-asset, oracle-priced collateral risk response
+export interface CollateralRiskConfig {
+  dangerBps: number;
+  gracePeriodSecs: number;
 }
 
 // #861: N-of-M staked oracle consensus network
