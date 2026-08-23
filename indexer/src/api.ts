@@ -6,7 +6,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 import { Pool } from "pg";
-import { getEvents, getLatestLedger, getTrancheApy } from "./db";
+import { getEvents, getLatestLedger, getTrancheApy, getSmeRiskSignals } from "./db";
 import { logger } from "./logger";
 import { register } from "./metrics";
 
@@ -679,6 +679,40 @@ export function startApiServer(
       });
 
       return res.json({ sme, attestations });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #1041: off-chain-derived debtor-concentration and invoice-size risk
+  // signal for an SME, from the sme_risk_signals table (recomputed after
+  // each ingest batch that includes an invoice event). This is the read side
+  // consumed before calling the credit_score contract's `submit_risk_signal`
+  // entrypoint — this endpoint does not submit anything on-chain itself.
+  app.get("/credit-score/:sme/risk-signals", async (req, res) => {
+    try {
+      const { sme } = req.params;
+      if (!sme) {
+        return res.status(400).json({ error: "sme path param is required" });
+      }
+      const rows = await getSmeRiskSignals(pool, sme);
+      const row = rows[0];
+      if (!row) {
+        return res.json({
+          sme,
+          debtorConcentrationBps: 0,
+          invoiceSizeRiskBps: 0,
+          totalVolume: "0",
+          updatedAt: null,
+        });
+      }
+      return res.json({
+        sme: row.sme,
+        debtorConcentrationBps: row.debtorConcentrationBps,
+        invoiceSizeRiskBps: row.invoiceSizeRiskBps,
+        totalVolume: row.totalVolume.toString(),
+        updatedAt: row.updatedAt,
+      });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

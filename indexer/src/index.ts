@@ -15,6 +15,7 @@ import {
   storeEvents,
   getLatestLedger,
   recomputeTrancheApy,
+  recomputeSmeRiskSignals,
 } from "./db";
 import { startApiServer } from "./api";
 import { runBackfill } from "./backfill";
@@ -220,6 +221,21 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
             logger.error(
               { err: apyErr },
               "[Astera Indexer] Failed to recompute tranche APY",
+            );
+          }
+        }
+
+        // #1041: refresh derived per-SME risk signals whenever an invoice
+        // event lands, so a risk-signal submitter reading
+        // /credit-score/:sme/risk-signals sees current debtor-concentration/
+        // invoice-size data.
+        if (events.some((e) => e.contractType === "invoice")) {
+          try {
+            await recomputeSmeRiskSignals(pool, new Date().toISOString());
+          } catch (riskErr) {
+            logger.error(
+              { err: riskErr },
+              "[Astera Indexer] Failed to recompute SME risk signals",
             );
           }
         }

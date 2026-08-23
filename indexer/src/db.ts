@@ -400,3 +400,118 @@ export async function getTrancheApy(
       r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
   }));
 }
+
+// #1041: per-SME derived risk signals (see migrations/1700000000002_sme-risk-signals.js).
+export interface SmeRiskSignalRow {
+  sme: string;
+  debtorConcentrationBps: number;
+  invoiceSizeRiskBps: number;
+  totalVolume: bigint;
+  updatedAt: string;
+}
+
+/**
+ * Recompute `sme_risk_signals` from scratch off the indexed `invoice`
+ * `created` event stream. Idempotent: safe to call after every ingest batch.
+ *
+ * `created` events carry `(id, owner, amount, metadata_uri, timestamp, debtor)`
+ * — debtor concentration and invoice-size risk are both derivable purely
+ * from invoice-creation volume, with no need to correlate funding/
+ * settlement events. `debtor_concentration_bps` is the largest single
+ * debtor's share of an SME's total created volume; `invoice_size_risk_bps`
+ * is the share of volume sitting in invoices at least 3x the SME's own mean
+ * invoice size.
+ */
+export async function recomputeSmeRiskSignals(
+  pool: Pool,
+  updatedAt: string,
+): Promise<void> {
+  const { rows } = await pool.query(
+    `SELECT * FROM events WHERE contract_type = 'invoice' AND event_type = 'created' ORDER BY ledger_sequence ASC LIMIT 100000`,
+  );
+  const ordered = rows.map(rowToEvent);
+
+  type Acc = { total: bigint; amounts: bigint[]; byDebtor: Map<string, bigint> };
+  const bySme = new Map<string, Acc>();
+
+  for (const evt of ordered) {
+    const v = evt.value;
+    if (!Array.isArray(v) || v.length < 2) continue;
+    const owner = String(v[1] ?? "");
+    if (!owner) continue;
+    const amount = toBigInt(v[2]);
+    const debtor = v.length > 5 ? String(v[5] ?? "unknown") : "unknown";
+
+    let acc = bySme.get(owner);
+    if (!acc) {
+      acc = { total: 0n, amounts: [], byDebtor: new Map() };
+      bySme.set(owner, acc);
+    }
+    acc.total += amount;
+    acc.amounts.push(amount);
+    acc.byDebtor.set(debtor, (acc.byDebtor.get(debtor) ?? 0n) + amount);
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const [sme, acc] of bySme) {
+      if (acc.total === 0n) continue;
+
+      let maxDebtorVolume = 0n;
+      for (const vol of acc.byDebtor.values()) {
+        if (vol > maxDebtorVolume) maxDebtorVolume = vol;
+      }
+      const debtorBps = Number((maxDebtorVolume * 10_000n) / acc.total);
+
+      const meanAmount = acc.total / BigInt(acc.amounts.length);
+      const largeInvoiceThreshold = meanAmount * 3n;
+      let largeVolume = 0n;
+      for (const amount of acc.amounts) {
+        if (amount >= largeInvoiceThreshold) largeVolume += amount;
+      }
+      const sizeBps = Number((largeVolume * 10_000n) / acc.total);
+
+      await client.query(
+        `INSERT INTO sme_risk_signals
+           (sme, debtor_concentration_bps, invoice_size_risk_bps, total_volume, updated_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (sme) DO UPDATE SET
+           debtor_concentration_bps = $2,
+           invoice_size_risk_bps = $3,
+           total_volume = $4,
+           updated_at = $5`,
+        [sme, debtorBps, sizeBps, acc.total.toString(), updatedAt],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getSmeRiskSignals(
+  pool: Pool,
+  sme?: string,
+): Promise<SmeRiskSignalRow[]> {
+  const params: any[] = [];
+  let query = "SELECT * FROM sme_risk_signals";
+  if (sme) {
+    query += " WHERE sme = $1";
+    params.push(sme);
+  }
+  query += " ORDER BY sme";
+
+  const { rows } = await pool.query(query, params);
+  return rows.map((r) => ({
+    sme: r.sme,
+    debtorConcentrationBps: r.debtor_concentration_bps,
+    invoiceSizeRiskBps: r.invoice_size_risk_bps,
+    totalVolume: toBigInt(r.total_volume),
+    updatedAt:
+      r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
+  }));
+}
