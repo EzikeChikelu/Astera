@@ -809,50 +809,27 @@ fn compute_risk_adjustment(env: &Env, sme: &Address) -> i32 {
 }
 
 /// #1041: point delta from comparing the SME's on-time rate over the most
-/// recent `TREND_WINDOW` payment records against their lifetime on-time
-/// rate. Returns 0 when the SME has fewer than `TREND_WINDOW` total records
-/// (too little history for a meaningful trend) or when the recent rate is
-/// within 1 percentage point of the lifetime rate (flat).
+/// recent `TREND_WINDOW` payment records (`history`, already fetched by the
+/// caller via `get_payment_history` — reused rather than re-walking the ring
+/// buffer here) against their lifetime on-time rate. Returns 0 when there
+/// are fewer than `TREND_WINDOW` records (too little history for a
+/// meaningful trend) or when the recent rate is within 1 percentage point of
+/// the lifetime rate (flat).
 fn compute_trend_adjustment(
-    env: &Env,
-    sme: &Address,
+    history: &Vec<PaymentRecord>,
     total_invoices: u32,
     paid_on_time: u32,
 ) -> i32 {
-    if total_invoices < TREND_WINDOW {
+    if total_invoices < TREND_WINDOW || history.len() < TREND_WINDOW {
         return 0;
     }
 
-    let history_len: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::PaymentHistory(sme.clone()))
-        .unwrap_or(0);
-    if history_len < TREND_WINDOW {
-        return 0;
-    }
-    let start_idx: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::PaymentHistoryStart(sme.clone()))
-        .unwrap_or(0);
-    let max_history = max_payment_history(env);
-
-    // Walk the most recent TREND_WINDOW records in the ring buffer.
     let mut recent_on_time: u32 = 0;
     let mut recent_total: u32 = 0;
-    let skip = history_len - TREND_WINDOW;
-    for offset in skip..history_len {
-        let i = (start_idx + offset) % max_history;
-        if let Some(record) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, PaymentRecord>(&DataKey::PaymentRecordIdx(sme.clone(), i))
-        {
-            recent_total += 1;
-            if record.status == PaymentStatus::PaidOnTime {
-                recent_on_time += 1;
-            }
+    for record in history.iter().skip((history.len() - TREND_WINDOW) as usize) {
+        recent_total += 1;
+        if record.status == PaymentStatus::PaidOnTime {
+            recent_on_time += 1;
         }
     }
     if recent_total == 0 {
@@ -1268,8 +1245,14 @@ impl CreditScoreContract {
         let config_version = config.core.score_version;
         let blended_score = Self::compute_blended_score(&env, &sme, data.score);
         let risk_adjustment_pts = compute_risk_adjustment(&env, &sme);
-        let trend_adjustment_pts =
-            compute_trend_adjustment(&env, &sme, data.total_invoices, data.paid_on_time);
+        // Only fetch payment history (a persistent-storage read per record)
+        // when there's enough of it for compute_trend_adjustment to use.
+        let trend_adjustment_pts = if data.total_invoices >= TREND_WINDOW {
+            let history = Self::get_payment_history(env.clone(), sme.clone());
+            compute_trend_adjustment(&history, data.total_invoices, data.paid_on_time)
+        } else {
+            0
+        };
         let final_score =
             (blended_score as i64 + risk_adjustment_pts as i64 + trend_adjustment_pts as i64)
                 .clamp(config.core.min_score as i64, config.core.max_score as i64)
@@ -1574,7 +1557,7 @@ impl CreditScoreContract {
             .persistent()
             .set(&DataKey::RiskSignal(sme.clone()), &signal);
         env.events().publish(
-            (EVT, Symbol::new(&env, "risk_sig")),
+            (EVT, symbol_short!("risk_sig")),
             (sme, debtor_concentration_bps, invoice_size_risk_bps),
         );
     }
