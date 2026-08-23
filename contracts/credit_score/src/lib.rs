@@ -412,15 +412,20 @@ pub struct SimulateScoreCacheEntry {
     pub cached_at: u64,
 }
 
-/// #1041: off-chain-computed risk signal for an SME, submitted by the admin
-/// (see `submit_risk_signal`). Sourced from the indexer's aggregation of
-/// `invoice` contract events (debtor concentration, invoice-size
-/// distribution) — this contract does not call into `invoice` directly.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct RiskSignalData {
-    pub debtor_concentration_bps: u32,
-    pub invoice_size_risk_bps: u32,
+// #1041: off-chain-computed risk signal for an SME (see `submit_risk_signal`),
+// sourced from the indexer's aggregation of `invoice` contract events
+// (debtor concentration, invoice-size distribution) — this contract does not
+// call into `invoice` directly. Packed into a single u32 (debtor_concentration
+// in the high 16 bits, invoice_size_risk in the low 16 bits — both are
+// bps values <= MAX_WEIGHT_BPS, well within 16 bits) rather than a
+// dedicated #[contracttype] struct, whose TryFromVal/IntoVal derive would
+// otherwise be a meaningful chunk of this contract's WASM-size budget.
+fn pack_risk_signal(debtor_concentration_bps: u32, invoice_size_risk_bps: u32) -> u32 {
+    (debtor_concentration_bps << 16) | invoice_size_risk_bps
+}
+
+fn unpack_risk_signal(packed: u32) -> (u32, u32) {
+    (packed >> 16, packed & 0xFFFF)
 }
 
 /// Returned by `get_credit_score`. Includes the current config version alongside the
@@ -454,7 +459,7 @@ pub struct CreditScoreResponse {
     /// zero active attestations — existing SMEs are never regressed by v2.
     pub blended_score: u32,
     /// #1041: point delta from debtor-concentration + invoice-size risk
-    /// signals. 0 when no `RiskSignalData` has been submitted for this SME.
+    /// signals. 0 when no risk signal has been submitted for this SME.
     pub risk_adjustment_pts: i32,
     /// #1041: point delta from the repayment-trend factor. 0 when the SME
     /// has fewer than `TREND_WINDOW` payment records.
@@ -789,20 +794,21 @@ fn hash_attestation_pairs(pairs: &Vec<(u32, u32)>, generation: u32) -> u64 {
 /// no signal has ever been submitted, so an SME is never regressed simply by
 /// this feature existing.
 fn compute_risk_adjustment(env: &Env, sme: &Address) -> i32 {
-    let signal: Option<RiskSignalData> = env
+    let packed: Option<u32> = env
         .storage()
         .persistent()
         .get(&DataKey::RiskSignal(sme.clone()));
-    let signal = match signal {
-        Some(s) => s,
+    let packed = match packed {
+        Some(p) => p,
         None => return 0,
     };
+    let (debtor_concentration_bps, invoice_size_risk_bps) = unpack_risk_signal(packed);
 
     let mut adjustment = 0i32;
-    if signal.debtor_concentration_bps >= DEBTOR_CONCEN_THRESH_BPS {
+    if debtor_concentration_bps >= DEBTOR_CONCEN_THRESH_BPS {
         adjustment += DEBTOR_CONCEN_PENALTY_PTS;
     }
-    if signal.invoice_size_risk_bps >= SIZE_RISK_THRESH_BPS {
+    if invoice_size_risk_bps >= SIZE_RISK_THRESH_BPS {
         adjustment += SIZE_RISK_PENALTY_PTS;
     }
     adjustment
@@ -1549,13 +1555,10 @@ impl CreditScoreContract {
             panic_with_error!(&env, CreditScoreError::InvalidRiskSignal);
         }
 
-        let signal = RiskSignalData {
-            debtor_concentration_bps,
-            invoice_size_risk_bps,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::RiskSignal(sme.clone()), &signal);
+        env.storage().persistent().set(
+            &DataKey::RiskSignal(sme.clone()),
+            &pack_risk_signal(debtor_concentration_bps, invoice_size_risk_bps),
+        );
         env.events().publish(
             (EVT, symbol_short!("risk_sig")),
             (sme, debtor_concentration_bps, invoice_size_risk_bps),
