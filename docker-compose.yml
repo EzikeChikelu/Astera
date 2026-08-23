@@ -89,6 +89,24 @@ services:
     ports:
       - "4000:4000"
 
+  # ── Indexer's Postgres database ────────────────────────────────────────────
+  indexer-postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=astera
+      - POSTGRES_PASSWORD=astera
+      - POSTGRES_DB=astera_indexer
+    volumes:
+      - indexer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astera -d astera_indexer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   # ── Off-chain indexer ──────────────────────────────────────────────────────
   indexer:
     build:
@@ -96,17 +114,17 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3001:3001"
-    volumes:
-      - ./indexer/data:/indexer/data
     environment:
       - HORIZON_URL=http://stellar:8000
       - CONTRACT_IDS=${INVOICE_CONTRACT_ID:-},${POOL_CONTRACT_ID:-}
       - SECONDARY_MARKET_CONTRACT_ID=${SECONDARY_MARKET_CONTRACT_ID:-}
       - POLLING_INTERVAL_MS=5000
       - API_PORT=3001
-      - DB_PATH=/indexer/data/indexer.db
+      - DATABASE_URL=postgres://astera:astera@indexer-postgres:5432/astera_indexer
     depends_on:
       stellar:
+        condition: service_healthy
+      indexer-postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -178,3 +196,4 @@ volumes:
   stellar-data:
   # Shared volume so the deployer can pass contract IDs to the frontend.
   contract-ids:
+  indexer-postgres-data:

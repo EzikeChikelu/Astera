@@ -1,12 +1,6 @@
 import { type NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
-import {
-  rpcGetEvents,
-  rpcGetLatestLedger,
-  INVOICE_CONTRACT_ID,
-  POOL_CONTRACT_ID,
-  scValToNative,
-} from '../../../lib/stellar';
+import { INVOICE_CONTRACT_ID, POOL_CONTRACT_ID } from '../../../lib/stellar';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +9,46 @@ const POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_SSE_POLL_INTERVAL_MS ?? 
 const MIN_POLL_INTERVAL_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const INITIAL_LOOKBACK_LEDGERS = 10;
+// #1039: source live events from the indexer's Postgres-backed query API
+// instead of polling Soroban RPC directly — the indexer already ingests
+// every INVOICE/POOL event, so this endpoint just needs to tail it.
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+
+interface IndexerEventRow {
+  id: string;
+  contractId: string;
+  topic: unknown[];
+  value: unknown;
+  ledgerSequence: number;
+  ledgerCloseAt: string;
+  txHash: string;
+}
+
+async function fetchIndexerLatestLedger(): Promise<number> {
+  const res = await fetch(`${INDEXER_URL}/ledger/latest`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`indexer /ledger/latest returned ${res.status}`);
+  const data = (await res.json()) as { latestLedger: number | null };
+  return data.latestLedger ?? 0;
+}
+
+async function fetchIndexerEvents(contractId: string, afterLedger: number) {
+  const url = new URL(`${INDEXER_URL}/events`);
+  url.searchParams.set('contract_id', contractId);
+  url.searchParams.set('after_ledger', String(afterLedger));
+  url.searchParams.set('limit', '200');
+  const res = await fetch(url.toString(), { cache: 'no-store' });
+  if (!res.ok) throw new Error(`indexer /events returned ${res.status}`);
+  const data = (await res.json()) as { events: IndexerEventRow[] };
+  return data.events.map((e) => ({
+    id: e.id,
+    contractId: e.contractId,
+    topic: e.topic,
+    value: e.value,
+    ledger: e.ledgerSequence,
+    txHash: e.txHash,
+    ledgerCloseAt: e.ledgerCloseAt,
+  }));
+}
 
 type SseClient = {
   controller: ReadableStreamDefaultController;
@@ -33,39 +67,22 @@ async function sharedPoll() {
   if (contractIds.length === 0) return;
 
   try {
-    const latest = await rpcGetLatestLedger();
-    const currentLedger = latest.sequence;
+    if (sharedLastSeenLedger === 0) {
+      const latest = await fetchIndexerLatestLedger();
+      sharedLastSeenLedger = Math.max(0, latest - INITIAL_LOOKBACK_LEDGERS);
+    }
 
-    if (currentLedger <= sharedLastSeenLedger) return;
+    const batches = await Promise.all(
+      contractIds.map((contractId) => fetchIndexerEvents(contractId, sharedLastSeenLedger)),
+    );
+    const events = batches.flat().sort((a, b) => a.ledger - b.ledger);
+    if (events.length === 0) return;
 
-    const startLedger =
-      sharedLastSeenLedger > 0
-        ? sharedLastSeenLedger + 1
-        : Math.max(1, currentLedger - INITIAL_LOOKBACK_LEDGERS);
+    sharedLastSeenLedger = events.reduce((max, e) => Math.max(max, e.ledger), sharedLastSeenLedger);
 
-    const response = await rpcGetEvents({
-      startLedger,
-      filters: [{ contractIds }],
-    });
-
-    sharedLastSeenLedger = currentLedger;
-
-    for (const raw of response.events) {
-      const e = raw as unknown as Record<string, unknown>;
-      const topic = ((e.topic as unknown[]) ?? []).map((t) =>
-        scValToNative(t as Parameters<typeof scValToNative>[0]),
-      );
-      const value = scValToNative(e.value as Parameters<typeof scValToNative>[0]);
-      const eventInvoiceId = (value as unknown[] | null)?.[0];
-      const payload = JSON.stringify({
-        id: e.id,
-        contractId: e.contractId,
-        topic,
-        value,
-        ledger: e.ledger,
-        txHash: e.txHash,
-        ledgerCloseAt: (e.ledgerClosedAt ?? e.ledgerCloseAt) as string,
-      });
+    for (const e of events) {
+      const eventInvoiceId = (e.value as unknown[] | null)?.[0];
+      const payload = JSON.stringify(e);
 
       for (const client of sharedClients) {
         if (client.invoiceId !== null && String(eventInvoiceId) !== client.invoiceId) continue;
