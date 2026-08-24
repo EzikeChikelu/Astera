@@ -9,6 +9,8 @@ export { TrancheClient } from './clients/tranche';
 export type { TrancheInvestorPosition } from './clients/tranche';
 export { AccessControlClient } from './clients/access_control';
 export { AuctionClient } from './clients/auction';
+export { InsuranceClient } from './clients/insurance';
+export { ReferralClient } from './clients/referral';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';
@@ -30,6 +32,17 @@ export type {
   InvoiceTrancheExposure,
   WaterfallSimulation,
 } from './generated/tranche';
+export { Errors as InsuranceErrors } from './generated/insurance';
+export type {
+  PremiumConfig,
+  InsuranceRiskTier,
+  ReserveFund,
+  CoverageRecord,
+  ClaimHistoryItem,
+  ReserveHealth,
+} from './generated/insurance';
+export { Errors as ReferralErrors } from './generated/referral';
+export type { ReferralStats, LeaderboardEntry } from './generated/referral';
 export {
   parseContractEvent,
   ContractEvent,
