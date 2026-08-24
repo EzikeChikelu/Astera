@@ -22,7 +22,9 @@
       "disputed": "En disputa",
       "funded": "Financiada",
       "paid": "Pagada",
-      "defaulted": "En mora"
+      "defaulted": "En mora",
+      "cancelled": "Cancelada",
+      "expired": "Expirada"
     },
     "sort": {
       "createdDesc": "Fecha de creacion (mas reciente)",
@@ -42,6 +44,21 @@
     "allLoaded": "Todas las facturas cargadas - {count} en total",
     "notifications": {
       "loadError": "No se pudieron cargar las facturas. Verifica que los contratos esten desplegados."
+    },
+    "view": {
+      "list": "Lista",
+      "pipeline": "Canal"
+    },
+    "pipeline": {
+      "needsAttention": "Necesitan atencion",
+      "noAttention": "Ninguna factura necesita atencion por ahora.",
+      "columns": {
+        "pending": "Pendiente",
+        "awaitingVerification": "En espera de verificacion",
+        "verified": "Verificada",
+        "funded": "Financiada",
+        "paid": "Pagada / completada"
+      }
     }
   },
   "Notifications": {
