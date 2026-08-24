@@ -50,6 +50,10 @@ pub fn distribute_waterfall_repayment(
         .instance()
         .set(&DataKey::Pool(token.clone()), &pool);
 
+    env.storage()
+        .instance()
+        .remove(&DataKey::InvoiceExposure(invoice_id));
+
     env.events().publish(
         (EVT, REPAY),
         (invoice_id, token, senior_amount, junior_amount),
@@ -110,6 +114,10 @@ pub fn allocate_loss(env: &Env, token: Address, invoice_id: u64, shortfall: i128
     env.storage()
         .instance()
         .set(&DataKey::Pool(token.clone()), &pool);
+
+    env.storage()
+        .instance()
+        .remove(&DataKey::InvoiceExposure(invoice_id));
 
     env.events().publish(
         (EVT, DEFAULT),
