@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, Address, Env};
+use soroban_sdk::{panic_with_error, token, Address, Env};
 
 use crate::{
     errors::TrancheError,
@@ -12,6 +12,9 @@ pub fn deposit(env: &Env, investor: Address, token: Address, tranche: TrancheCla
     }
 
     investor.require_auth();
+
+    let token_client = token::Client::new(&env, &token);
+    token_client.transfer(&investor, &env.current_contract_address(), &amount);
 
     let mut pool: TranchePool = env
         .storage()

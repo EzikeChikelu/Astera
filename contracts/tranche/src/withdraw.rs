@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, Address, Env};
+use soroban_sdk::{panic_with_error, token, Address, Env};
 
 use crate::{
     errors::TrancheError,
@@ -38,6 +38,9 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
 
     position.shares -= amount;
     position.deposited -= amount;
+
+    let token_client = token::Client::new(&env, &token);
+    token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
     env.storage().instance().set(&key, &position);
     env.storage()

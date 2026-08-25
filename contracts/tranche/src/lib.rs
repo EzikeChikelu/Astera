@@ -123,6 +123,15 @@ impl TrancheContract {
             .unwrap_or_default()
     }
 
+    fn validate_config(env: &Env, config: &TrancheConfig) {
+        if config.senior_target_yield_bps > 10_000
+            || config.senior_advance_rate_bps > 10_000
+            || config.junior_first_loss_bps > 10_000
+        {
+            panic_with_error!(env, TrancheError::InvalidAmount);
+        }
+    }
+
     pub fn set_tranche_config(
         env: Env,
         admin: Address,
@@ -138,12 +147,15 @@ impl TrancheContract {
             panic_with_error!(&env, TrancheError::Unauthorized);
         }
 
-        let mut pool = Self::get_pool(env.clone(), token.clone());
-        pool.config = TrancheConfig {
+        let config = TrancheConfig {
             senior_target_yield_bps,
             senior_advance_rate_bps,
             junior_first_loss_bps,
         };
+        Self::validate_config(&env, &config);
+
+        let mut pool = Self::get_pool(env.clone(), token.clone());
+        pool.config = config;
 
         env.storage()
             .instance()
@@ -174,6 +186,8 @@ impl TrancheContract {
         if admin != stored_admin {
             panic_with_error!(&env, TrancheError::Unauthorized);
         }
+
+        Self::validate_config(&env, &config);
 
         if env
             .storage()
