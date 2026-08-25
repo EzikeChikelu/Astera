@@ -391,6 +391,33 @@ mod test {
     }
 
     #[test]
+    fn test_set_admin_rotates_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.admin(), admin);
+        client.set_admin(&new_admin);
+        assert_eq!(client.admin(), new_admin);
+
+        // The new admin can now mint, the old one cannot.
+        let to = Address::generate(&env);
+        client.mint(&to, &100i128);
+        assert_eq!(client.balance(&to), 100);
+    }
+
+    #[test]
+    fn test_set_admin_requires_current_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths — only the current admin may rotate.
+        let (client, _admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_set_admin(&new_admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
     #[should_panic(expected = "amount must be positive")]
     fn test_burn_zero_amount() {
         let env = Env::default();

@@ -4,6 +4,7 @@ use access_control::{
     AccessControlContract, AccessControlContractClient, AccessControlError, ActionPayload,
     ProposalStatus, Role,
 };
+
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     vec, Address, Env,
@@ -438,5 +439,146 @@ fn test_expired_approved_proposal_cannot_execute() {
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::ProposalExpired.into()
+    );
+}
+
+// ── #1135: payload/target coherence validation ────────────────────────────
+
+/// A self-management payload (AddSigner) proposed against an external address
+/// must be rejected immediately — executing it against `this_contract != target`
+/// would route to `execute_cross_contract` whose self-management catch-all arm
+/// silently does nothing, leaving the proposal with `Executed` status but zero
+/// real effect.
+#[test]
+fn test_self_management_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+    let victim = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external, // wrong: self-management must target this_contract
+        &ActionPayload::AddSigner(Role::TreasuryManager, victim),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A RemoveSigner payload proposed against an external address must likewise
+/// be rejected — same silent-no-op risk as AddSigner above.
+#[test]
+fn test_remove_signer_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::RemoveSigner(Role::SuperAdmin, f.s2.clone()),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A SetThreshold payload proposed against an external address must be
+/// rejected — same silent-no-op risk.
+#[test]
+fn test_set_threshold_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::SetThreshold(Role::SuperAdmin, 1),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A cross-contract payload (SetYield) proposed with `target == this_contract`
+/// must be rejected — executing it would route to `execute_self_management`
+/// whose `_ => Ok(())` catch-all silently does nothing, leaving the proposal
+/// with `Executed` status but zero real effect on the intended external target.
+#[test]
+fn test_cross_contract_payload_with_self_as_target_is_rejected() {
+    let f = setup();
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id, // wrong: cross-contract payload must NOT target this_contract
+        &ActionPayload::SetYield(500),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// Another cross-contract payload (SetPaused) with this_contract as target —
+/// verifies the check applies regardless of which pool action is used.
+#[test]
+fn test_set_paused_payload_with_self_as_target_is_rejected() {
+    let f = setup();
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetPaused(true),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// Coherent self-management proposals (target == this_contract) must still work
+/// correctly — regression guard to confirm the validation only blocks bad cases.
+#[test]
+fn test_coherent_self_management_proposal_is_accepted() {
+    let f = setup();
+    let new_signer = Address::generate(&f.env);
+
+    // This is the correct pairing: AddSigner payload + this_contract as target.
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, new_signer.clone()),
+    );
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Pending
+    );
+}
+
+/// Coherent cross-contract proposals (target != this_contract) must still work
+/// correctly — regression guard to confirm the validation only blocks bad cases.
+#[test]
+fn test_coherent_cross_contract_proposal_is_accepted() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    // This is the correct pairing: SetYield payload + an external target.
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::SetYield(800),
+    );
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Pending
     );
 }
