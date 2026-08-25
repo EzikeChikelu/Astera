@@ -77,6 +77,15 @@
       "disconnectedTitle": "Portefeuille déconnecté",
       "disconnectedDescription": "Votre portefeuille Freighter n'est plus connecté à ce site. Reconnectez-vous pour continuer."
     },
+    "networkMismatch": {
+      "title": "Réseau incompatible détecté",
+      "messageStart": "Votre portefeuille Freighter est connecté à",
+      "messageMiddle": "mais cette application utilise",
+      "messageEnd": "Veuillez changer de réseau dans Freighter pour continuer.",
+      "helpLink": "Comment changer de réseau",
+      "dismiss": "Fermer l'avertissement de réseau incompatible",
+      "unknownNetwork": "Inconnu"
+    },
     "toast": {
       "dismiss": "Fermer la notification"
     },
