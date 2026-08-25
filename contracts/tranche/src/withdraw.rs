@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, token, Address, Env};
+use soroban_sdk::{panic_with_error, token, Address, Env, IntoVal, Symbol, Vec};
 
 use crate::{
     errors::TrancheError,
@@ -39,6 +39,11 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
     position.shares -= amount;
     position.deposited -= amount;
 
+    let share_token = match tranche {
+        TrancheClass::Senior => pool.senior_share_token.clone(),
+        TrancheClass::Junior => pool.junior_share_token.clone(),
+    };
+
     let token_client = token::Client::new(&env, &token);
     token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
@@ -46,6 +51,11 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
     env.storage()
         .instance()
         .set(&DataKey::Pool(token.clone()), &pool);
+
+    let mut burn_args = Vec::new(env);
+    burn_args.push_back(investor.clone().into_val(env));
+    burn_args.push_back(amount.into_val(env));
+    let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
 
     env.events()
         .publish((EVT, WITHDRAW), (investor, token, tranche, amount));

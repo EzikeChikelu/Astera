@@ -20,8 +20,12 @@ export default function NetworkMismatchBanner() {
     });
   };
 
-  const walletNetworkName = formatNetworkName(networkMismatch.walletNetwork);
-  const appNetworkName = formatNetworkName(networkMismatch.appNetwork);
+  const walletNetworkName = networkMismatch.walletNetwork
+    ? formatNetworkName(networkMismatch.walletNetwork)
+    : t('unknownNetwork');
+  const appNetworkName = networkMismatch.appNetwork
+    ? formatNetworkName(networkMismatch.appNetwork)
+    : t('unknownNetwork');
 
   return (
     <div className="fixed top-16 left-0 right-0 z-40 bg-red-900/95 border-b border-red-800 backdrop-blur-sm">

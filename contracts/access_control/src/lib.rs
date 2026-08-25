@@ -40,6 +40,9 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 /// unapproved, unless overridden at `initialize()`. 7 days.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 604_800;
 
+/// Maximum number of signers per role to prevent unbounded iteration.
+const MAX_SIGNERS_PER_ROLE: u32 = 32;
+
 // ─── Roles ──────────────────────────────────────────────────────────────────
 
 /// A named role, each with its own independent signer set and threshold.
@@ -227,6 +230,12 @@ pub enum AccessControlError {
     InvalidExpiryWindow = 13,
     SignerNotFound = 14,
     NoApprovalToRevoke = 15,
+    /// The `action` payload and `target` address are incoherent: self-management
+    /// payloads (AddSigner / RemoveSigner / SetThreshold) must be proposed with
+    /// `target == this_contract`, and every cross-contract payload must be
+    /// proposed with `target != this_contract`.  A mismatched proposal would
+    /// silently no-op on execution, so it is rejected at creation time instead.
+    IncoherentProposal = 16,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -456,6 +465,23 @@ impl AccessControlContract {
             return Err(AccessControlError::SelfManagementRequiresSuperAdmin);
         }
 
+        // #1135: Validate payload/target coherence before the proposal enters
+        // the approval queue.  Self-management payloads mutate *this* contract's
+        // own storage, so they must target this contract.  Cross-contract
+        // payloads call out to an external contract, so they must not target
+        // this contract — executing them against `this_contract` would hit
+        // `execute_cross_contract`'s self-management catch-all arm and silently
+        // do nothing.  Rejecting here ensures a mismatched proposal never
+        // reaches `Executed` status with zero real effect.
+        let this_contract = env.current_contract_address();
+        let targets_self = target == this_contract;
+        if Self::is_self_management(&action) && !targets_self {
+            return Err(AccessControlError::IncoherentProposal);
+        }
+        if !Self::is_self_management(&action) && targets_self {
+            return Err(AccessControlError::IncoherentProposal);
+        }
+
         let config: MultiSigConfig = env
             .storage()
             .instance()
@@ -522,7 +548,8 @@ impl AccessControlContract {
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Pending {
+        if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
+        {
             return Err(AccessControlError::ProposalNotPending);
         }
         if env.ledger().timestamp() > proposal.expires_at {
@@ -603,10 +630,10 @@ impl AccessControlContract {
         Ok(())
     }
 
-    /// Reject a still-pending proposal. Any registered signer for the
-    /// proposal's role may reject — correcting a mistaken or malicious
-    /// proposal doesn't need the full approval threshold, since rejecting
-    /// only ever narrows what can execute, never widens it.
+    /// Reject a pending or approved proposal before it executes. Any registered
+    /// signer for the proposal's role may reject — correcting a mistaken or
+    /// malicious proposal doesn't need the full approval threshold, since
+    /// rejecting only ever narrows what can execute, never widens it.
     pub fn reject_action(env: Env, signer: Address, proposal_id: u64) -> Result_ {
         signer.require_auth();
         bump_instance(&env);
@@ -896,6 +923,10 @@ impl AccessControlContract {
                 let mut config = Self::role_config_or_default(env, *role);
                 if config.signers.contains(address) {
                     return Err(AccessControlError::DuplicateSigner);
+                }
+                // #1141: cap signer set size to prevent unbounded iteration overhead.
+                if config.signers.len() >= MAX_SIGNERS_PER_ROLE {
+                    return Err(AccessControlError::MaxSignersExceeded);
                 }
                 config.signers.push_back(address.clone());
                 env.storage()
