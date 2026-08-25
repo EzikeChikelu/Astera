@@ -2,12 +2,16 @@
 
 Every Astera contract event now has a two-segment topic:
 
-| Contract         | Namespace | Action format          | Examples                                                           |
-| ---------------- | --------- | ---------------------- | ------------------------------------------------------------------ |
-| Invoice          | `invoice` | lowercase `snake_case` | `created`, `funded`, `default`, `due_ext`, `meta_img`              |
-| Pool             | `pool`    | lowercase `snake_case` | `deposit`, `funded`, `part_pay`, `repaid`, `yld_claim`, `wd_queue` |
-| Secondary market | `market`  | lowercase `snake_case` | `lst_open`, `lst_buy`, `ord_open`, `ord_fill`, `ord_cncl`          |
-| Credit score     | `credit`  | lowercase `snake_case` | `score_cfg`, `payment`, `dispute`, `resolved`, `lt_upd`            |
+| Contract         | Namespace  | Action format          | Examples                                                           |
+| ---------------- | ---------- | ---------------------- | ------------------------------------------------------------------ |
+| Invoice          | `invoice`  | lowercase `snake_case` | `created`, `funded`, `default`, `due_ext`, `meta_img`              |
+| Pool             | `pool`     | lowercase `snake_case` | `deposit`, `funded`, `part_pay`, `repaid`, `yld_claim`, `wd_queue` |
+| Secondary market | `market`   | lowercase `snake_case` | `lst_open`, `lst_buy`, `ord_open`, `ord_fill`, `ord_cncl`          |
+| Credit score     | `credit`   | lowercase `snake_case` | `score_cfg`, `payment`, `dispute`, `resolved`, `lt_upd`            |
+| Tranche          | `TRANCHE`  | lowercase `snake_case` | `deposit`, `withdraw`, `fund`, `repay`, `default`, `config`        |
+| Auction          | `auction`  | lowercase `snake_case` | `col_risk`, `col_safe`, `auc_liq`, `sale_open`, `sale_take`        |
+| Compliance       | `COMPLY`   | lowercase `snake_case` | `screened`, `review`, `scr_prop`, `tl_set`, `paused`               |
+| Oracle registry  | `ORACLE`   | lowercase `snake_case` | `registrd`, `rnd_open`, `voted`, `consensus`, `cfg_upd`            |
 
 ## Secondary market (`market` namespace)
 
@@ -40,10 +44,76 @@ resting/maker order's per-unit price), not the per-unit `price` carried on
 fill from the trusted `market_settle_listing` entrypoint) carries the same trade
 as `(invoice_id, seller, buyer, price)`.
 
-Actions are Soroban `Symbol` values and must therefore remain within the SDK's
-symbol length limit. Existing short actions are retained for ABI compatibility;
-new actions must be lowercase and use underscores when they contain more than
-one word.
+## Tranche (`TRANCHE` namespace)
+
+The `tranche` contract (#862) implements invoice tranching (senior/junior) with
+waterfall repayment and loss allocation. Events are emitted under the uppercase
+`TRANCHE` topic.
+
+| Action     | Payload                                                            |
+| ---------- | ------------------------------------------------------------------ |
+| `deposit`  | `(investor, token, amount, tranche_class)`                        |
+| `withdraw` | `(investor, token, amount, tranche_class)`                        |
+| `fund`     | `(invoice_id, token, senior_deployed, junior_deployed)`            |
+| `repay`    | `(invoice_id, token, senior_payout, junior_payout)`                |
+| `default`  | `(invoice_id, token, junior_loss, senior_loss)`                    |
+| `config`   | `(admin, senior_bps, junior_bps, ...)`                             |
+
+## Auction (`auction` namespace)
+
+The `auction` satellite contract (#1036) handles collateral-liquidation Dutch
+auctions and oracle-priced risk-response monitoring. It is classified as `pool`
+by the indexer (satellite of pool). Events are emitted under the lowercase
+`auction` topic.
+
+| Action     | Payload                                                              |
+| ---------- | -------------------------------------------------------------------- |
+| `col_risk` | `(invoice_id, ratio_bps)`                                            |
+| `col_safe` | `(invoice_id, ratio_bps)`                                            |
+| `auc_liq`  | `(invoice_id, depositor, token, amount, ...)`                        |
+| `risk_cfg` | `(admin, risk_contract, ...)`                                        |
+| `sale_open`| `(listing_id, invoice_id, depositor, token, amount, start_price, ...)` |
+| `sale_take`| `(listing_id, invoice_id, depositor, buyer, price, ...)`             |
+| `sale_exp` | `(listing_id, invoice_id, depositor)`                                |
+
+## Compliance (`COMPLY` namespace)
+
+The `compliance` contract (#867) provides on-chain sanctions screening and
+compliance registry. Events are emitted under the uppercase `COMPLY` topic.
+
+| Action     | Payload                                                              |
+| ---------- | -------------------------------------------------------------------- |
+| `screened` | `(screener, subject, result, ...)`                                   |
+| `review`   | `(screener, subject, status, ...)`                                   |
+| `scr_prop` | `(proposer, subject, ...)`                                           |
+| `scr_reg`  | `(admin, subject, ...)`                                              |
+| `scr_del`  | `(admin, subject, ...)`                                              |
+| `scr_can`  | `(admin, subject, ...)`                                              |
+| `int_set`  | `(admin, interval, ...)`                                             |
+| `tl_set`   | `(admin, threshold, ...)`                                            |
+| `paused`   | `(admin)`                                                            |
+| `unpaused` | `(admin)`                                                            |
+
+## Oracle registry (`ORACLE` namespace)
+
+The `oracle_registry` contract (#861) implements the N-of-M staked oracle
+consensus network. Events are emitted under the uppercase `ORACLE` topic.
+
+| Action       | Payload                                                            |
+| ------------ | ------------------------------------------------------------------ |
+| `registrd`   | `(oracle, ...)`                                                    |
+| `dreg_req`   | `(requester, oracle, ...)`                                         |
+| `dreg_done`  | `(oracle, ...)`                                                    |
+| `slashed`    | `(oracle, amount, ...)`                                            |
+| `rnd_open`   | `(round_id, ...)`                                                  |
+| `voted`      | `(oracle, round_id, vote, ...)`                                    |
+| `consensus`  | `(round_id, result, ...)`                                          |
+| `rnd_exp`    | `(round_id, ...)`                                                  |
+| `fallback`   | `(round_id, ...)`                                                  |
+| `inv_set`    | `(admin, interval, ...)`                                           |
+| `cfg_upd`    | `(admin, ...)`                                                     |
+| `paused`     | `(admin)`                                                          |
+| `unpaused`   | `(admin)`                                                          |
 
 ## Indexer migration
 
