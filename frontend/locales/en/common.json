@@ -77,6 +77,15 @@
       "disconnectedTitle": "Wallet disconnected",
       "disconnectedDescription": "Your Freighter wallet is no longer connected to this site. Reconnect to continue."
     },
+    "networkMismatch": {
+      "title": "Network Mismatch Detected",
+      "messageStart": "Your Freighter wallet is connected to",
+      "messageMiddle": "but this app uses",
+      "messageEnd": "Please switch networks in Freighter to continue.",
+      "helpLink": "How to switch networks",
+      "dismiss": "Dismiss network mismatch warning",
+      "unknownNetwork": "Unknown"
+    },
     "toast": {
       "dismiss": "Dismiss notification"
     },
