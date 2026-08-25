@@ -527,7 +527,8 @@ impl AccessControlContract {
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Pending {
+        if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
+        {
             return Err(AccessControlError::ProposalNotPending);
         }
         if env.ledger().timestamp() > proposal.expires_at {
@@ -608,10 +609,10 @@ impl AccessControlContract {
         Ok(())
     }
 
-    /// Reject a still-pending proposal. Any registered signer for the
-    /// proposal's role may reject — correcting a mistaken or malicious
-    /// proposal doesn't need the full approval threshold, since rejecting
-    /// only ever narrows what can execute, never widens it.
+    /// Reject a pending or approved proposal before it executes. Any registered
+    /// signer for the proposal's role may reject — correcting a mistaken or
+    /// malicious proposal doesn't need the full approval threshold, since
+    /// rejecting only ever narrows what can execute, never widens it.
     pub fn reject_action(env: Env, signer: Address, proposal_id: u64) -> Result_ {
         signer.require_auth();
         bump_instance(&env);
