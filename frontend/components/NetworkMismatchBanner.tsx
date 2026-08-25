@@ -34,11 +34,10 @@ export default function NetworkMismatchBanner() {
           <div className="flex-1 min-w-0">
             <p className="text-red-100 text-sm font-medium">{t('title')}</p>
             <p className="text-red-200 text-xs mt-1">
-              {t('messageStart')}{' '}
-              <span className="font-semibold text-red-100">{walletNetworkName}</span>{' '}
-              {t('messageMiddle')}{' '}
-              <span className="font-semibold text-red-100">{appNetworkName}</span>.{' '}
-              {t('messageEnd')}
+              {t('description', {
+                walletNetwork: walletNetworkName,
+                appNetwork: appNetworkName,
+              })}
             </p>
             <a
               href="https://www.freighter.app/help#how-do-i-switch-networks"
@@ -46,7 +45,7 @@ export default function NetworkMismatchBanner() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-red-300 hover:text-red-100 text-xs mt-2 transition-colors"
             >
-              {t('helpLink')}
+              {t('switchNetworks')}
               <svg
                 width="12"
                 height="12"

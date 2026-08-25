@@ -96,6 +96,12 @@
       "title": "Notifications",
       "clearAll": "Clear all",
       "empty": "No notifications yet."
+    },
+    "networkMismatch": {
+      "title": "Network Mismatch Detected",
+      "description": "Your Freighter wallet is connected to {walletNetwork} but this app uses {appNetwork}. Please switch networks in Freighter to continue.",
+      "switchNetworks": "How to switch networks",
+      "dismiss": "Dismiss network mismatch warning"
     }
   },
   "Invest": {
