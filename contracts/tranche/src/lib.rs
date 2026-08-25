@@ -123,6 +123,29 @@ impl TrancheContract {
             .unwrap_or_default()
     }
 
+    /// Previews how much more the senior tranche can accept before a deposit
+    /// would revert with `AdvanceRateExceeded`.
+    pub fn get_advance_rate_headroom(env: Env, token: Address) -> i128 {
+        let pool = Self::get_pool(env, token);
+
+        let rate_bps = pool.config.senior_advance_rate_bps as i128;
+        if rate_bps >= 10_000 {
+            return i128::MAX;
+        }
+
+        let senior = pool.senior.deposited;
+        let junior = pool.junior.deposited;
+
+        // Largest `amount` such that:
+        //   senior + amount <= rate_bps * (junior + senior + amount) / 10_000
+        let numerator = rate_bps * junior - (10_000 - rate_bps) * senior;
+        if numerator <= 0 {
+            return 0;
+        }
+
+        numerator / (10_000 - rate_bps)
+    }
+
     fn validate_config(env: &Env, config: &TrancheConfig) {
         if config.senior_target_yield_bps > 10_000
             || config.senior_advance_rate_bps > 10_000
