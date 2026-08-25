@@ -152,15 +152,37 @@ export class Monitor {
     const type = String(rec.type ?? '');
     if (type !== 'invoke_host_function') return;
 
-    const functionName = String(rec.function ?? '');
+    const functionName = String(rec.function ?? '').toLowerCase();
     const sourceAccount = String(rec.source_account ?? '');
 
-    // Best-effort heuristic: if the function name contains "withdraw", treat
-    // this as a withdrawal event.  Amount is not reliably available from the
-    // Horizon operation summary alone (would require full event decoding), so
-    // we pass 0 — the rapid-cycle check only needs the *timing* of the
-    // withdrawal, not its size.
-    if (functionName.toLowerCase().includes('withdraw') && sourceAccount) {
+    // Parse deposit/withdraw from pool contract operations
+    // Amount is extracted from operation parameters when available
+    if (!sourceAccount) return;
+
+    const contractId = String(rec.contract_id ?? rec.address ?? '');
+    if (contractId && this.config.poolContractId && contractId === this.config.poolContractId) {
+      // Extract amount from parameters if present
+      let amount = 0n;
+      if (rec.parameters) {
+        const params = Array.isArray(rec.parameters) ? rec.parameters : [rec.parameters];
+        if (params.length >= 2) {
+          try {
+            amount = BigInt(String(params[1] ?? '0'));
+          } catch {
+            // Invalid bigint; use 0
+          }
+        }
+      }
+
+      if (functionName.includes('deposit') && amount > 0n) {
+        await this.recordDeposit(sourceAccount, amount);
+      } else if (functionName.includes('withdraw')) {
+        // For withdrawals, we record with the amount if available, otherwise 0n
+        // The rapid-cycle check only needs timing, not amount
+        await this.recordWithdraw(sourceAccount, amount);
+      }
+    } else if (functionName.includes('withdraw') && !contractId) {
+      // Fallback: if no contract ID, use the basic withdrawal heuristic
       await this.recordWithdraw(sourceAccount, 0n);
     }
   }

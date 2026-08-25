@@ -566,6 +566,38 @@ impl OracleRegistryContract {
         Ok(())
     }
 
+    /// Withdraws accumulated slashed funds from the registry's balance when no
+    /// treasury address is configured. Only callable by the admin; if a treasury
+    /// is configured, slashed funds are automatically forwarded there during
+    /// slash_oracle and this function cannot be used.
+    pub fn withdraw_slashed_funds(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<(), OracleRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        require_not_paused(&env);
+
+        let config = Self::load_config(&env)?;
+        if config.treasury.is_some() {
+            return Err(OracleRegistryError::TreasuryAlreadyConfigured);
+        }
+        if amount <= 0 {
+            return Err(OracleRegistryError::InvalidAmount);
+        }
+
+        let token_client = token::Client::new(&env, &config.stake_token);
+        token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+
+        env.events().publish(
+            (EVT, symbol_short!("withdrawn")),
+            (admin, recipient, amount),
+        );
+        Ok(())
+    }
+
     /// Opens a stake-weighted verification round for `invoice_id`. Callable by
     /// anyone once the invoice is in `AwaitingVerification` — the caller
     /// supplies the invoice's verification hash so it can be cross-checked
@@ -696,6 +728,12 @@ impl OracleRegistryContract {
         // it has committed to leaving and its stake may be returned at any time.
         if info.deregister_requested_at.is_some() {
             return Err(OracleRegistryError::DeregisterCooldownActive);
+        }
+
+        let config = Self::load_config(&env)?;
+        // #1142: an oracle slashed below min_stake must not participate in voting.
+        if info.stake_amount < config.min_stake {
+            return Err(OracleRegistryError::InsufficientStake);
         }
 
         let round_key = DataKey::Round(invoice_id);

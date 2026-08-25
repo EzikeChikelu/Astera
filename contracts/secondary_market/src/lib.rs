@@ -446,6 +446,7 @@ fn match_order(env: &Env, pool_id: &Address, taker: &mut Order, now: u64) {
     };
 
     let mut matches_made = 0u32;
+    let mut excluded_ids: Vec<u64> = Vec::new(env);
     while taker.remaining > 0 && matches_made < MAX_MATCHES_PER_CALL {
         let ids: Vec<u64> = {
             let book: Map<u64, Vec<u64>> = env
@@ -459,6 +460,16 @@ fn match_order(env: &Env, pool_id: &Address, taker: &mut Order, now: u64) {
         let mut best: Option<Order> = None;
         let mut expired: Vec<u64> = Vec::new(env);
         for id in ids.iter() {
+            let mut is_excluded = false;
+            for excluded_id in excluded_ids.iter() {
+                if excluded_id == id {
+                    is_excluded = true;
+                    break;
+                }
+            }
+            if is_excluded {
+                continue;
+            }
             let Some(candidate) = load_order(env, id) else {
                 continue;
             };
@@ -518,13 +529,16 @@ fn match_order(env: &Env, pool_id: &Address, taker: &mut Order, now: u64) {
             OrderSide::Bid => (taker.owner.clone(), maker.owner.clone()),
             OrderSide::Ask => (maker.owner.clone(), taker.owner.clone()),
         };
-        matches_made = matches_made.saturating_add(1);
         if buyer == seller {
             // Can't self-match (e.g. a taker crossing their own resting
-            // order) — skip this candidate for this pass and keep looking.
+            // order) — exclude it from the rest of this pass so it can't be
+            // re-selected as the best candidate, and do not count it as a
+            // fill against the per-call match budget.
+            excluded_ids.push_back(maker.order_id);
             continue;
         }
 
+        matches_made = matches_made.saturating_add(1);
         let fill_qty = taker.remaining.min(maker.remaining);
         let Some(total_price) = maker
             .price

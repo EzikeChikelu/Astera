@@ -77,6 +77,15 @@
       "disconnectedTitle": "Billetera desconectada",
       "disconnectedDescription": "Tu billetera Freighter ya no esta conectada a este sitio. Vuelve a conectarla para continuar."
     },
+    "networkMismatch": {
+      "title": "Incompatibilidad de red detectada",
+      "messageStart": "Tu billetera Freighter esta conectada a",
+      "messageMiddle": "pero esta aplicacion usa",
+      "messageEnd": "Cambia de red en Freighter para continuar.",
+      "helpLink": "Como cambiar de red",
+      "dismiss": "Cerrar advertencia de incompatibilidad de red",
+      "unknownNetwork": "Desconocida"
+    },
     "toast": {
       "dismiss": "Cerrar notificacion"
     },
@@ -87,6 +96,12 @@
       "title": "Notificaciones",
       "clearAll": "Borrar todo",
       "empty": "No hay notificaciones."
+    },
+    "networkMismatch": {
+      "title": "Incompatibilidad de red detectada",
+      "description": "Tu billetera Freighter está conectada a {walletNetwork}, pero esta aplicación usa {appNetwork}. Cambia de red en Freighter para continuar.",
+      "switchNetworks": "Cómo cambiar de red",
+      "dismiss": "Cerrar advertencia de incompatibilidad de red"
     }
   },
   "Invest": {

@@ -1,6 +1,41 @@
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 use tranche::{state::TrancheClass, TrancheContract};
+
+#[contract]
+pub struct DummyShare;
+
+#[contractimpl]
+impl DummyShare {
+    pub fn total_supply(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "tot"))
+            .unwrap_or(0)
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().persistent().get(&id).unwrap_or(0)
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let total = Self::total_supply(env.clone());
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tot"), &(total + amount));
+        env.storage().persistent().set(&to, &(balance + amount));
+    }
+
+    pub fn burn(env: Env, from: Address, amount: i128) {
+        let total = Self::total_supply(env.clone());
+        let balance = Self::balance(env.clone(), from.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tot"), &(total - amount));
+        env.storage().persistent().set(&from, &(balance - amount));
+    }
+}
 
 #[test]
 fn test_basic_deposit_and_withdraw() {
@@ -9,8 +44,8 @@ fn test_basic_deposit_and_withdraw() {
 
     let admin = Address::generate(&env);
     let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
     let contract_id = env.register_contract(None, TrancheContract);
 
@@ -34,8 +69,8 @@ fn test_basic_deposit_and_withdraw() {
             env.clone(),
             admin.clone(),
             token.clone(),
-            senior_share_token,
-            junior_share_token,
+            senior_share_token.clone(),
+            junior_share_token.clone(),
             tranche::state::TrancheConfig {
                 senior_target_yield_bps: 1000,
                 senior_advance_rate_bps: 8000,
@@ -76,6 +111,16 @@ fn test_basic_deposit_and_withdraw() {
         assert_eq!(pool.junior.deposited, 2000);
     });
 
+    // Deposits mint share tokens 1:1 to the investor
+    assert_eq!(
+        DummyShareClient::new(&env, &senior_share_token).balance(&investor1),
+        5000
+    );
+    assert_eq!(
+        DummyShareClient::new(&env, &junior_share_token).balance(&investor2),
+        2000
+    );
+
     // Withdraw from senior
     env.as_contract(&contract_id, || {
         TrancheContract::withdraw_tranche(
@@ -92,6 +137,12 @@ fn test_basic_deposit_and_withdraw() {
         let pool = TrancheContract::get_pool(env.clone(), token.clone());
         assert_eq!(pool.senior.deposited, 4000);
     });
+
+    // Withdrawals burn share tokens 1:1 from the investor
+    assert_eq!(
+        DummyShareClient::new(&env, &senior_share_token).balance(&investor1),
+        4000
+    );
 }
 
 #[test]
@@ -101,8 +152,8 @@ fn test_funding_and_repayment() {
 
     let admin = Address::generate(&env);
     let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
     let contract_id = env.register_contract(None, TrancheContract);
 
@@ -209,8 +260,8 @@ fn test_full_scenario_five_invoices_mixed_outcomes() {
 
     let admin = Address::generate(&env);
     let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
     let contract_id = env.register_contract(None, TrancheContract);
 
@@ -441,8 +492,8 @@ fn test_junior_absorbs_full_default_senior_whole() {
 
     let admin = Address::generate(&env);
     let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
     let contract_id = env.register_contract(None, TrancheContract);
 
@@ -531,8 +582,8 @@ fn test_senior_takes_loss_after_junior_exhausted() {
 
     let admin = Address::generate(&env);
     let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
     let contract_id = env.register_contract(None, TrancheContract);
 
