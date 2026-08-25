@@ -195,6 +195,72 @@ fn test_transfer_requires_sender_auth() {
     );
 }
 
+#[test]
+fn test_pause_blocks_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&alice, &200i128);
+    client.pause(&admin);
+
+    let result = client.try_mint(&bob, &10i128);
+    assert!(result.is_err());
+
+    let result = client.try_burn(&alice, &10i128);
+    assert!(result.is_err());
+
+    let result = client.try_transfer(&alice, &bob, &10i128);
+    assert!(result.is_err());
+
+    client.unpause(&admin);
+    client.transfer(&alice, &bob, &10i128);
+    assert_eq!(client.balance(&alice), 190);
+    assert_eq!(client.balance(&bob), 10);
+}
+
+#[test]
+fn test_burn_from_reduces_allowance_and_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&owner, &1_000i128);
+    client.approve(&owner, &spender, &400i128);
+    client.burn_from(&spender, &owner, &250i128);
+
+    assert_eq!(client.balance(&owner), 750);
+    assert_eq!(client.allowance(&owner, &spender), 150);
+    assert_eq!(client.total_supply(), 750);
+}
+
+#[test]
+fn test_balance_at_handles_many_checkpoint_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let mut expected = 0i128;
+    let mut last_ts = 1_000u64;
+    for i in 0..128u64 {
+        env.ledger().with_mut(|l| l.timestamp = last_ts + i * 7);
+        expected += 17 + i as i128;
+        client.mint(&alice, &(17 + i as i128));
+    }
+
+    assert_eq!(client.balance_at(&alice, &999), 0);
+    assert_eq!(client.balance_at(&alice, &1_000), 17);
+    assert_eq!(client.balance_at(&alice, &1_006), 17);
+    assert_eq!(client.balance_at(&alice, &1_007), 34);
+    assert_eq!(client.balance_at(&alice, &last_ts + 7 * 127), expected);
+    assert_eq!(client.balance_at(&alice, &u64::MAX), expected);
+}
+
 // ── Overflow safety ──────────────────────────────────────────────────────────
 
 #[test]
