@@ -159,6 +159,28 @@ fn test_burn_requires_admin_auth() {
 }
 
 #[test]
+fn test_set_admin_rotates_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    assert_eq!(client.admin(), admin);
+    client.set_admin(&new_admin);
+    assert_eq!(client.admin(), new_admin);
+}
+
+#[test]
+fn test_set_admin_requires_current_admin_auth() {
+    let env = Env::default();
+    // No mock_all_auths — only the current admin may rotate.
+    let (client, _admin) = setup(&env);
+    let new_admin = Address::generate(&env);
+    let result = client.try_set_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_transfer_requires_sender_auth() {
     let env = Env::default();
     // No mock_all_auths — from.require_auth() must be satisfied explicitly.
