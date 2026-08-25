@@ -227,6 +227,12 @@ pub enum AccessControlError {
     InvalidExpiryWindow = 13,
     SignerNotFound = 14,
     NoApprovalToRevoke = 15,
+    /// The `action` payload and `target` address are incoherent: self-management
+    /// payloads (AddSigner / RemoveSigner / SetThreshold) must be proposed with
+    /// `target == this_contract`, and every cross-contract payload must be
+    /// proposed with `target != this_contract`.  A mismatched proposal would
+    /// silently no-op on execution, so it is rejected at creation time instead.
+    IncoherentProposal = 16,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -454,6 +460,23 @@ impl AccessControlContract {
 
         if Self::requires_super_admin(&action) && !matches!(role, Role::SuperAdmin) {
             return Err(AccessControlError::SelfManagementRequiresSuperAdmin);
+        }
+
+        // #1135: Validate payload/target coherence before the proposal enters
+        // the approval queue.  Self-management payloads mutate *this* contract's
+        // own storage, so they must target this contract.  Cross-contract
+        // payloads call out to an external contract, so they must not target
+        // this contract — executing them against `this_contract` would hit
+        // `execute_cross_contract`'s self-management catch-all arm and silently
+        // do nothing.  Rejecting here ensures a mismatched proposal never
+        // reaches `Executed` status with zero real effect.
+        let this_contract = env.current_contract_address();
+        let targets_self = target == this_contract;
+        if Self::is_self_management(&action) && !targets_self {
+            return Err(AccessControlError::IncoherentProposal);
+        }
+        if !Self::is_self_management(&action) && targets_self {
+            return Err(AccessControlError::IncoherentProposal);
         }
 
         let config: MultiSigConfig = env
