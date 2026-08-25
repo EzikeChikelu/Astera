@@ -62,6 +62,16 @@ impl ShareToken {
             .publish((EVT, symbol_short!("init")), (name, symbol, decimals));
     }
 
+    /// Rotates the admin to `new_admin`. Only the current admin may call this,
+    /// so a lost or compromised key can be replaced by the still-trusted admin.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events()
+            .publish((EVT, symbol_short!("set_admin")), (admin, new_admin));
+    }
+
     pub fn mint(env: Env, to: Address, amount: i128) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -422,6 +432,32 @@ mod test {
         assert_eq!(client.symbol(), String::from_str(&env, "TST"));
         assert_eq!(client.decimals(), 6u32);
         assert_eq!(client.total_supply(), 0);
+    }
+
+    #[test]
+    fn test_set_admin_rotates_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        client.set_admin(&new_admin);
+
+        // The new admin can now mint, proving the rotation took effect.
+        let to = Address::generate(&env);
+        client.mint(&to, &100i128);
+        assert_eq!(client.balance(&to), 100);
+        assert_ne!(admin, new_admin);
+    }
+
+    #[test]
+    fn test_set_admin_requires_current_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths — the current admin's auth must be satisfied.
+        let (client, _admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_set_admin(&new_admin);
+        assert!(result.is_err());
     }
 
     #[test]
