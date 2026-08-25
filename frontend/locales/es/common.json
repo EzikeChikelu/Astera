@@ -87,6 +87,12 @@
       "title": "Notificaciones",
       "clearAll": "Borrar todo",
       "empty": "No hay notificaciones."
+    },
+    "networkMismatch": {
+      "title": "Incompatibilidad de red detectada",
+      "description": "Tu billetera Freighter está conectada a {walletNetwork}, pero esta aplicación usa {appNetwork}. Cambia de red en Freighter para continuar.",
+      "switchNetworks": "Cómo cambiar de red",
+      "dismiss": "Cerrar advertencia de incompatibilidad de red"
     }
   },
   "Invest": {

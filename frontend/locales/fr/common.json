@@ -87,6 +87,12 @@
       "title": "Notifications",
       "clearAll": "Tout effacer",
       "empty": "Aucune notification."
+    },
+    "networkMismatch": {
+      "title": "Incompatibilité de réseau détectée",
+      "description": "Votre portefeuille Freighter est connecté à {walletNetwork}, mais cette application utilise {appNetwork}. Veuillez changer de réseau dans Freighter pour continuer.",
+      "switchNetworks": "Comment changer de réseau",
+      "dismiss": "Fermer l’avertissement d’incompatibilité de réseau"
     }
   },
   "Invest": {
