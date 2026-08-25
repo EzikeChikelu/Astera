@@ -40,6 +40,9 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 /// unapproved, unless overridden at `initialize()`. 7 days.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 604_800;
 
+/// Maximum number of signers per role to prevent unbounded iteration.
+const MAX_SIGNERS_PER_ROLE: u32 = 32;
+
 // ─── Roles ──────────────────────────────────────────────────────────────────
 
 /// A named role, each with its own independent signer set and threshold.
@@ -227,6 +230,8 @@ pub enum AccessControlError {
     InvalidExpiryWindow = 13,
     SignerNotFound = 14,
     NoApprovalToRevoke = 15,
+    // #1141: AddSigner would exceed maximum signer set size.
+    MaxSignersExceeded = 16,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -896,6 +901,10 @@ impl AccessControlContract {
                 let mut config = Self::role_config_or_default(env, *role);
                 if config.signers.contains(address) {
                     return Err(AccessControlError::DuplicateSigner);
+                }
+                // #1141: cap signer set size to prevent unbounded iteration overhead.
+                if config.signers.len() >= MAX_SIGNERS_PER_ROLE {
+                    return Err(AccessControlError::MaxSignersExceeded);
                 }
                 config.signers.push_back(address.clone());
                 env.storage()
