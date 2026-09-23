@@ -764,4 +764,34 @@ mod test {
         client.transfer(&alice, &alice, &100i128);
         assert_eq!(client.balance_at(&alice, &1_000), 200);
     }
+
+    #[test]
+    fn test_balance_at_past_max_checkpoints_evicts_oldest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        // Mint once per second, past MAX_CHECKPOINTS, so write_checkpoint
+        // starts evicting the oldest entry on each subsequent write.
+        for i in 0..(MAX_CHECKPOINTS + 1) {
+            env.ledger().with_mut(|l| l.timestamp = 1_000 + i as u64);
+            client.mint(&alice, &1i128);
+        }
+
+        let final_balance = (MAX_CHECKPOINTS + 1) as i128;
+        assert_eq!(client.balance(&alice), final_balance);
+
+        // The very first checkpoint (ts = 1_000) was evicted to make room,
+        // so a query at or before it now finds no surviving entry.
+        assert_eq!(client.balance_at(&alice, &1_000), 0);
+
+        // The oldest surviving checkpoint (ts = 1_001) still resolves.
+        assert_eq!(client.balance_at(&alice, &1_001), 1);
+
+        // Recent history is untouched by eviction.
+        let last_ts = 1_000 + MAX_CHECKPOINTS as u64;
+        assert_eq!(client.balance_at(&alice, &last_ts), final_balance);
+    }
 }
