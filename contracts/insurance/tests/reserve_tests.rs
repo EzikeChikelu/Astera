@@ -254,6 +254,50 @@ fn test_purchase_coverage_rejects_double_coverage() {
 }
 
 #[test]
+fn test_non_pool_cannot_squat_coverage_record() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let attacker = Address::generate(&env);
+    let sme = Address::generate(&env);
+    mint(&env, &h.token_id, &attacker, 1_000_000);
+
+    let result = h.client.try_purchase_coverage(
+        &attacker,
+        &42u64,
+        &1i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
+    assert_eq!(result, Err(Ok(InsuranceError::Unauthorized)));
+    assert_eq!(h.client.get_coverage_record(&42u64), None);
+
+    mint(&env, &h.token_id, &h.pool_id, 1_000_000);
+    let record = h.client.purchase_coverage(
+        &h.pool_id,
+        &42u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
+    assert_eq!(record.invoice_id, 42);
+}
+
+#[test]
+fn test_reserve_without_configured_minimum_is_healthy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+
+    let health = h.client.check_reserve_health(&h.token_id);
+    assert_eq!(health.min_reserve_amount, 0);
+    assert!(health.is_healthy);
+    assert!(!health.needs_top_up);
+}
+
+#[test]
 fn test_coverage_ratio_floor_blocks_new_purchases() {
     let env = Env::default();
     env.mock_all_auths();
