@@ -488,3 +488,75 @@ fn test_pause_blocks_register_and_claim() {
         ))
     );
 }
+
+#[test]
+fn test_register_permits_two_party_referral_cycle() {
+    // #1403: register() only rejects a referee naming themselves as referrer
+    // (A == A). It does not check whether the proposed referrer already
+    // names the referee as *their* referrer, so a mutual A->B, B->A pair is
+    // accepted in full.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let party_a = Address::generate(&env);
+    let party_b = Address::generate(&env);
+    let token = setup_token(&env);
+
+    client.register(&party_a, &party_b);
+    client.register(&party_b, &party_a);
+
+    assert_eq!(client.get_referrer(&party_a), Some(party_b.clone()));
+    assert_eq!(client.get_referrer(&party_b), Some(party_a.clone()));
+
+    // Rewards accrue in both directions for the same cycle: activity by A
+    // credits B, and activity by B credits A right back.
+    let reward_to_b = client.record_activity(
+        &pool,
+        &party_a,
+        &Symbol::new(&env, "borrow"),
+        &1_000_0000000i128,
+        &token,
+    );
+    let reward_to_a = client.record_activity(
+        &pool,
+        &party_b,
+        &Symbol::new(&env, "borrow"),
+        &1_000_0000000i128,
+        &token,
+    );
+
+    assert!(reward_to_b > 0);
+    assert!(reward_to_a > 0);
+    assert_eq!(client.get_pending_reward(&party_b, &token), reward_to_b);
+    assert_eq!(client.get_pending_reward(&party_a, &token), reward_to_a);
+}
+
+#[test]
+fn test_record_activity_falls_through_to_deposit_rate_for_unrecognised_kind() {
+    // #1404: the only branch taken for `kind == "borrow"` is the borrow
+    // rate; every other value — including a typo or a kind that isn't
+    // "borrow" or "deposit" at all — silently prices at the deposit rate.
+    // Default deposit bps (1_000) is 2x the default borrow bps (500), so an
+    // unrecognised kind is mispriced at double the intended rate.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, pool) = setup(&env);
+    let referee = Address::generate(&env);
+    let referrer = Address::generate(&env);
+    let token = setup_token(&env);
+    client.register(&referee, &referrer);
+
+    let reward = client.record_activity(
+        &pool,
+        &referee,
+        &Symbol::new(&env, "unknown"),
+        &1_000_0000000i128,
+        &token,
+    );
+
+    // Default deposit bps is 1_000 (10%): 10% of 1_000_0000000 = 100_0000000.
+    // A correctly-guarded implementation would reject an unrecognised kind
+    // (or at minimum not silently apply the deposit rate); this pins the
+    // current fallthrough behavior the issue flags.
+    assert_eq!(reward, 100_0000000i128);
+}
