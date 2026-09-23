@@ -119,6 +119,8 @@ jobs:
       - run: npm ci
       - name: Check frontend formatting
         run: npx prettier --check .
+      - name: Check locale files stay in sync with en
+        run: npm run check:locales
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
