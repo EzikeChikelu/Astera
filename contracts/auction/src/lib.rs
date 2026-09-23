@@ -66,7 +66,7 @@ pub enum SaleStatus {
     Open,
     Settled,
     Expired,
-    Cancelled,  // #1116: seller-initiated early cancellation
+    Cancelled, // #1116: seller-initiated early cancellation
 }
 
 #[contracttype]
@@ -882,11 +882,11 @@ impl AuctionContract {
         let _sale_id = Self::open_collateral_sale(
             env.clone(),
             CollateralSaleParams {
-                seller: env.current_contract_address(),  // Auction contract holds collateral temporarily
+                seller: env.current_contract_address(), // Auction contract holds collateral temporarily
                 token: deposit.token,
                 amount: deposit.amount,
                 proceeds_token: funded.token,
-                proceeds_recipient: pool_id,  // Proceeds flow to pool liquidity
+                proceeds_recipient: pool_id, // Proceeds flow to pool liquidity
                 start_price,
                 floor_price,
                 duration_secs: cfg.grace_period_secs, // Use grace period as sale duration
@@ -1010,6 +1010,28 @@ mod tests {
             2,
             "High-score SME should be ranked first"
         );
+    }
+
+    #[test]
+    fn test_min_priority_score_filters_bids_at_clearance() {
+        let env = test_env();
+        let below_threshold = Address::generate(&env);
+        let at_threshold = Address::generate(&env);
+
+        let bids = vec![
+            &env,
+            make_bid(&env, 1, below_threshold.clone(), 1_000, 700, 501),
+            make_bid(&env, 2, at_threshold.clone(), 1_000, 500, 500),
+        ];
+        let mut scores = Map::new(&env);
+        scores.set(below_threshold, 500);
+        scores.set(at_threshold, 500);
+
+        let result = clear_auction(bids, 2_000, scores);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(0).unwrap().invoice_id, 2);
+        assert_eq!(result.get(0).unwrap().allocated_amount, 1_000);
     }
 
     #[test]
