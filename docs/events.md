@@ -12,6 +12,8 @@ Every Astera contract event now has a two-segment topic:
 | Auction          | `auction`  | lowercase `snake_case` | `col_risk`, `col_safe`, `auc_liq`, `sale_open`, `sale_take`        |
 | Compliance       | `COMPLY`   | lowercase `snake_case` | `screened`, `review`, `scr_prop`, `tl_set`, `paused`               |
 | Oracle registry  | `ORACLE`   | lowercase `snake_case` | `registrd`, `rnd_open`, `voted`, `consensus`, `cfg_upd`            |
+ test/auction-governance-boundary-coverage
+
 | Governance       | `gov`      | lowercase `snake_case` | `vote`, `execute`, `set_gov`, `cat_q`                              |
 | Referral         | `REFERRAL` | lowercase `snake_case` | `activatd`, `paused`, `ac_rot`                                     |
 | Insurance        | `INSURNCE` | lowercase `snake_case` | `covered`, `cfg_set`, `mcr_set`, `min_rsv`                         |
@@ -165,6 +167,7 @@ Astera-specific.
 | `noquorum` | `(case_id, retry_count)` — juror selection failed to reach quorum |
 | `resolved` | `(case_id, invoice_id, outcome_favor_debtor, synced)`       |
 | `slashed`  | `(juror, bps, amount, case_id)`                            |
+ main
 
 ## Secondary market (`market` namespace)
 

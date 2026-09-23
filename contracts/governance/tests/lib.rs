@@ -18,6 +18,10 @@ const EXEC_DELAY: u64 = 100;
 const QUORUM_BPS: u32 = 1_000; // 10 %
 const PASS_BPS: u32 = 6_000; // 60 %
 const MIN_SHARE_BALANCE: i128 = 1;
+ test/auction-governance-boundary-coverage
+const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
+
+ main
 
 fn setup_share(env: &Env) -> (ShareTokenClient<'_>, Address, Address) {
     let share_admin = Address::generate(env);
@@ -717,6 +721,45 @@ fn test_passed_proposal_executes_within_expiry_window() {
     assert_eq!(proposal.status, ProposalStatus::Executed);
 }
 
+ test/auction-governance-boundary-coverage
+#[test]
+fn test_execute_proposal_expiry_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+    gov.vote(&id, &voter, &true);
+    let proposal = gov.get_proposal(&id).unwrap();
+
+    env.ledger().with_mut(|l| {
+        l.timestamp = proposal.passed_at + EXECUTION_EXPIRY_SECS;
+    });
+    gov.execute_proposal(&id);
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Executed
+    );
+
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+    gov.vote(&id, &voter, &true);
+    let proposal = gov.get_proposal(&id).unwrap();
+    env.ledger().with_mut(|l| {
+        l.timestamp = proposal.passed_at + EXECUTION_EXPIRY_SECS + 1;
+    });
+    let result = gov.try_execute_proposal(&id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+
+ main
 // ── #932: voting period must fully elapse before execute ─────────────────────
 
 #[test]

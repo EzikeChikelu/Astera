@@ -1,6 +1,14 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
+ test/auction-governance-boundary-coverage
+    Address, Env, String as SorobanString,
+};
+
+// Import contract implementations
+use invoice::{InvoiceContract, InvoiceContractClient};
+use pool::{FundingPool, FundingPoolClient, OpenCoFundingRequest};
+
     token, Address, Env, String as SorobanString, Symbol, Vec,
 };
 
@@ -11,6 +19,7 @@ use governance::{Governance, GovernanceAction, GovernanceClient, PoolAction, Pro
 use invoice::{InvoiceContract, InvoiceContractClient};
 use pool::{FundingPool, FundingPoolClient, OpenCoFundingRequest};
 use referral::{ReferralContract, ReferralContractClient};
+ main
 use share::{ShareToken, ShareTokenClient};
 
 /// Setup helper for invoice contract benchmarks
@@ -286,6 +295,8 @@ fn bench_repay_invoice(c: &mut Criterion) {
     });
 }
 
+ test/auction-governance-boundary-coverage
+
 // #1413: previously only invoice/pool/share had any benchmark coverage.
 // These four cover the paths flagged as most likely to regress into a
 // resource-limit failure on-chain rather than a test failure: a ring-buffer
@@ -484,16 +495,21 @@ fn bench_referral_leaderboard_insert_when_full(c: &mut Criterion) {
     });
 }
 
+ main
 criterion_group!(
     contract_benchmarks,
     bench_create_invoice,
     bench_mark_paid,
     bench_deposit,
     bench_commit_to_invoice,
+ test/auction-governance-boundary-coverage
+    bench_repay_invoice
+
     bench_repay_invoice,
     bench_get_credit_score_full_history,
     bench_governance_list_proposals,
     bench_auction_list_open_sales,
     bench_referral_leaderboard_insert_when_full
+ main
 );
 criterion_main!(contract_benchmarks);

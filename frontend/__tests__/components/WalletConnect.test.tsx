@@ -1,5 +1,9 @@
 import React from 'react';
+ test/auction-governance-boundary-coverage
+import { render, screen, act } from '@testing-library/react';
+
 import { render, screen, act, waitFor } from '@testing-library/react';
+ main
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import WalletConnect from '@/components/WalletConnect';
@@ -72,6 +76,8 @@ describe('WalletConnect', () => {
       address: 'GTEST',
       connected: true,
     });
+ test/auction-governance-boundary-coverage
+
     expect(localStorage.getItem('astera-wallet-connected')).toBe('true');
     expect(localStorage.getItem('astera-wallet-address')).toBe('GTEST');
   });
@@ -92,6 +98,7 @@ describe('WalletConnect', () => {
     });
     expect(mockFreighter.isAllowed).toHaveBeenCalled();
     expect(mockFreighter.getAddress).toHaveBeenCalled();
+ main
   });
 
   it('reports a clear error when Freighter is not installed', async () => {
