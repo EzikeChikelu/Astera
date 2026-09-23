@@ -18,7 +18,10 @@ const EXEC_DELAY: u64 = 100;
 const QUORUM_BPS: u32 = 1_000; // 10 %
 const PASS_BPS: u32 = 6_000; // 60 %
 const MIN_SHARE_BALANCE: i128 = 1;
+ test/auction-governance-boundary-coverage
 const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
+
+ main
 
 fn setup_share(env: &Env) -> (ShareTokenClient<'_>, Address, Address) {
     let share_admin = Address::generate(env);
@@ -718,6 +721,7 @@ fn test_passed_proposal_executes_within_expiry_window() {
     assert_eq!(proposal.status, ProposalStatus::Executed);
 }
 
+ test/auction-governance-boundary-coverage
 #[test]
 fn test_execute_proposal_expiry_boundary() {
     let env = Env::default();
@@ -754,6 +758,8 @@ fn test_execute_proposal_expiry_boundary() {
     assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
 }
 
+
+ main
 // ── #932: voting period must fully elapse before execute ─────────────────────
 
 #[test]

@@ -66,7 +66,11 @@ pub enum SaleStatus {
     Open,
     Settled,
     Expired,
+ test/auction-governance-boundary-coverage
     Cancelled, // #1116: seller-initiated early cancellation
+
+    Cancelled,  // #1116: seller-initiated early cancellation
+ main
 }
 
 #[contracttype]
@@ -1013,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+ test/auction-governance-boundary-coverage
     fn test_min_priority_score_filters_bids_at_clearance() {
         let env = test_env();
         let below_threshold = Address::generate(&env);
@@ -1035,6 +1040,8 @@ mod tests {
     }
 
     #[test]
+  
+ main
     fn test_deterministic_tie_breaking() {
         let env = test_env();
         let sme1 = Address::generate(&env);

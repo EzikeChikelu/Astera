@@ -82,6 +82,12 @@ pub enum OracleRegistryError {
     AccessControlNotConfigured = 25,
     // #1038: governance contract not configured
     GovernanceNotConfigured = 26,
+ test/auction-governance-boundary-coverage
+
+    // withdraw_slashed_funds is only usable when no treasury is configured —
+    // once one is, slash_oracle forwards slashed funds there automatically.
+    TreasuryAlreadyConfigured = 27,
+ main
 }
 
 #[contracttype]
