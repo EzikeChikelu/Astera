@@ -297,6 +297,7 @@ impl TrancheContract {
         invoice_id: u64,
         total_amount: i128,
     ) -> (i128, i128) {
+        Self::get_admin(env.clone()).require_auth();
         Self::non_reentrant_start(&env);
         let result = funding::fund_invoice_from_tranches(&env, token, invoice_id, total_amount);
         Self::non_reentrant_end(&env);
@@ -317,6 +318,7 @@ impl TrancheContract {
         total_due: i128,
         elapsed_secs: u64,
     ) -> (i128, i128) {
+        Self::get_admin(env.clone()).require_auth();
         Self::non_reentrant_start(&env);
         let result = repayment::distribute_waterfall_repayment(
             &env,
@@ -330,6 +332,7 @@ impl TrancheContract {
     }
 
     pub fn allocate_loss(env: Env, token: Address, invoice_id: u64, shortfall: i128) {
+        Self::get_admin(env.clone()).require_auth();
         Self::non_reentrant_start(&env);
         repayment::allocate_loss(&env, token, invoice_id, shortfall);
         Self::non_reentrant_end(&env);
