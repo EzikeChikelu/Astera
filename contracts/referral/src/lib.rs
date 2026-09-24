@@ -430,6 +430,13 @@ impl ReferralContract {
         env.storage().persistent().get(&DataKey::Referrer(referee))
     }
 
+    pub fn is_activated(env: Env, referee: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::Activated(referee))
+            .unwrap_or(false)
+    }
+
     /// Records a qualifying activity (`kind` is `"borrow"` or `"deposit"`)
     /// for `referee`. Callable only by the configured pool contract.
     ///
@@ -540,19 +547,34 @@ impl ReferralContract {
         referrer.require_auth();
         require_not_paused(&env);
         let reward_key = DataKey::PendingReward(referrer.clone(), token.clone());
-        let amount: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
+        let mut amount: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
         if amount <= 0 {
             return 0;
         }
-        env.storage().persistent().set(&reward_key, &0i128);
-        bump_instance(&env);
 
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &referrer, &amount);
+        let balance = token_client.balance(&env.current_contract_address());
+        // The actual amount to claim is limited by both the pending reward and the contract's balance
+        let actual_claim_amount = if amount > balance {
+            balance
+        } else {
+            amount
+        };
+
+        if actual_claim_amount <= 0 {
+            return 0;
+        }
+
+        // Deduct the claimed amount from pending rewards
+        let current_pending: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
+        env.storage().persistent().set(&reward_key, &(current_pending - actual_claim_amount));
+        bump_instance(&env);
+
+        token_client.transfer(&env.current_contract_address(), &referrer, &actual_claim_amount);
 
         env.events()
-            .publish((EVT, symbol_short!("claimed")), (referrer, token, amount));
-        amount
+            .publish((EVT, symbol_short!("claimed")), (referrer, token, actual_claim_amount));
+        actual_claim_amount
     }
 
     pub fn get_stats(env: Env, referrer: Address) -> ReferralStats {
