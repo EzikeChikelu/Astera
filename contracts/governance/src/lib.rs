@@ -6,6 +6,10 @@ use soroban_sdk::{
     Env, String, Symbol, Vec,
 };
 
+const LEDGERS_PER_DAY: u32 = 17_280;
+const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+
 const EVT: Symbol = symbol_short!("gov");
 const MIN_VOTING_PERIOD_SECS: u64 = 86_400;
 const DEFAULT_VOTING_PERIOD_SECS: u64 = 7 * 86_400;
@@ -462,6 +466,12 @@ fn category_from_discriminant(discriminant: u32) -> GovernanceResult<ProposalCat
     }
 }
 
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
 /// Voting weight is the holder's share balance at the moment the proposal was
 /// created (`snapshot_at`), not their balance at vote time — otherwise shares
 /// acquired mid-vote (or borrowed just long enough to vote) would inflate
@@ -583,6 +593,7 @@ impl Governance {
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        bump_instance(&env);
     }
 
     /// #931 / #933 / #1038: create a proposal. Caller must hold at least
@@ -645,6 +656,7 @@ impl Governance {
         env.storage().instance().set(&DataKey::ProposalCount, &id);
         env.events()
             .publish((EVT, symbol_short!("create")), (id, proposer));
+        bump_instance(&env);
         Ok(id)
     }
 
@@ -761,6 +773,7 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        bump_instance(&env);
         Ok(())
     }
 
@@ -1105,6 +1118,7 @@ impl Governance {
             .set(&DataKey::Proposal(proposal_id), &proposal);
         env.events()
             .publish((EVT, symbol_short!("cancel")), (proposal_id, caller));
+        bump_instance(&env);
         Ok(())
     }
 
@@ -1195,6 +1209,7 @@ impl Governance {
             (EVT, symbol_short!("set_gov")),
             (caller, governance_address),
         );
+        bump_instance(&env);
         Ok(())
     }
 
@@ -1224,6 +1239,7 @@ impl Governance {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("cfg")), (caller, quorum_bps, pass_bps));
+        bump_instance(&env);
         Ok(())
     }
 
@@ -1250,6 +1266,7 @@ impl Governance {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("min_bal")), (caller, min_share_balance));
+        bump_instance(&env);
         Ok(())
     }
 
