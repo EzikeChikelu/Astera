@@ -16,4 +16,5 @@ pub enum TrancheError {
     LossAllocationError = 10,
     ReentrancyDetected = 11,
     NotInitialized = 12,
+    ExposureNotFound = 13,
 }
