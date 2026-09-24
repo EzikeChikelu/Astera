@@ -390,6 +390,10 @@ pub enum GovernanceError {
     // #1038: a `*_via_governance` entrypoint was called but no `governance`
     // contract has been configured via `set_governance` yet.
     GovernanceNotConfigured = 14,
+    // #1357: `initialize` was called on a contract that is already set up.
+    // Previously an opaque raw-string panic; now a typed error clients can
+    // branch on.
+    AlreadyInitialized = 15,
 }
 
 type GovernanceResult<T> = Result<T, GovernanceError>;
@@ -540,24 +544,23 @@ impl Governance {
         pass_bps: u32,
         execution_delay_secs: u64,
         min_share_balance: i128,
-    ) {
+    ) -> Result<(), GovernanceError> {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            return Err(GovernanceError::AlreadyInitialized);
         }
 
-        if quorum_bps == 0 || quorum_bps > 10_000 {
-            panic!("invalid quorum");
-        }
-        if pass_bps <= 5_000 || pass_bps > 10_000 {
-            panic!("invalid threshold");
-        }
+        // #1357: deployment-time misconfigurations are surfaced as typed
+        // `GovernanceError`s instead of raw panic strings, so clients get a
+        // stable code to branch on. `validate_bps` is the same validation used
+        // by `update_config`, keeping the accepted ranges in one place.
+        validate_bps(quorum_bps, pass_bps)?;
         if voting_period_secs > 0 && voting_period_secs < MIN_VOTING_PERIOD_SECS {
-            panic!("voting period too short");
+            return Err(GovernanceError::InvalidConfig);
         }
         // #931: proposal creation requires a positive stake threshold so any
         // address without holdings cannot spam list_proposals.
         if min_share_balance <= 0 {
-            panic!("min_share_balance must be positive");
+            return Err(GovernanceError::InvalidConfig);
         }
 
         let config = GovernanceConfig {
@@ -594,6 +597,7 @@ impl Governance {
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
         bump_instance(&env);
+        Ok(())
     }
 
     /// #931 / #933 / #1038: create a proposal. Caller must hold at least
