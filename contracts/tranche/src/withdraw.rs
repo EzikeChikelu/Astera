@@ -44,7 +44,7 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
         TrancheClass::Junior => pool.junior_share_token.clone(),
     };
 
-    let token_client = token::Client::new(&env, &token);
+    let token_client = token::Client::new(env, &token);
     token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
     env.storage().instance().set(&key, &position);

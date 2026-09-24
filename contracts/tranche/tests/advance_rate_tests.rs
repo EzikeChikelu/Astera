@@ -1,6 +1,18 @@
 use soroban_sdk::testutils::Address as _;
+use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 use tranche::{state::TrancheClass, TrancheContract};
+
+/// Registers a real token contract: `deposit_tranche`/`withdraw_tranche`
+/// perform actual token transfers, so a plain generated address won't do.
+fn create_token(env: &Env) -> Address {
+    env.register_stellar_asset_contract_v2(Address::generate(env))
+        .address()
+}
+
+fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
+    StellarAssetClient::new(env, token_id).mint(to, &amount);
+}
 
 #[contract]
 pub struct DummyShare;
@@ -43,11 +55,11 @@ fn test_advance_rate_enforcement() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = create_token(&env);
     let senior_share_token = env.register(DummyShare, ());
     let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -76,11 +88,14 @@ fn test_advance_rate_enforcement() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // First, deposit junior to create capacity
     env.as_contract(&contract_id, || {
@@ -122,11 +137,11 @@ fn test_advance_rate_100_percent() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = create_token(&env);
     let senior_share_token = env.register(DummyShare, ());
     let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -155,10 +170,12 @@ fn test_advance_rate_100_percent() {
                 senior_advance_rate_bps: 10000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
 
     // With 100% advance rate, senior can deposit without junior
     env.as_contract(&contract_id, || {
@@ -183,11 +200,11 @@ fn test_get_advance_rate_headroom() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = create_token(&env);
     let senior_share_token = env.register(DummyShare, ());
     let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -216,7 +233,8 @@ fn test_get_advance_rate_headroom() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     // No deposits yet: headroom is 0 (no junior capacity to support senior).
@@ -227,6 +245,8 @@ fn test_get_advance_rate_headroom() {
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Junior deposits 2000: senior can take up to 8000 at an 80% advance rate.
     env.as_contract(&contract_id, || {

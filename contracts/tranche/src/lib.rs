@@ -17,6 +17,18 @@ use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
 
 const REENTRANCY_GUARD: u64 = 1;
 
+// TTL bumping: all of the tranche contract's state (TranchePool,
+// InvestorPosition, InvoiceTrancheExposure) lives in instance() storage,
+// which is a single ledger entry shared with the contract instance itself.
+// Without extending its TTL, that entry eventually falls below the
+// persistent-entry threshold and gets archived — after which every read
+// silently falls back to the default/missing value and the pool's
+// accounting resets. Every state-touching entrypoint therefore bumps the
+// instance (and, with it, the whole pool's storage). See #1308.
+const LEDGERS_PER_DAY: u32 = 17_280;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7; // bump once TTL drops below ~7 days
+const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30; // restore TTL to ~30 days
+
 #[contract]
 pub struct TrancheContract;
 
@@ -34,6 +46,24 @@ impl TrancheContract {
     fn non_reentrant_end(env: &Env) {
         env.storage().instance().remove(&DataKey::NonReentrantKey);
     }
+
+    /// Extend the TTL of the instance storage entry holding all of the
+    /// contract's state. Must be called by every entrypoint that reads or
+    /// writes pool/position/exposure data so archived entries can never be
+    /// read back as default values. (#1308)
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Require authorization from the stored admin, panicking with the typed
+    /// `NotInitialized` error when no admin has been set.
+    fn require_admin_auth(env: &Env) {
+        let admin = Self::get_admin(env.clone()).unwrap_or_else(|e| panic_with_error!(env, e));
+        admin.require_auth();
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -42,6 +72,8 @@ impl TrancheContract {
         junior_share_token: Address,
         config: TrancheConfig,
     ) {
+        Self::bump_instance(&env);
+
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
@@ -97,6 +129,7 @@ impl TrancheContract {
         tranche: TrancheClass,
         amount: i128,
     ) {
+        Self::bump_instance(&env);
         Self::non_reentrant_start(&env);
         deposit::deposit(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -109,6 +142,7 @@ impl TrancheContract {
         tranche: TrancheClass,
         amount: i128,
     ) {
+        Self::bump_instance(&env);
         Self::non_reentrant_start(&env);
         withdraw::withdraw(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -165,6 +199,8 @@ impl TrancheContract {
         senior_advance_rate_bps: u32,
         junior_first_loss_bps: u32,
     ) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+
         admin.require_auth();
 
         let stored_admin = Self::get_admin(env.clone())?;
@@ -207,6 +243,8 @@ impl TrancheContract {
         junior_share_token: Address,
         config: TrancheConfig,
     ) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+
         admin.require_auth();
 
         let stored_admin = Self::get_admin(env.clone())?;
@@ -265,7 +303,8 @@ impl TrancheContract {
         invoice_id: u64,
         total_amount: i128,
     ) -> (i128, i128) {
-        Self::get_admin(env.clone()).require_auth();
+        Self::bump_instance(&env);
+        Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = funding::fund_invoice_from_tranches(&env, token, invoice_id, total_amount);
         Self::non_reentrant_end(&env);
@@ -286,7 +325,8 @@ impl TrancheContract {
         total_due: i128,
         elapsed_secs: u64,
     ) -> (i128, i128) {
-        Self::get_admin(env.clone()).require_auth();
+        Self::bump_instance(&env);
+        Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = repayment::distribute_waterfall_repayment(
             &env,
@@ -300,7 +340,8 @@ impl TrancheContract {
     }
 
     pub fn allocate_loss(env: Env, token: Address, invoice_id: u64, shortfall: i128) {
-        Self::get_admin(env.clone()).require_auth();
+        Self::bump_instance(&env);
+        Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         repayment::allocate_loss(&env, token, invoice_id, shortfall);
         Self::non_reentrant_end(&env);
