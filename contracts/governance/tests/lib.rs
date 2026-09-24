@@ -18,10 +18,7 @@ const EXEC_DELAY: u64 = 100;
 const QUORUM_BPS: u32 = 1_000; // 10 %
 const PASS_BPS: u32 = 6_000; // 60 %
 const MIN_SHARE_BALANCE: i128 = 1;
- test/auction-governance-boundary-coverage
 const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
-
- main
 
 fn setup_share(env: &Env) -> (ShareTokenClient<'_>, Address, Address) {
     let share_admin = Address::generate(env);
@@ -721,7 +718,6 @@ fn test_passed_proposal_executes_within_expiry_window() {
     assert_eq!(proposal.status, ProposalStatus::Executed);
 }
 
- test/auction-governance-boundary-coverage
 #[test]
 fn test_execute_proposal_expiry_boundary() {
     let env = Env::default();
@@ -740,7 +736,7 @@ fn test_execute_proposal_expiry_boundary() {
     let proposal = gov.get_proposal(&id).unwrap();
 
     env.ledger().with_mut(|l| {
-        l.timestamp = proposal.passed_at + EXECUTION_EXPIRY_SECS;
+        l.timestamp = proposal.voting_ends_at + EXECUTION_EXPIRY_SECS;
     });
     gov.execute_proposal(&id);
     assert_eq!(
@@ -752,14 +748,12 @@ fn test_execute_proposal_expiry_boundary() {
     gov.vote(&id, &voter, &true);
     let proposal = gov.get_proposal(&id).unwrap();
     env.ledger().with_mut(|l| {
-        l.timestamp = proposal.passed_at + EXECUTION_EXPIRY_SECS + 1;
+        l.timestamp = proposal.voting_ends_at + EXECUTION_EXPIRY_SECS + 1;
     });
     let result = gov.try_execute_proposal(&id);
     assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
 }
 
-
- main
 // ── #932: voting period must fully elapse before execute ─────────────────────
 
 #[test]
@@ -1041,4 +1035,35 @@ fn test_set_category_quorum_rejects_non_admin_and_invalid() {
     assert!(gov
         .try_set_category_quorum(&gov_admin, &ProposalCategory::Treasury, &10_001u32)
         .is_err());
+}
+
+// ── #1405: list_proposals at scale ───────────────────────────────────────────
+
+#[test]
+fn test_list_proposals_succeeds_with_many_proposals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &1_000_000i128);
+
+    // Enough proposals to show the linear scan cost growth in
+    // `list_proposals` (it iterates every proposal ever created) while
+    // still completing — a live DAO must not hit a ceiling here first.
+    const N: u64 = 50;
+    for _ in 0..N {
+        make_proposal(&env, &gov, &proposer, &target_id);
+    }
+
+    let proposals = gov.list_proposals();
+    assert_eq!(proposals.len(), N as u32);
+    // IDs stay sequential so no proposal is skipped or duplicated.
+    for (i, proposal) in proposals.iter().enumerate() {
+        assert_eq!(proposal.id, (i as u64) + 1);
+    }
+    assert!(gov.get_proposal(&N).is_some());
 }

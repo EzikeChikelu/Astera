@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use share::{ShareToken, ShareTokenClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 fn setup(env: &Env) -> (ShareTokenClient<'_>, Address) {
     let contract_id = env.register(ShareToken, ());
@@ -238,6 +241,101 @@ fn test_burn_from_reduces_allowance_and_balance() {
     assert_eq!(client.total_supply(), 750);
 }
 
+// ── #1395: burn_from rejection paths ─────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "allowance exceeded")]
+fn test_burn_from_rejects_exceeding_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&owner, &1_000i128);
+    client.approve(&owner, &spender, &100i128);
+    client.burn_from(&spender, &owner, &101i128);
+}
+
+#[test]
+#[should_panic(expected = "insufficient balance")]
+fn test_burn_from_rejects_exceeding_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    // Allowance is generous but the holder only owns 50 tokens.
+    client.mint(&owner, &50i128);
+    client.approve(&owner, &spender, &200i128);
+    client.burn_from(&spender, &owner, &100i128);
+}
+
+// ── #1396: increase/decrease_allowance ───────────────────────────────────────
+
+#[test]
+fn test_increase_allowance_adds_to_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.increase_allowance(&owner, &spender, &50i128);
+    assert_eq!(client.allowance(&owner, &spender), 150);
+
+    // Usable immediately via transfer_from/burn_from accounting.
+    client.mint(&owner, &1_000i128);
+    let recipient = Address::generate(&env);
+    client.transfer_from(&spender, &owner, &recipient, &150i128);
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+#[test]
+fn test_decrease_allowance_subtracts_from_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.decrease_allowance(&owner, &spender, &40i128);
+    assert_eq!(client.allowance(&owner, &spender), 60);
+
+    // Decreasing to exactly zero is allowed.
+    client.decrease_allowance(&owner, &spender, &60i128);
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+#[test]
+#[should_panic(expected = "allowance underflow")]
+fn test_decrease_allowance_rejects_underflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.decrease_allowance(&owner, &spender, &101i128);
+}
+
+#[test]
+#[should_panic(expected = "allowance overflow")]
+fn test_increase_allowance_rejects_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &(i128::MAX - 10));
+    client.increase_allowance(&owner, &spender, &20i128);
+}
+
 #[test]
 fn test_balance_at_handles_many_checkpoint_boundaries() {
     let env = Env::default();
@@ -246,7 +344,7 @@ fn test_balance_at_handles_many_checkpoint_boundaries() {
     let alice = Address::generate(&env);
 
     let mut expected = 0i128;
-    let mut last_ts = 1_000u64;
+    let last_ts = 1_000u64;
     for i in 0..128u64 {
         env.ledger().with_mut(|l| l.timestamp = last_ts + i * 7);
         expected += 17 + i as i128;
@@ -256,8 +354,8 @@ fn test_balance_at_handles_many_checkpoint_boundaries() {
     assert_eq!(client.balance_at(&alice, &999), 0);
     assert_eq!(client.balance_at(&alice, &1_000), 17);
     assert_eq!(client.balance_at(&alice, &1_006), 17);
-    assert_eq!(client.balance_at(&alice, &1_007), 34);
-    assert_eq!(client.balance_at(&alice, &last_ts + 7 * 127), expected);
+    assert_eq!(client.balance_at(&alice, &1_007), 35);
+    assert_eq!(client.balance_at(&alice, &(last_ts + 7 * 127)), expected);
     assert_eq!(client.balance_at(&alice, &u64::MAX), expected);
 }
 

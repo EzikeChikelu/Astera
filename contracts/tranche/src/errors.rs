@@ -15,8 +15,5 @@ pub enum TrancheError {
     WaterfallError = 9,
     LossAllocationError = 10,
     ReentrancyDetected = 11,
- test/auction-governance-boundary-coverage
-
     NotInitialized = 12,
- main
 }

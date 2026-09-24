@@ -564,6 +564,13 @@ impl InsuranceReserve {
         let premium: i128 = premium
             .try_into()
             .map_err(|_| InsuranceError::AmountOverflow)?;
+        // #1417: reject a premium that floored to zero for a positive principal
+        // (e.g. min_premium_bps = 0 with dust principal). Otherwise a zero-value
+        // transfer would still book full covered exposure — real claimable risk
+        // for no premium.
+        if premium <= 0 {
+            return Err(InsuranceError::InvalidAmount);
+        }
 
         let coverage_bps = config.default_coverage_bps;
         let covered_exposure = principal
