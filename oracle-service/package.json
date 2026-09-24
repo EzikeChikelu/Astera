@@ -7,7 +7,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "test": "tsc --noEmit"
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
