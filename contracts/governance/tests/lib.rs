@@ -870,3 +870,93 @@ fn test_set_category_quorum_rejects_non_admin_and_invalid() {
         .try_set_category_quorum(&gov_admin, &ProposalCategory::Treasury, &10_001u32)
         .is_err());
 }
+
+#[test]
+fn test_voting_period_change_only_affects_new_proposals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, share_admin) = setup_share(&env);
+    let (gov, admin) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &10_000i128);
+
+    let existing_id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let old_end = gov.get_proposal(&existing_id).unwrap().voting_ends_at;
+    gov.set_voting_period(&admin, &(2 * VOTING_PERIOD));
+    assert_eq!(gov.get_config().voting_period_secs, 2 * VOTING_PERIOD);
+    assert_eq!(
+        gov.get_proposal(&existing_id).unwrap().voting_ends_at,
+        old_end
+    );
+
+    let new_id = make_proposal(&env, &gov, &proposer, &share_admin);
+    assert_eq!(
+        gov.get_proposal(&new_id).unwrap().voting_ends_at,
+        1_000 + 2 * VOTING_PERIOD
+    );
+    assert!(gov
+        .try_set_voting_period(&admin, &(VOTING_PERIOD - 1))
+        .is_err());
+}
+
+#[test]
+fn test_execution_expiry_is_configurable_and_applies_to_passed_proposals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, admin) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    gov.set_execution_expiry(&admin, &3_600);
+    assert_eq!(gov.get_execution_expiry(), 3_600);
+    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    gov.vote(&id, &voter, &true);
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+    gov.list_proposals();
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Passed
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 3_601);
+    gov.list_proposals();
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Expired
+    );
+    assert!(gov.try_set_execution_expiry(&admin, &0).is_err());
+}
+
+#[test]
+fn test_pause_blocks_mutations_and_admin_can_resume_governance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, share_admin) = setup_share(&env);
+    let (gov, admin) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &10_000i128);
+    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+
+    gov.set_paused(&admin, &true);
+    assert!(gov.is_paused());
+    assert_eq!(
+        gov.try_vote(&id, &proposer, &true).unwrap_err().unwrap(),
+        GovernanceError::Paused
+    );
+    assert_eq!(
+        gov.try_set_category_quorum(&admin, &ProposalCategory::Treasury, &3_000)
+            .unwrap_err()
+            .unwrap(),
+        GovernanceError::Paused
+    );
+    gov.set_paused(&admin, &false);
+    assert!(!gov.is_paused());
+    gov.vote(&id, &proposer, &true);
+}
