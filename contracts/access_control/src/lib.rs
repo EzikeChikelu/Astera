@@ -422,6 +422,12 @@ impl AccessControlContract {
         if proposal_expiry_secs == 0 {
             return Err(AccessControlError::InvalidExpiryWindow);
         }
+        // #1339: require explicit authorization from every initial SuperAdmin
+        // signer. Without this, anyone observing a deployed-but-uninitialized
+        // contract could front-run initialize and install their own signer set.
+        for i in 0..super_admin_signers.len() {
+            super_admin_signers.get(i).unwrap().require_auth();
+        }
 
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(
@@ -469,7 +475,7 @@ impl AccessControlContract {
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
     }
 
@@ -562,7 +568,7 @@ impl AccessControlContract {
             status,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage()
             .instance()
@@ -584,7 +590,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
@@ -619,7 +625,7 @@ impl AccessControlContract {
             proposal.earliest_execution_time = env.ledger().timestamp() + timelock_secs;
         }
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -636,7 +642,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
         // Allowed on Pending or Approved (but not-yet-executed) proposals —
@@ -668,7 +674,7 @@ impl AccessControlContract {
         };
 
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -686,7 +692,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
         if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
@@ -704,7 +710,7 @@ impl AccessControlContract {
 
         proposal.status = ProposalStatus::Rejected;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -726,7 +732,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
@@ -747,7 +753,7 @@ impl AccessControlContract {
         // effect actually having happened, or vice versa.
         proposal.status = ProposalStatus::Executed;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         let this_contract = env.current_contract_address();
