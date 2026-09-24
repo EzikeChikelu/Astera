@@ -55,6 +55,9 @@ pub enum ReferralError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 6,
+    ReferralCycle = 7,
+    InvalidActivityKind = 8,
+    NotInitialized = 9,
 }
 
 #[contracttype]
@@ -191,7 +194,7 @@ fn require_admin(env: &Env, admin: &Address) {
         .storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("not initialized");
+        .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized));
     if admin != &stored_admin {
         panic_with_error!(env, ReferralError::Unauthorized);
     }
@@ -268,7 +271,7 @@ impl ReferralContract {
         env.storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized))
     }
 
     /// Admin-configurable share (bps) of the factoring fee a referrer earns
@@ -413,6 +416,14 @@ impl ReferralContract {
         if referee == referrer {
             panic_with_error!(&env, ReferralError::SelfReferral);
         }
+        // #1348: prevent two-party referral cycles.
+        if let Some(existing_referrer_of_referrer) =
+            env.storage().persistent().get(&DataKey::Referrer(referrer.clone()))
+        {
+            if existing_referrer_of_referrer == referee {
+                panic_with_error!(&env, ReferralError::ReferralCycle);
+            }
+        }
         let key = DataKey::Referrer(referee.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, ReferralError::AlreadyRegistered);
@@ -462,7 +473,7 @@ impl ReferralContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized));
         if caller != pool {
             panic_with_error!(&env, ReferralError::Unauthorized);
         }
@@ -510,8 +521,10 @@ impl ReferralContract {
 
         let bps: u32 = if kind == symbol_short!("borrow") {
             Self::get_borrow_reward_bps(env.clone())
-        } else {
+        } else if kind == symbol_short!("deposit") {
             Self::get_deposit_reward_bps(env.clone())
+        } else {
+            panic_with_error!(&env, ReferralError::InvalidActivityKind);
         };
         // #799: floor (not ceiling) — this is a payout carved out of an
         // already-collected fee, so rounding in the protocol's favor
