@@ -1067,3 +1067,114 @@ fn test_list_proposals_succeeds_with_many_proposals() {
     }
     assert!(gov.get_proposal(&N).is_some());
 }
+
+
+// ── #1357: `initialize` reports typed errors instead of panicking ────────────
+
+#[test]
+fn test_initialize_rejects_double_init_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_share, share_id, _) = setup_share(&env);
+    let (gov, gov_admin, _target_id) = setup_governance(&env, &share_id);
+
+    let result = gov.try_initialize(
+        &gov_admin,
+        &share_id,
+        &VOTING_PERIOD,
+        &QUORUM_BPS,
+        &PASS_BPS,
+        &EXEC_DELAY,
+        &MIN_SHARE_BALANCE,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_initialize_rejects_invalid_quorum_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_share, share_id, _) = setup_share(&env);
+    let gov_admin = Address::generate(&env);
+    let gov_id = env.register(Governance, ());
+    let gov = GovernanceClient::new(&env, &gov_id);
+
+    let result = gov.try_initialize(
+        &gov_admin,
+        &share_id,
+        &VOTING_PERIOD,
+        &0u32,
+        &PASS_BPS,
+        &EXEC_DELAY,
+        &MIN_SHARE_BALANCE,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
+}
+
+#[test]
+fn test_initialize_rejects_invalid_threshold_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_share, share_id, _) = setup_share(&env);
+    let gov_admin = Address::generate(&env);
+    let gov_id = env.register(Governance, ());
+    let gov = GovernanceClient::new(&env, &gov_id);
+
+    let result = gov.try_initialize(
+        &gov_admin,
+        &share_id,
+        &VOTING_PERIOD,
+        &QUORUM_BPS,
+        &5_000u32,
+        &EXEC_DELAY,
+        &MIN_SHARE_BALANCE,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
+}
+
+#[test]
+fn test_initialize_rejects_short_voting_period_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_share, share_id, _) = setup_share(&env);
+    let gov_admin = Address::generate(&env);
+    let gov_id = env.register(Governance, ());
+    let gov = GovernanceClient::new(&env, &gov_id);
+
+    let result = gov.try_initialize(
+        &gov_admin,
+        &share_id,
+        &1u64,
+        &QUORUM_BPS,
+        &PASS_BPS,
+        &EXEC_DELAY,
+        &MIN_SHARE_BALANCE,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
+}
+
+#[test]
+fn test_initialize_rejects_non_positive_min_share_balance_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_share, share_id, _) = setup_share(&env);
+    let gov_admin = Address::generate(&env);
+    let gov_id = env.register(Governance, ());
+    let gov = GovernanceClient::new(&env, &gov_id);
+
+    let result = gov.try_initialize(
+        &gov_admin,
+        &share_id,
+        &VOTING_PERIOD,
+        &QUORUM_BPS,
+        &PASS_BPS,
+        &EXEC_DELAY,
+        &0i128,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
+}
