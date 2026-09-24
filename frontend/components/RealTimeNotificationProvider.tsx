@@ -36,10 +36,13 @@ export function RealTimeNotificationProvider() {
   })();
 
   // Activate polling with user role and default interval (15 seconds)
+  // Only enable polling if wallet is connected to avoid spurious requests
+  const shouldEnablePolling = wallet.connected;
+
   const { isPolling } = useSseEvents({
     role: userRole,
     intervalMs: 15_000,
-    enabled: true, // Always enabled once mounted
+    enabled: shouldEnablePolling,
   });
 
   // Log polling status for debugging
