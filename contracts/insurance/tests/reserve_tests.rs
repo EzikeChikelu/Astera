@@ -602,3 +602,63 @@ fn test_non_admin_cannot_set_premium_config() {
         .try_set_premium_config(&attacker, &default_premium_config(&env));
     assert_eq!(result, Err(Ok(InsuranceError::Unauthorized)));
 }
+
+// ── #1417: zero premium must not buy real coverage ───────────────────────────
+
+#[test]
+fn test_purchase_coverage_rejects_zero_premium() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+
+    // Force a zero premium: zero base rate and zero floor clamp every
+    // principal to 0, reproducing min_premium_bps = 0 + dust rounding.
+    let mut zero_cfg = default_premium_config(&env);
+    zero_cfg.base_rate_bps = 0;
+    zero_cfg.tenor_bps_per_day = 0;
+    zero_cfg.min_premium_bps = 0;
+    h.client.set_premium_config(&h.admin, &zero_cfg);
+
+    let sme = Address::generate(&env);
+    let payer = h.pool_id.clone();
+    mint(&env, &h.token_id, &payer, 1_000_000);
+
+    let result = h.client.try_purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
+    assert_eq!(result, Err(Ok(InsuranceError::InvalidAmount)));
+
+    // No exposure booked, no record written, reserves untouched.
+    let status = h.client.get_reserve_status(&h.token_id);
+    assert_eq!(status.total_covered_exposure, 0);
+    assert_eq!(status.total_reserves, 0);
+    assert!(h.client.get_coverage_record(&1u64).is_none());
+}
+
+#[test]
+fn test_purchase_coverage_rejects_dust_principal_flooring_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    // Default config (min 10 bps) still floors a dust principal of 1 to a
+    // zero premium via integer division — must be rejected, not free cover.
+    let sme = Address::generate(&env);
+    let payer = h.pool_id.clone();
+    mint(&env, &h.token_id, &payer, 1_000_000);
+
+    let result = h.client.try_purchase_coverage(
+        &payer,
+        &2u64,
+        &1i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
+    assert_eq!(result, Err(Ok(InsuranceError::InvalidAmount)));
+    assert!(h.client.get_coverage_record(&2u64).is_none());
+}
