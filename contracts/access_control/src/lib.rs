@@ -245,6 +245,8 @@ pub enum AccessControlError {
     /// A signer removal would invalidate the current threshold. Lower the
     /// threshold in a preceding proposal before removing the signer.
     ThresholdMustBeLoweredBeforeSignerRemoval = 18,
+    /// The selected role is not permitted to propose this action.
+    RoleNotAuthorized = 19,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -481,6 +483,9 @@ impl AccessControlContract {
         if Self::requires_super_admin(&action) && !matches!(role, Role::SuperAdmin) {
             return Err(AccessControlError::SelfManagementRequiresSuperAdmin);
         }
+        if !Self::role_can_propose(role, &action) {
+            return Err(AccessControlError::RoleNotAuthorized);
+        }
 
         // #1135: Validate payload/target coherence before the proposal enters
         // the approval queue.  Self-management payloads mutate *this* contract's
@@ -660,7 +665,8 @@ impl AccessControlContract {
             .instance()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
-        if proposal.status != ProposalStatus::Pending {
+        if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
+        {
             return Err(AccessControlError::ProposalNotPending);
         }
         let config: MultiSigConfig = env
@@ -1030,6 +1036,68 @@ impl AccessControlContract {
                     | ActionPayload::SetGovernanceAccessControl(_)
                     | ActionPayload::SetReferralAccessControl(_)
             )
+    }
+
+    /// Enforce least-privilege boundaries between the named operational
+    /// roles. SuperAdmin remains an override for every action.
+    fn role_can_propose(role: Role, action: &ActionPayload) -> bool {
+        if matches!(role, Role::SuperAdmin) {
+            return true;
+        }
+
+        match action {
+            ActionPayload::SetPaused(_)
+            | ActionPayload::SetYield(_)
+            | ActionPayload::SetMaxUtilization(_)
+            | ActionPayload::SetLateThreshold(_)
+            | ActionPayload::SetScoreThresholds(_, _, _, _) => {
+                matches!(role, Role::RiskManager)
+            }
+            ActionPayload::SetTreasury(_)
+            | ActionPayload::WithdrawRevenue(_, _)
+            | ActionPayload::UpdateGovernanceConfig(_, _)
+            | ActionPayload::SetCategoryQuorum(_, _)
+            | ActionPayload::SetReferralPaused(_)
+            | ActionPayload::SetReferralPool(_)
+            | ActionPayload::SetBorrowRewardBps(_)
+            | ActionPayload::SetDepositRewardBps(_) => {
+                matches!(role, Role::TreasuryManager)
+            }
+            ActionPayload::SetKycRequired(_)
+            | ActionPayload::SetInvestorKyc(_, _)
+            | ActionPayload::RegisterDebtor(_, _, _)
+            | ActionPayload::DeactivateDebtor(_)
+            | ActionPayload::AddKeeper(_)
+            | ActionPayload::SetCompliancePaused(_)
+            | ActionPayload::RegisterScreener(_)
+            | ActionPayload::ConfirmScreenerRegistration(_)
+            | ActionPayload::DeregisterScreener(_)
+            | ActionPayload::SetRescreeningInterval(_)
+            | ActionPayload::SetScreenerTimelock(_) => {
+                matches!(role, Role::ComplianceOfficer)
+            }
+            ActionPayload::SetOracleContract(_)
+            | ActionPayload::SetOracle(_)
+            | ActionPayload::RegisterAttestor(_, _, _)
+            | ActionPayload::SetOracleRegistryInvoiceContract(_)
+            | ActionPayload::SetOracleRegistryTreasury(_)
+            | ActionPayload::SetOracleRegistryConfig(_, _, _, _, _)
+            | ActionPayload::SetOracleRegistryPaused(_)
+            | ActionPayload::SlashOracle(_, _, _, _)
+            | ActionPayload::AdminResolveRound(_, _, _) => {
+                matches!(role, Role::OracleManager)
+            }
+            ActionPayload::SetInvoiceAccessControl(_)
+            | ActionPayload::SetCreditScoreAccessControl(_)
+            | ActionPayload::SetOracleRegistryAccessControl(_)
+            | ActionPayload::SetComplianceAccessControl(_)
+            | ActionPayload::SetGovernanceAccessControl(_)
+            | ActionPayload::SetReferralAccessControl(_)
+            | ActionPayload::AddSigner(_, _)
+            | ActionPayload::RemoveSigner(_, _)
+            | ActionPayload::SetThreshold(_, _)
+            | ActionPayload::SetProposalExpiry(_) => false,
+        }
     }
 
     fn validate_config(signers: &Vec<Address>, threshold: u32) -> Result_ {

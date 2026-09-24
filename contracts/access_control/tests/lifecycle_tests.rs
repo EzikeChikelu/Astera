@@ -102,12 +102,13 @@ fn test_super_admin_can_configure_a_new_role_via_its_own_multisig() {
     let f = setup();
     let risk1 = Address::generate(&f.env);
     let risk2 = Address::generate(&f.env);
+    let external = Address::generate(&f.env);
 
     // Nothing can be proposed under RiskManager yet — it isn't configured.
     let unconfigured = f.client.try_propose_action(
         &Role::RiskManager,
         &risk1,
-        &f.contract_id,
+        &external,
         &ActionPayload::SetYield(500),
     );
     assert_eq!(
@@ -153,7 +154,7 @@ fn test_super_admin_can_configure_a_new_role_via_its_own_multisig() {
     let proposal = f.client.propose_action(
         &Role::RiskManager,
         &risk1,
-        &f.contract_id,
+        &external,
         &ActionPayload::SetYield(500),
     );
     assert_eq!(
@@ -353,6 +354,71 @@ fn test_reject_action_blocks_further_approval_and_execution() {
     assert_eq!(
         execute_after_reject.unwrap_err().unwrap(),
         AccessControlError::ProposalNotApproved.into()
+    );
+}
+
+#[test]
+fn test_approved_proposal_can_be_rejected_before_execution() {
+    let f = setup();
+    let target = Address::generate(&f.env);
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, target),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Approved
+    );
+
+    let _ = f.client.reject_action(&f.s3, &proposal_id);
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Rejected
+    );
+    assert_eq!(
+        f.client
+            .try_execute_action(&f.s1, &proposal_id)
+            .unwrap_err()
+            .unwrap(),
+        AccessControlError::ProposalNotApproved.into()
+    );
+}
+
+#[test]
+fn test_compliance_officer_cannot_propose_treasury_action() {
+    let f = setup();
+    let compliance = Address::generate(&f.env);
+    let add = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::ComplianceOfficer, compliance.clone()),
+    );
+    let _ = f.client.approve_action(&f.s2, &add);
+    let _ = f.client.execute_action(&f.s1, &add);
+    let set_threshold = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetThreshold(Role::ComplianceOfficer, 1),
+    );
+    let _ = f.client.approve_action(&f.s2, &set_threshold);
+    let _ = f.client.execute_action(&f.s1, &set_threshold);
+
+    let external = Address::generate(&f.env);
+    let token = Address::generate(&f.env);
+    let result = f.client.try_propose_action(
+        &Role::ComplianceOfficer,
+        &compliance,
+        &external,
+        &ActionPayload::WithdrawRevenue(token, 100),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::RoleNotAuthorized
     );
 }
 
