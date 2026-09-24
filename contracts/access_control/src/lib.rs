@@ -40,6 +40,10 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 /// unapproved, unless overridden at `initialize()`. 7 days.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 604_800;
 
+/// Default timelock (in seconds) between proposal approval and execution,
+/// unless overridden at `initialize()`. 48 hours.
+const DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS: u64 = 172_800;
+
 /// Maximum number of signers per role to prevent unbounded iteration.
 const MAX_SIGNERS_PER_ROLE: u32 = 32;
 
@@ -198,6 +202,10 @@ pub struct Proposal {
     pub approvals: Vec<Address>,
     pub created_at: u64,
     pub expires_at: u64,
+    /// Earliest ledger timestamp at which this proposal can be executed,
+    /// set when the proposal is approved. Implements a timelock between
+    /// approval and execution.
+    pub earliest_execution_time: u64,
     pub status: ProposalStatus,
 }
 
@@ -205,11 +213,14 @@ pub struct Proposal {
 
 #[contracttype]
 pub enum DataKey {
+    // Instance storage (fast, bumped lifetime, limited size)
     Initialized,
     RoleConfig(Role),
-    Proposal(u64),
     NextProposalId,
     ProposalExpirySecs,
+    ProposalExecutionTimelock,
+    // Persistent storage (proposals accumulate, can be pruned)
+    Proposal(u64),
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -226,6 +237,8 @@ pub enum AccessControlError {
     ProposalExpired = 6,
     ProposalNotPending = 7,
     ProposalNotApproved = 8,
+    /// Proposal cannot be executed yet due to timelock.
+    ProposalNotYetExecutable = 20,
     InvalidThreshold = 9,
     DuplicateSigner = 10,
     RoleNotConfigured = 11,
@@ -400,6 +413,7 @@ impl AccessControlContract {
         super_admin_signers: Vec<Address>,
         super_admin_threshold: u32,
         proposal_expiry_secs: u64,
+        proposal_execution_timelock_secs: u64,
     ) -> Result_ {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(AccessControlError::AlreadyInitialized);
@@ -420,6 +434,9 @@ impl AccessControlContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalExpirySecs, &proposal_expiry_secs);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalExecutionTimelock, &proposal_execution_timelock_secs);
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &0u64);
@@ -541,6 +558,7 @@ impl AccessControlContract {
             approvals,
             created_at: now,
             expires_at: now + expiry_secs,
+            earliest_execution_time: 0,
             status,
         };
         env.storage()
@@ -593,6 +611,12 @@ impl AccessControlContract {
         proposal.approvals.push_back(signer.clone());
         if proposal.approvals.len() >= config.threshold {
             proposal.status = ProposalStatus::Approved;
+            let timelock_secs: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ProposalExecutionTimelock)
+                .unwrap_or(DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS);
+            proposal.earliest_execution_time = env.ledger().timestamp() + timelock_secs;
         }
         env.storage()
             .instance()
@@ -709,8 +733,12 @@ impl AccessControlContract {
         if proposal.status != ProposalStatus::Approved {
             return Err(AccessControlError::ProposalNotApproved);
         }
-        if env.ledger().timestamp() > proposal.expires_at {
+        let now = env.ledger().timestamp();
+        if now > proposal.expires_at {
             return Err(AccessControlError::ProposalExpired);
+        }
+        if now < proposal.earliest_execution_time {
+            return Err(AccessControlError::ProposalNotYetExecutable);
         }
 
         // CEI: flip status before the external call. Soroban invocations
@@ -742,14 +770,12 @@ impl AccessControlContract {
     ) {
         match action {
             ActionPayload::SetPaused(paused) => {
-                // Every target contract exposes the same unified setter
-                // name, so try each client in turn is unnecessary — the
-                // proposal was raised against a specific `target`, and only
-                // one of these three calls will actually match that
-                // contract's deployed interface. Soroban resolves this at
-                // the call site: whichever client's method the target
-                // actually implements succeeds; the others are simply never
-                // invoked because `target` only ever hosts one contract.
+                // This arm makes a single hardcoded call to PoolClient.
+                // It succeeds only if the target is a pool contract and
+                // implements set_paused_via_ac; other targets would fail.
+                // The proposal was raised against a specific `target` and
+                // the caller is responsible for ensuring the action and
+                // target are coherent.
                 PoolClient::new(env, target).set_paused_via_ac(this_contract, paused);
             }
             ActionPayload::SetYield(bps) => {
@@ -1101,6 +1127,9 @@ impl AccessControlContract {
     }
 
     fn validate_config(signers: &Vec<Address>, threshold: u32) -> Result_ {
+        if signers.len() > MAX_SIGNERS_PER_ROLE as usize {
+            return Err(AccessControlError::MaxSignersExceeded);
+        }
         if threshold == 0 || threshold > signers.len() {
             return Err(AccessControlError::InvalidThreshold);
         }
@@ -1113,5 +1142,31 @@ impl AccessControlContract {
             }
         }
         Ok(())
+    }
+
+    /// Prune a terminal proposal (Executed, Rejected, or Expired) from
+    /// persistent storage to prevent unbounded growth. Permissionless
+    /// — anyone can clean up old proposals.
+    pub fn prune_proposal(env: Env, proposal_id: u64) -> Result_ {
+        bump_instance(&env);
+        let proposal: Proposal = env
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)?;
+
+        match proposal.status {
+            ProposalStatus::Executed | ProposalStatus::Rejected => {
+                env.persistent().remove(&DataKey::Proposal(proposal_id));
+                Ok(())
+            }
+            ProposalStatus::Pending | ProposalStatus::Approved => {
+                if env.ledger().timestamp() > proposal.expires_at {
+                    env.persistent().remove(&DataKey::Proposal(proposal_id));
+                    Ok(())
+                } else {
+                    Err(AccessControlError::ProposalNotPending)
+                }
+            }
+        }
     }
 }
