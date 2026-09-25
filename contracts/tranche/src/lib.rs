@@ -219,7 +219,7 @@ impl TrancheContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::TrancheEnabled(token.clone()))
+            .has(&DataKey::Pool(token.clone()))
         {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
@@ -318,7 +318,7 @@ impl TrancheContract {
             .storage()
             .instance()
             .get(&DataKey::InvoiceExposure(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, TrancheError::PoolNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, TrancheError::ExposureNotFound));
 
         math::calculate_waterfall_split(
             &env,
@@ -329,7 +329,12 @@ impl TrancheContract {
         )
     }
 
-    pub fn get_effective_apy(env: Env, token: Address, tranche: TrancheClass) -> u32 {
+    /// Lifetime return in basis points: (earned - losses) * 10_000 / deposited.
+    /// Not annualized — has no time component, so it is not an APY. A pool
+    /// that returned 5% over one week and one that returned 5% over three
+    /// years both report 500 here. Callers wanting an annual rate must
+    /// weight this by elapsed time themselves.
+    pub fn get_lifetime_return_bps(env: Env, token: Address, tranche: TrancheClass) -> u32 {
         let pool = Self::get_pool(env.clone(), token);
         let accounting = match tranche {
             TrancheClass::Senior => pool.senior,
@@ -340,15 +345,13 @@ impl TrancheContract {
             return 0;
         }
 
-        // Calculate realized APY based on earned vs deposited
-        // This is a simplified calculation - in production would use time-weighted returns
         let total_return = accounting.earned - accounting.losses;
         if total_return <= 0 {
             return 0;
         }
 
-        // Convert to basis points (annualized)
+        // Convert to basis points (lifetime, not annualized — see get_lifetime_return_bps).
         let return_bps = (total_return * 10_000) / accounting.deposited;
-        return_bps as u32
+        return_bps.min(u32::MAX as i128) as u32
     }
 }
