@@ -436,9 +436,10 @@ impl AccessControlContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalExpirySecs, &proposal_expiry_secs);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProposalExecutionTimelock, &proposal_execution_timelock_secs);
+        env.storage().instance().set(
+            &DataKey::ProposalExecutionTimelock,
+            &proposal_execution_timelock_secs,
+        );
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &0u64);

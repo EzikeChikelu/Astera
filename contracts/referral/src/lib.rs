@@ -403,8 +403,10 @@ impl ReferralContract {
             panic_with_error!(&env, ReferralError::SelfReferral);
         }
         // #1348: prevent two-party referral cycles.
-        if let Some(existing_referrer_of_referrer) =
-            env.storage().persistent().get(&DataKey::Referrer(referrer.clone()))
+        if let Some(existing_referrer_of_referrer) = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Referrer(referrer.clone()))
         {
             if existing_referrer_of_referrer == referee {
                 panic_with_error!(&env, ReferralError::ReferralCycle);
@@ -554,11 +556,7 @@ impl ReferralContract {
         let token_client = token::Client::new(&env, &token);
         let balance = token_client.balance(&env.current_contract_address());
         // The actual amount to claim is limited by both the pending reward and the contract's balance
-        let actual_claim_amount = if amount > balance {
-            balance
-        } else {
-            amount
-        };
+        let actual_claim_amount = if amount > balance { balance } else { amount };
 
         if actual_claim_amount <= 0 {
             return 0;
@@ -566,13 +564,21 @@ impl ReferralContract {
 
         // Deduct the claimed amount from pending rewards
         let current_pending: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
-        env.storage().persistent().set(&reward_key, &(current_pending - actual_claim_amount));
+        env.storage()
+            .persistent()
+            .set(&reward_key, &(current_pending - actual_claim_amount));
         bump_instance(&env);
 
-        token_client.transfer(&env.current_contract_address(), &referrer, &actual_claim_amount);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &referrer,
+            &actual_claim_amount,
+        );
 
-        env.events()
-            .publish((EVT, symbol_short!("claimed")), (referrer, token, actual_claim_amount));
+        env.events().publish(
+            (EVT, symbol_short!("claimed")),
+            (referrer, token, actual_claim_amount),
+        );
         actual_claim_amount
     }
 
