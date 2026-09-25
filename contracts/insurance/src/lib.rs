@@ -42,8 +42,15 @@ use soroban_sdk::{
 pub const BPS_DENOM: u32 = 10_000;
 const SECS_PER_DAY: u64 = 86_400;
 
+/// Ceiling for risk multipliers (tier and default), in bps. Multipliers are
+/// relative (10_000 = 1.0x) and legitimately exceed `BPS_DENOM`, so they need
+/// their own cap: 100_000 = 10x.
+pub const MAX_RISK_MULTIPLIER_BPS: u32 = 100_000;
+
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280 * 30; // ~30 days at 5s/ledger
 const INSTANCE_BUMP_AMOUNT: u32 = 17_280 * 60; // ~60 days
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 17_280 * 30; // ~30 days at 5s/ledger
+const PERSISTENT_BUMP_AMOUNT: u32 = 17_280 * 60; // ~60 days
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -233,6 +240,7 @@ pub struct CreditScoreData {
 #[contractclient(name = "InvoiceContractClient")]
 pub trait InvoiceContract {
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
+    fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128);
 }
 
 #[contractclient(name = "PoolContractClient")]
@@ -313,13 +321,27 @@ pub fn calculate_premium(
     invoice_tenor_days: u32,
     config: &PremiumConfig,
 ) -> u128 {
+    let risk_multiplier_bps = resolve_risk_multiplier_bps(sme_credit_score, config);
+    calculate_premium_with_multiplier(principal, risk_multiplier_bps, invoice_tenor_days, config)
+}
+
+/// Same pricing as `calculate_premium`, but with the risk multiplier already
+/// resolved. Lets callers price a missing credit score with
+/// `default_risk_multiplier_bps` directly instead of pushing a sentinel score
+/// through tier matching, where it could collide with a real tier.
+fn calculate_premium_with_multiplier(
+    principal: i128,
+    risk_multiplier_bps: u32,
+    invoice_tenor_days: u32,
+    config: &PremiumConfig,
+) -> u128 {
     if principal <= 0 {
         return 0;
     }
     let principal = principal as u128;
     let denom = BPS_DENOM as u128;
 
-    let risk_multiplier_bps = resolve_risk_multiplier_bps(sme_credit_score, config) as u128;
+    let risk_multiplier_bps = risk_multiplier_bps as u128;
     let base = principal.saturating_mul(config.base_rate_bps as u128) / denom;
     let risk_adjusted = base.saturating_mul(risk_multiplier_bps) / denom;
 
@@ -401,9 +423,7 @@ impl InsuranceReserve {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
-        if config.max_premium_bps < config.min_premium_bps {
-            return Err(InsuranceError::InvalidPremiumConfig);
-        }
+        Self::validate_premium_config(&config)?;
         if config.default_coverage_bps == 0 || config.default_coverage_bps > BPS_DENOM {
             return Err(InsuranceError::InvalidCoverageBps);
         }
@@ -549,10 +569,15 @@ impl InsuranceReserve {
         if principal <= 0 {
             return Err(InsuranceError::InvalidAmount);
         }
+
+        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+        let _ = invoice_client.get_invoice_verification_state(&invoice_id);
+
         if env
             .storage()
-            .instance()
-            .has(&DataKey::CoverageRecord(invoice_id))
+            .persistent()
+            .get::<_, CoverageRecord>(&DataKey::CoverageRecord(invoice_id))
+            .is_some()
         {
             return Err(InsuranceError::AlreadyCovered);
         }
@@ -577,11 +602,7 @@ impl InsuranceReserve {
             .saturating_sub(env.ledger().timestamp())
             .saturating_div(SECS_PER_DAY) as u32;
 
-        let score = Self::resolve_credit_score(&env, &sme);
-        let premium = calculate_premium(principal, score, tenor_days, &config);
-        let premium: i128 = premium
-            .try_into()
-            .map_err(|_| InsuranceError::AmountOverflow)?;
+        let premium = Self::price_premium(&env, principal, &sme, tenor_days, &config)?;
         // #1417: reject a premium that floored to zero for a positive principal
         // (e.g. min_premium_bps = 0 with dust principal). Otherwise a zero-value
         // transfer would still book full covered exposure — real claimable risk
@@ -634,9 +655,11 @@ impl InsuranceReserve {
                 purchased_at: env.ledger().timestamp(),
                 claimed: false,
             };
+            let key = DataKey::CoverageRecord(invoice_id);
             env.storage()
-                .instance()
-                .set(&DataKey::CoverageRecord(invoice_id), &record);
+                .persistent()
+                .set(&key, &record);
+            env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
             env.events().publish(
                 (EVT, symbol_short!("covered")),
@@ -646,13 +669,10 @@ impl InsuranceReserve {
         })
     }
 
-    /// Permissionless — re-derives default status and shortfall itself rather
-    /// than trusting the caller. Pool does *not* call this internally (it
-    /// would re-enter pool while pool is still on the call stack seizing
-    /// collateral, which Soroban disallows) — instead anyone (a keeper, the
-    /// SME, the frontend) files it directly against this contract as a
-    /// follow-up call once collateral has been seized.
-    pub fn file_claim(env: Env, _caller: Address, invoice_id: u64) -> Result<i128, InsuranceError> {
+    /// Called when an invoice repays in full (on time or late). Releases the
+    /// coverage and reduces the reserve's total_covered_exposure accordingly.
+    /// The invoice_id must not already have a claimed coverage record.
+    pub fn release_coverage(env: Env, invoice_id: u64) -> Result<(), InsuranceError> {
         bump_instance(&env);
         require_not_paused(&env)?;
 
@@ -661,9 +681,57 @@ impl InsuranceReserve {
             .instance()
             .get(&DataKey::CoverageRecord(invoice_id))
             .ok_or(InsuranceError::NoCoverageFound)?;
+
+        // Cannot release coverage that was already claimed
         if record.claimed {
             return Err(InsuranceError::AlreadyClaimed);
         }
+
+        let covered_exposure = record
+            .principal
+            .checked_mul(record.coverage_bps as i128)
+            .and_then(|v| v.checked_div(BPS_DENOM as i128))
+            .ok_or(InsuranceError::AmountOverflow)?;
+
+        let mut reserve = Self::load_reserve(&env, &record.token);
+        reserve.total_covered_exposure = reserve
+            .total_covered_exposure
+            .checked_sub(covered_exposure)
+            .unwrap_or(0)
+            .max(0);
+        Self::recompute_ratio(&mut reserve);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReserveFund(record.token.clone()), &reserve);
+
+        // Mark as claimed so it can't be released again or have a claim filed
+        record.claimed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::CoverageRecord(invoice_id), &record);
+
+        env.events()
+            .publish((EVT, symbol_short!("released")), (invoice_id, covered_exposure));
+        Ok(())
+    }
+
+    /// Permissionless — re-derives default status and shortfall itself rather
+    /// than trusting the caller. Pool does *not* call this internally (it
+    /// would re-enter pool while pool is still on the call stack seizing
+    /// collateral, which Soroban disallows) — instead anyone (a keeper, the
+    /// SME, the frontend) files it directly against this contract as a
+    /// follow-up call once collateral has been seized.
+    pub fn file_claim(env: Env, invoice_id: u64) -> Result<i128, InsuranceError> {
+        bump_instance(&env);
+        require_not_paused(&env)?;
+
+        let record: CoverageRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoverageRecord(invoice_id))
+            .ok_or(InsuranceError::NoCoverageFound)?;
+        let record_key = DataKey::CoverageRecord(invoice_id);
+        env.storage().persistent().extend_ttl(&record_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
         let cfg: Config = env
             .storage()
@@ -753,15 +821,9 @@ impl InsuranceReserve {
                 .instance()
                 .set(&DataKey::ReserveFund(record.token.clone()), &reserve);
 
-            record.claimed = true;
-            env.storage()
-                .instance()
-                .set(&DataKey::CoverageRecord(invoice_id), &record);
-
-            // #937: persist claim history entry so callers can audit past claims.
             let hist_count: u32 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::ClaimHistoryCount(invoice_id))
                 .unwrap_or(0);
             let item = ClaimHistoryItem {
@@ -771,14 +833,19 @@ impl InsuranceReserve {
                 shortfalls: shortfall,
                 timestamp: env.ledger().timestamp(),
             };
-            env.storage().instance().set(
-                &DataKey::ClaimHistoryEntry(invoice_id, hist_count),
+            let hist_key = DataKey::ClaimHistoryEntry(invoice_id, hist_count);
+            env.storage().persistent().set(
+                &hist_key,
                 &item,
             );
-            env.storage().instance().set(
-                &DataKey::ClaimHistoryCount(invoice_id),
+            env.storage().persistent().extend_ttl(&hist_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+            let count_key = DataKey::ClaimHistoryCount(invoice_id);
+            env.storage().persistent().set(
+                &count_key,
                 &(hist_count + 1),
             );
+            env.storage().persistent().extend_ttl(&count_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
             env.events()
                 .publish((EVT, symbol_short!("claimed")), (invoice_id, payout));
@@ -794,7 +861,7 @@ impl InsuranceReserve {
 
     pub fn get_coverage_record(env: Env, invoice_id: u64) -> Option<CoverageRecord> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::CoverageRecord(invoice_id))
     }
 
@@ -802,7 +869,7 @@ impl InsuranceReserve {
     pub fn get_claim_history(env: Env, invoice_id: u64) -> Vec<ClaimHistoryItem> {
         let count: u32 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ClaimHistoryCount(invoice_id))
             .unwrap_or(0);
         let mut items = Vec::new(&env);
@@ -810,7 +877,7 @@ impl InsuranceReserve {
         while i < count {
             if let Some(item) = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::ClaimHistoryEntry(invoice_id, i))
             {
                 items.push_back(item);
@@ -826,7 +893,7 @@ impl InsuranceReserve {
         let reserve = Self::load_reserve(&env, &token);
         let min_amount: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserveAmount(token.clone()))
             .unwrap_or(0);
         // With no configured floor there is no minimum for the reserve to
@@ -858,9 +925,11 @@ impl InsuranceReserve {
         if min_amount < 0 {
             return Err(InsuranceError::InvalidAmount);
         }
+        let key = DataKey::MinReserveAmount(token.clone());
         env.storage()
-            .instance()
-            .set(&DataKey::MinReserveAmount(token.clone()), &min_amount);
+            .persistent()
+            .set(&key, &min_amount);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("min_rsv")),
             (admin, token, min_amount),
@@ -870,7 +939,7 @@ impl InsuranceReserve {
 
     pub fn get_min_reserve_amount(env: Env, token: Address) -> i128 {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserveAmount(token))
             .unwrap_or(0)
     }
@@ -883,46 +952,94 @@ impl InsuranceReserve {
         principal: i128,
         sme: Address,
         tenor_days: u32,
-        _token: Address,
     ) -> Result<i128, InsuranceError> {
         let config: PremiumConfig = env
             .storage()
             .instance()
             .get(&DataKey::PremiumConfig)
             .ok_or(InsuranceError::InvalidPremiumConfig)?;
-        let score = Self::resolve_credit_score(&env, &sme);
-        let premium = calculate_premium(principal, score, tenor_days, &config);
-        premium
-            .try_into()
-            .map_err(|_| InsuranceError::AmountOverflow)
+        Self::price_premium(&env, principal, &sme, tenor_days, &config)
     }
 
     // ---- Internal ----
 
-    fn resolve_credit_score(env: &Env, sme: &Address) -> u32 {
-        const DEFAULT_SCORE_WHEN_UNAVAILABLE: u32 = 300; // conservative: near the bottom of 200-850
+    fn validate_premium_config(config: &PremiumConfig) -> InsuranceResult<()> {
+        if config.max_premium_bps < config.min_premium_bps {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
+        // Rate fields are fractions of principal (or of the risk-adjusted
+        // premium), so none may exceed 100%.
+        if config.base_rate_bps > BPS_DENOM
+            || config.tenor_bps_per_day > BPS_DENOM
+            || config.min_premium_bps > BPS_DENOM
+            || config.max_premium_bps > BPS_DENOM
+        {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
+        if config.default_risk_multiplier_bps == 0
+            || config.default_risk_multiplier_bps > MAX_RISK_MULTIPLIER_BPS
+        {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
 
-        let cs_contract: Option<Address> =
-            env.storage().instance().get(&DataKey::CreditScoreContract);
-        match cs_contract {
-            Some(addr) => {
-                let client = CreditScoreClient::new(env, &addr);
-                match client.try_get_credit_score(sme) {
-                    // #935: prefer blended_score (includes external attestations)
-                    // over the raw internal score for more accurate risk pricing.
-                    Ok(Ok(data)) => {
-                        if data.blended_score > 0 {
-                            data.blended_score
-                        } else {
-                            // Pre-v2 credit_score contracts don't return blended_score;
-                            // fall back to the internal score.
-                            data.score
-                        }
-                    }
-                    _ => DEFAULT_SCORE_WHEN_UNAVAILABLE,
+        // Tiers may be supplied in any order, so overlap is checked pairwise.
+        // Gaps between tiers are allowed: uncovered scores intentionally price
+        // at `default_risk_multiplier_bps`.
+        let n = config.risk_tiers.len();
+        for i in 0..n {
+            let tier = config.risk_tiers.get(i).expect("storage corrupted");
+            if tier.min_score > tier.max_score
+                || tier.risk_multiplier_bps == 0
+                || tier.risk_multiplier_bps > MAX_RISK_MULTIPLIER_BPS
+            {
+                return Err(InsuranceError::InvalidPremiumConfig);
+            }
+            for j in (i + 1)..n {
+                let other = config.risk_tiers.get(j).expect("storage corrupted");
+                if tier.min_score <= other.max_score && other.min_score <= tier.max_score {
+                    return Err(InsuranceError::InvalidPremiumConfig);
                 }
             }
-            None => DEFAULT_SCORE_WHEN_UNAVAILABLE,
+        }
+        Ok(())
+    }
+
+    /// Prices a premium for `sme`. A missing credit score (contract unset or
+    /// call failed) bypasses tier matching and uses the config's conservative
+    /// `default_risk_multiplier_bps`, so "no data" can never be priced as a
+    /// real score that happens to fall inside a tier.
+    fn price_premium(
+        env: &Env,
+        principal: i128,
+        sme: &Address,
+        tenor_days: u32,
+        config: &PremiumConfig,
+    ) -> InsuranceResult<i128> {
+        let multiplier_bps = match Self::resolve_credit_score(env, sme) {
+            Some(score) => resolve_risk_multiplier_bps(score, config),
+            None => config.default_risk_multiplier_bps,
+        };
+        calculate_premium_with_multiplier(principal, multiplier_bps, tenor_days, config)
+            .try_into()
+            .map_err(|_| InsuranceError::AmountOverflow)
+    }
+
+    fn resolve_credit_score(env: &Env, sme: &Address) -> Option<u32> {
+        let cs_contract: Option<Address> =
+            env.storage().instance().get(&DataKey::CreditScoreContract);
+        let addr = cs_contract?;
+        let client = CreditScoreClient::new(env, &addr);
+        match client.try_get_credit_score(sme) {
+            // #935: prefer blended_score (includes external attestations)
+            // over the raw internal score for more accurate risk pricing.
+            Ok(Ok(data)) => Some(if data.blended_score > 0 {
+                data.blended_score
+            } else {
+                // Pre-v2 credit_score contracts don't return blended_score;
+                // fall back to the internal score.
+                data.score
+            }),
+            _ => None,
         }
     }
 
