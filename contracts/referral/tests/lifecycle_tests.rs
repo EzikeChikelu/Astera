@@ -22,6 +22,21 @@ fn setup_token(env: &Env) -> Address {
         .address()
 }
 
+#[test]
+fn test_initialize_requires_admin_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(ReferralContract, ());
+    let client = ReferralContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+
+    assert!(client.try_initialize(&admin, &pool).is_err());
+
+    env.mock_all_auths();
+    client.initialize(&admin, &pool);
+    assert_eq!(client.get_pool(), pool);
+}
+
 fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
     token::StellarAssetClient::new(env, token_id).mint(to, &amount);
 }
