@@ -101,6 +101,13 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     f.client
         .set_category_quorum_via_ac(&access_control, &1u32, &5_500u32);
     assert_eq!(f.client.get_config().treasury_quorum_bps, 5_500);
+    let invalid_category =
+        f.client
+            .try_set_category_quorum_via_ac(&access_control, &3u32, &5_500u32);
+    assert_eq!(
+        invalid_category.unwrap_err().unwrap(),
+        GovernanceError::InvalidConfig
+    );
 
     // Rotating the trust anchor itself must also go through the currently
     // configured access_control, not the legacy admin key.

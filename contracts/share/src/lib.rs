@@ -34,18 +34,29 @@ pub enum DataKey {
     /// so voting power reflects the snapshot at proposal creation rather than
     /// whatever the holder's balance happens to be when they cast their vote.
     Checkpoints(Address),
+    /// Ring buffer head index for the checkpoint vec — points to the oldest
+    /// entry when the buffer is full, otherwise 0.
+    CheckpointsHead(Address),
 }
 
 /// Records a checkpoint of `who`'s new balance at the current ledger timestamp.
 /// Multiple writes within the same timestamp overwrite the last checkpoint for
 /// that timestamp rather than appending, keeping the list free of duplicates.
+/// Uses a ring buffer (with a stored head index) to avoid O(n) vec.remove(0).
 fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
     let key = DataKey::Checkpoints(who.clone());
+    let head_key = DataKey::CheckpointsHead(who.clone());
     let mut checkpoints: Vec<(u64, i128)> = env
         .storage()
         .persistent()
         .get(&key)
-        .unwrap_or(Vec::new(env));
+        .unwrap_or_else(|_| Vec::new(env));
+    let mut head: u32 = env
+        .storage()
+        .persistent()
+        .get(&head_key)
+        .unwrap_or(0);
+
     let now = env.ledger().timestamp();
     if let Some(last) = checkpoints.last() {
         if last.0 == now {
@@ -55,11 +66,15 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
             return;
         }
     }
-    // Evict the oldest entry before appending so the Vec never exceeds the cap.
-    if checkpoints.len() >= MAX_CHECKPOINTS {
-        checkpoints.remove(0);
+
+    // Append or overwrite at ring buffer head if full
+    if len < MAX_CHECKPOINTS {
+        checkpoints.push_back((now, new_balance));
+    } else {
+        checkpoints.set(head as usize, (now, new_balance));
+        head = (head + 1) % MAX_CHECKPOINTS;
+        env.storage().persistent().set(&head_key, &head);
     }
-    checkpoints.push_back((now, new_balance));
     env.storage().persistent().set(&key, &checkpoints);
     env.storage().persistent().extend_ttl(&key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
 }
@@ -152,7 +167,9 @@ impl ShareToken {
         write_checkpoint(&env, &to, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        let new_total = total + amount;
+        let new_total = total
+            .checked_add(amount)
+            .expect("total supply overflow");
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -180,7 +197,9 @@ impl ShareToken {
         write_checkpoint(&env, &from, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        let new_total = total - amount;
+        let new_total = total
+            .checked_sub(amount)
+            .expect("total supply underflow");
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -194,7 +213,18 @@ impl ShareToken {
         if amount <= 0 {
             panic!("amount must be positive");
         }
-        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        let record = env.storage()
+            .persistent()
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(from.clone(), spender.clone()))
+            .unwrap_or(AllowanceRecord {
+                amount: 0,
+                expiration_ledger: u32::MAX,
+            });
+        let allowed = if env.ledger().sequence() >= record.expiration_ledger as u64 {
+            0
+        } else {
+            record.amount
+        };
         if allowed < amount {
             panic!("allowance exceeded");
         }
@@ -211,7 +241,9 @@ impl ShareToken {
         write_checkpoint(&env, &from, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        let new_total = total - amount;
+        let new_total = total
+            .checked_sub(amount)
+            .expect("total supply underflow");
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -255,7 +287,7 @@ impl ShareToken {
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
     }
 
-    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) {
+    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128, expiration_ledger: u32) {
         require_not_paused(&env);
         owner.require_auth();
         if amount < 0 {
@@ -267,13 +299,20 @@ impl ShareToken {
             .set(&allowance_key, &amount);
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events()
-            .publish((EVT, symbol_short!("approve")), (owner, spender, amount));
+            .publish((EVT, symbol_short!("approve")), (owner, spender, amount, expiration_ledger));
     }
 
     pub fn allowance(env: Env, owner: Address, spender: Address) -> i128 {
         env.storage()
             .persistent()
-            .get(&DataKey::Allowance(owner, spender))
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(owner, spender))
+            .and_then(|record| {
+                if env.ledger().sequence() >= record.expiration_ledger as u64 {
+                    None
+                } else {
+                    Some(record.amount)
+                }
+            })
             .unwrap_or(0)
     }
 
@@ -283,8 +322,14 @@ impl ShareToken {
         if added_amount <= 0 {
             panic!("added amount must be positive");
         }
-        let current = Self::allowance(env.clone(), owner.clone(), spender.clone());
-        let new_allowance = current
+        let record = env.storage()
+            .persistent()
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(owner.clone(), spender.clone()))
+            .unwrap_or(AllowanceRecord {
+                amount: 0,
+                expiration_ledger: u32::MAX,
+            });
+        let new_amount = record.amount
             .checked_add(added_amount)
             .expect("allowance overflow");
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
@@ -295,7 +340,7 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("incrallow")),
-            (owner, spender, new_allowance),
+            (owner, spender, new_amount),
         );
     }
 
@@ -305,8 +350,14 @@ impl ShareToken {
         if subtracted_amount <= 0 {
             panic!("subtracted amount must be positive");
         }
-        let current = Self::allowance(env.clone(), owner.clone(), spender.clone());
-        if current < subtracted_amount {
+        let record = env.storage()
+            .persistent()
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(owner.clone(), spender.clone()))
+            .unwrap_or(AllowanceRecord {
+                amount: 0,
+                expiration_ledger: u32::MAX,
+            });
+        if record.amount < subtracted_amount {
             panic!("allowance underflow");
         }
         let new_allowance = current - subtracted_amount;
@@ -318,7 +369,7 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("decrallow")),
-            (owner, spender, new_allowance),
+            (owner, spender, new_amount),
         );
     }
 
@@ -328,7 +379,18 @@ impl ShareToken {
         if amount <= 0 {
             panic!("amount must be positive");
         }
-        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        let record = env.storage()
+            .persistent()
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(from.clone(), spender.clone()))
+            .unwrap_or(AllowanceRecord {
+                amount: 0,
+                expiration_ledger: u32::MAX,
+            });
+        let allowed = if env.ledger().sequence() >= record.expiration_ledger as u64 {
+            0
+        } else {
+            record.amount
+        };
         if allowed < amount {
             panic!("allowance exceeded");
         }
@@ -380,19 +442,33 @@ impl ShareToken {
         let checkpoints: Vec<(u64, i128)> = env
             .storage()
             .persistent()
-            .get(&DataKey::Checkpoints(id))
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey::Checkpoints(id.clone()))
+            .unwrap_or_else(|_| Vec::new(&env));
 
         if checkpoints.is_empty() {
             return 0;
         }
 
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CheckpointsHead(id))
+            .unwrap_or(0);
+        let len = checkpoints.len() as u32;
+        let is_full = len >= MAX_CHECKPOINTS;
+
         // Binary search for the latest checkpoint at or before `timestamp`.
+        // Need to account for ring buffer if full.
         let mut lo: u32 = 0;
-        let mut hi: u32 = checkpoints.len();
+        let mut hi: u32 = len;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if checkpoints.get(mid).unwrap().0 <= timestamp {
+            let actual_idx = if is_full {
+                ((head + mid) % MAX_CHECKPOINTS) as usize
+            } else {
+                mid as usize
+            };
+            if checkpoints.get(actual_idx).unwrap().0 <= timestamp {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -402,7 +478,12 @@ impl ShareToken {
         if lo == 0 {
             0
         } else {
-            checkpoints.get(lo - 1).unwrap().1
+            let actual_idx = if is_full {
+                ((head + lo - 1) % MAX_CHECKPOINTS) as usize
+            } else {
+                (lo - 1) as usize
+            };
+            checkpoints.get(actual_idx).unwrap().1
         }
     }
 

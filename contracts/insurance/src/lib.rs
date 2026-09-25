@@ -647,6 +647,52 @@ impl InsuranceReserve {
         })
     }
 
+    /// Called when an invoice repays in full (on time or late). Releases the
+    /// coverage and reduces the reserve's total_covered_exposure accordingly.
+    /// The invoice_id must not already have a claimed coverage record.
+    pub fn release_coverage(env: Env, invoice_id: u64) -> Result<(), InsuranceError> {
+        bump_instance(&env);
+        require_not_paused(&env)?;
+
+        let mut record: CoverageRecord = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoverageRecord(invoice_id))
+            .ok_or(InsuranceError::NoCoverageFound)?;
+
+        // Cannot release coverage that was already claimed
+        if record.claimed {
+            return Err(InsuranceError::AlreadyClaimed);
+        }
+
+        let covered_exposure = record
+            .principal
+            .checked_mul(record.coverage_bps as i128)
+            .and_then(|v| v.checked_div(BPS_DENOM as i128))
+            .ok_or(InsuranceError::AmountOverflow)?;
+
+        let mut reserve = Self::load_reserve(&env, &record.token);
+        reserve.total_covered_exposure = reserve
+            .total_covered_exposure
+            .checked_sub(covered_exposure)
+            .unwrap_or(0)
+            .max(0);
+        Self::recompute_ratio(&mut reserve);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReserveFund(record.token.clone()), &reserve);
+
+        // Mark as claimed so it can't be released again or have a claim filed
+        record.claimed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::CoverageRecord(invoice_id), &record);
+
+        env.events()
+            .publish((EVT, symbol_short!("released")), (invoice_id, covered_exposure));
+        Ok(())
+    }
+
     /// Permissionless — re-derives default status and shortfall itself rather
     /// than trusting the caller. Pool does *not* call this internally (it
     /// would re-enter pool while pool is still on the call stack seizing
