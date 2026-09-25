@@ -180,6 +180,10 @@ pub enum PoolError {
     InvoiceNotCancelled = 96,
     // #1038: governance contract not configured
     GovernanceNotConfigured = 97,
+    // #1367: reentrant call blocked by the non-reentrancy guard. Surfaced
+    // as a typed error (instead of a raw `panic!` string) so frontends can
+    // decode the failure like every other `PoolError`.
+    ReentrantCall = 98,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1851,7 +1855,7 @@ impl FundingPool {
         let token_client = token::Client::new(&env, &initial_token);
         let token_decimals = token_client.decimals();
         if token_decimals != EXPECTED_DECIMALS {
-            panic!("unsupported token decimals");
+            panic_with_error!(&env, PoolError::UnsupportedTokenDecimals);
         }
 
         env.storage().instance().set(&DataKey::Config, &config);
@@ -7403,7 +7407,7 @@ impl FundingPool {
             .get::<DataKey, bool>(&key)
             .unwrap_or(false)
         {
-            panic!("reentrant call");
+            panic_with_error!(env, PoolError::ReentrantCall);
         }
         env.storage().instance().set(&key, &true);
     }
