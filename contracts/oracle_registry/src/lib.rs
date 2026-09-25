@@ -532,6 +532,13 @@ impl OracleRegistryContract {
         evidence: String,
         caller: Address,
     ) -> Result<(), OracleRegistryError> {
+        // #1371: slashing burns a portion of the operator's stake, so it must
+        // be refused while the registry is paused. Pausing is the natural first
+        // response to a suspected bug in vote accounting or reputation tracking
+        // — exactly when a slash decision is most likely to be wrong. Guarding
+        // the shared internal helper covers both `slash_oracle` (admin) and
+        // `slash_oracle_via_ac` (access-control) entrypoints.
+        require_not_paused(env);
         if bps == 0 || bps > 10_000 {
             return Err(OracleRegistryError::InvalidBps);
         }
