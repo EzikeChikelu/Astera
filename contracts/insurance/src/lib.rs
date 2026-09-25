@@ -42,6 +42,11 @@ use soroban_sdk::{
 pub const BPS_DENOM: u32 = 10_000;
 const SECS_PER_DAY: u64 = 86_400;
 
+/// Ceiling for risk multipliers (tier and default), in bps. Multipliers are
+/// relative (10_000 = 1.0x) and legitimately exceed `BPS_DENOM`, so they need
+/// their own cap: 100_000 = 10x.
+pub const MAX_RISK_MULTIPLIER_BPS: u32 = 100_000;
+
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280 * 30; // ~30 days at 5s/ledger
 const INSTANCE_BUMP_AMOUNT: u32 = 17_280 * 60; // ~60 days
 
@@ -308,13 +313,27 @@ pub fn calculate_premium(
     invoice_tenor_days: u32,
     config: &PremiumConfig,
 ) -> u128 {
+    let risk_multiplier_bps = resolve_risk_multiplier_bps(sme_credit_score, config);
+    calculate_premium_with_multiplier(principal, risk_multiplier_bps, invoice_tenor_days, config)
+}
+
+/// Same pricing as `calculate_premium`, but with the risk multiplier already
+/// resolved. Lets callers price a missing credit score with
+/// `default_risk_multiplier_bps` directly instead of pushing a sentinel score
+/// through tier matching, where it could collide with a real tier.
+fn calculate_premium_with_multiplier(
+    principal: i128,
+    risk_multiplier_bps: u32,
+    invoice_tenor_days: u32,
+    config: &PremiumConfig,
+) -> u128 {
     if principal <= 0 {
         return 0;
     }
     let principal = principal as u128;
     let denom = BPS_DENOM as u128;
 
-    let risk_multiplier_bps = resolve_risk_multiplier_bps(sme_credit_score, config) as u128;
+    let risk_multiplier_bps = risk_multiplier_bps as u128;
     let base = principal.saturating_mul(config.base_rate_bps as u128) / denom;
     let risk_adjusted = base.saturating_mul(risk_multiplier_bps) / denom;
 
@@ -396,9 +415,7 @@ impl InsuranceReserve {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
-        if config.max_premium_bps < config.min_premium_bps {
-            return Err(InsuranceError::InvalidPremiumConfig);
-        }
+        Self::validate_premium_config(&config)?;
         if config.default_coverage_bps == 0 || config.default_coverage_bps > BPS_DENOM {
             return Err(InsuranceError::InvalidCoverageBps);
         }
@@ -568,11 +585,7 @@ impl InsuranceReserve {
             .saturating_sub(env.ledger().timestamp())
             .saturating_div(SECS_PER_DAY) as u32;
 
-        let score = Self::resolve_credit_score(&env, &sme);
-        let premium = calculate_premium(principal, score, tenor_days, &config);
-        let premium: i128 = premium
-            .try_into()
-            .map_err(|_| InsuranceError::AmountOverflow)?;
+        let premium = Self::price_premium(&env, principal, &sme, tenor_days, &config)?;
         // #1417: reject a premium that floored to zero for a positive principal
         // (e.g. min_premium_bps = 0 with dust principal). Otherwise a zero-value
         // transfer would still book full covered exposure — real claimable risk
@@ -643,7 +656,7 @@ impl InsuranceReserve {
     /// collateral, which Soroban disallows) — instead anyone (a keeper, the
     /// SME, the frontend) files it directly against this contract as a
     /// follow-up call once collateral has been seized.
-    pub fn file_claim(env: Env, _caller: Address, invoice_id: u64) -> Result<i128, InsuranceError> {
+    pub fn file_claim(env: Env, invoice_id: u64) -> Result<i128, InsuranceError> {
         bump_instance(&env);
         require_not_paused(&env)?;
 
@@ -874,46 +887,94 @@ impl InsuranceReserve {
         principal: i128,
         sme: Address,
         tenor_days: u32,
-        _token: Address,
     ) -> Result<i128, InsuranceError> {
         let config: PremiumConfig = env
             .storage()
             .instance()
             .get(&DataKey::PremiumConfig)
             .ok_or(InsuranceError::InvalidPremiumConfig)?;
-        let score = Self::resolve_credit_score(&env, &sme);
-        let premium = calculate_premium(principal, score, tenor_days, &config);
-        premium
-            .try_into()
-            .map_err(|_| InsuranceError::AmountOverflow)
+        Self::price_premium(&env, principal, &sme, tenor_days, &config)
     }
 
     // ---- Internal ----
 
-    fn resolve_credit_score(env: &Env, sme: &Address) -> u32 {
-        const DEFAULT_SCORE_WHEN_UNAVAILABLE: u32 = 300; // conservative: near the bottom of 200-850
+    fn validate_premium_config(config: &PremiumConfig) -> InsuranceResult<()> {
+        if config.max_premium_bps < config.min_premium_bps {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
+        // Rate fields are fractions of principal (or of the risk-adjusted
+        // premium), so none may exceed 100%.
+        if config.base_rate_bps > BPS_DENOM
+            || config.tenor_bps_per_day > BPS_DENOM
+            || config.min_premium_bps > BPS_DENOM
+            || config.max_premium_bps > BPS_DENOM
+        {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
+        if config.default_risk_multiplier_bps == 0
+            || config.default_risk_multiplier_bps > MAX_RISK_MULTIPLIER_BPS
+        {
+            return Err(InsuranceError::InvalidPremiumConfig);
+        }
 
-        let cs_contract: Option<Address> =
-            env.storage().instance().get(&DataKey::CreditScoreContract);
-        match cs_contract {
-            Some(addr) => {
-                let client = CreditScoreClient::new(env, &addr);
-                match client.try_get_credit_score(sme) {
-                    // #935: prefer blended_score (includes external attestations)
-                    // over the raw internal score for more accurate risk pricing.
-                    Ok(Ok(data)) => {
-                        if data.blended_score > 0 {
-                            data.blended_score
-                        } else {
-                            // Pre-v2 credit_score contracts don't return blended_score;
-                            // fall back to the internal score.
-                            data.score
-                        }
-                    }
-                    _ => DEFAULT_SCORE_WHEN_UNAVAILABLE,
+        // Tiers may be supplied in any order, so overlap is checked pairwise.
+        // Gaps between tiers are allowed: uncovered scores intentionally price
+        // at `default_risk_multiplier_bps`.
+        let n = config.risk_tiers.len();
+        for i in 0..n {
+            let tier = config.risk_tiers.get(i).expect("storage corrupted");
+            if tier.min_score > tier.max_score
+                || tier.risk_multiplier_bps == 0
+                || tier.risk_multiplier_bps > MAX_RISK_MULTIPLIER_BPS
+            {
+                return Err(InsuranceError::InvalidPremiumConfig);
+            }
+            for j in (i + 1)..n {
+                let other = config.risk_tiers.get(j).expect("storage corrupted");
+                if tier.min_score <= other.max_score && other.min_score <= tier.max_score {
+                    return Err(InsuranceError::InvalidPremiumConfig);
                 }
             }
-            None => DEFAULT_SCORE_WHEN_UNAVAILABLE,
+        }
+        Ok(())
+    }
+
+    /// Prices a premium for `sme`. A missing credit score (contract unset or
+    /// call failed) bypasses tier matching and uses the config's conservative
+    /// `default_risk_multiplier_bps`, so "no data" can never be priced as a
+    /// real score that happens to fall inside a tier.
+    fn price_premium(
+        env: &Env,
+        principal: i128,
+        sme: &Address,
+        tenor_days: u32,
+        config: &PremiumConfig,
+    ) -> InsuranceResult<i128> {
+        let multiplier_bps = match Self::resolve_credit_score(env, sme) {
+            Some(score) => resolve_risk_multiplier_bps(score, config),
+            None => config.default_risk_multiplier_bps,
+        };
+        calculate_premium_with_multiplier(principal, multiplier_bps, tenor_days, config)
+            .try_into()
+            .map_err(|_| InsuranceError::AmountOverflow)
+    }
+
+    fn resolve_credit_score(env: &Env, sme: &Address) -> Option<u32> {
+        let cs_contract: Option<Address> =
+            env.storage().instance().get(&DataKey::CreditScoreContract);
+        let addr = cs_contract?;
+        let client = CreditScoreClient::new(env, &addr);
+        match client.try_get_credit_score(sme) {
+            // #935: prefer blended_score (includes external attestations)
+            // over the raw internal score for more accurate risk pricing.
+            Ok(Ok(data)) => Some(if data.blended_score > 0 {
+                data.blended_score
+            } else {
+                // Pre-v2 credit_score contracts don't return blended_score;
+                // fall back to the internal score.
+                data.score
+            }),
+            _ => None,
         }
     }
 
