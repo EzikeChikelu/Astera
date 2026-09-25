@@ -156,6 +156,21 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
         "withdraw_slashed_funds is guarded and must be refused while paused"
     );
 
+    // #1371: slash_oracle burns a portion of an operator's stake, so it must
+    // also be refused while the registry is paused (via the shared
+    // slash_oracle_internal helper).
+    assert_eq!(
+        f.client.try_slash_oracle(
+            &f.admin,
+            &oracle,
+            &1_000u32,
+            &7u64,
+            &String::from_str(&env, "evidence"),
+        ),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "slash_oracle is guarded and must be refused while paused"
+    );
+
     // === Entrypoints that do NOT call `require_not_paused` — currently pass
     // === through while paused. This is the exact gap #1409 asks us to
     // === surface, not paper over; each is annotated with why.
@@ -171,16 +186,8 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
         "expire_round has no pause guard (#1409 gap) and runs its normal logic while paused"
     );
 
-    // #1409: slash_oracle has no require_not_paused guard yet (tracked
-    // separately) — this call currently succeeds while paused, which is the
-    // exact gap this test surfaces.
-    f.client.slash_oracle(
-        &f.admin,
-        &oracle,
-        &1_000u32,
-        &7u64,
-        &String::from_str(&env, "evidence"),
-    );
+    // #1371: slash_oracle is now pause-guarded (asserted in the guarded
+    // section above), so it no longer appears here as an unguarded gap.
 
     // admin_resolve_round: no require_not_paused guard either. Round 7 hasn't
     // expired, so the unguarded call still runs its normal logic and fails
@@ -252,13 +259,18 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
     f.client.set_paused_via_ac(&access_control, &false);
     f.client.set_paused_via_ac(&access_control, &true);
 
-    // slash_oracle_via_ac: access-control-gated, no pause guard.
-    f.client.slash_oracle_via_ac(
-        &access_control,
-        &oracle,
-        &1_000u32,
-        &7u64,
-        &String::from_str(&env, "evidence"),
+    // #1371: slash_oracle_via_ac shares slash_oracle_internal, so it is
+    // pause-guarded too — must be refused while paused.
+    assert_eq!(
+        f.client.try_slash_oracle_via_ac(
+            &access_control,
+            &oracle,
+            &1_000u32,
+            &7u64,
+            &String::from_str(&env, "evidence"),
+        ),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "slash_oracle_via_ac is guarded and must be refused while paused"
     );
 
     // admin_resolve_round_via_ac: access-control-gated, no pause guard. Round
@@ -310,4 +322,76 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
     // (none of the unguarded calls above touch the Paused flag itself,
     // except the deliberate flip/restore around set_paused_via_ac).
     assert!(f.client.is_paused());
+}
+
+/// #1371: a focused regression for the `slash_oracle` pause gap. The broad
+/// pause-surface test above asserts the `ContractPaused` rejection; this test
+/// additionally proves that (a) no stake is burned while paused, (b) the
+/// `_via_ac` path is guarded as well, and (c) the refusal really is the pause
+/// gate — unpausing lets the very same call through and only then does the
+/// stake get reduced.
+#[test]
+fn test_slash_oracle_refused_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    // An active oracle with stake, plus an open round a slash can cite.
+    let oracle = Address::generate(&env);
+    mint(&env, &f.stake_token, &oracle, 1_000);
+    f.client.register_oracle(&oracle, &1_000);
+
+    let caller = Address::generate(&env);
+    f.client
+        .open_verification_round(&caller, &7u64, &String::from_str(&env, "h1"));
+
+    // Bootstrap the access-control trust anchor so the `_via_ac` variant is
+    // reachable at all.
+    let access_control = Address::generate(&env);
+    f.client.set_access_control(&f.admin, &access_control);
+
+    let stake_before = f.client.get_oracle_info(&oracle).unwrap().stake_amount;
+    assert_eq!(stake_before, 1_000);
+
+    f.client.pause(&f.admin);
+    assert!(f.client.is_paused());
+
+    let evidence = String::from_str(&env, "evidence");
+
+    // Admin path: refused with ContractPaused while paused.
+    assert_eq!(
+        f.client
+            .try_slash_oracle(&f.admin, &oracle, &1_000u32, &7u64, &evidence),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "slash_oracle must be refused while the registry is paused"
+    );
+
+    // Access-control path: refused with ContractPaused while paused.
+    assert_eq!(
+        f.client
+            .try_slash_oracle_via_ac(&access_control, &oracle, &1_000u32, &7u64, &evidence),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "slash_oracle_via_ac must be refused while the registry is paused"
+    );
+
+    // Nothing was burned by the refused attempts.
+    assert_eq!(
+        f.client.get_oracle_info(&oracle).unwrap().stake_amount,
+        stake_before,
+        "refused slashes must not mutate the operator's stake"
+    );
+
+    // Unpause: the same call now succeeds, proving the rejection above was the
+    // pause gate and not an unrelated validation error.
+    f.client.unpause(&f.admin);
+    assert!(!f.client.is_paused());
+
+    f.client
+        .slash_oracle(&f.admin, &oracle, &1_000u32, &7u64, &evidence);
+
+    // 1_000 bps of 1_000 stake = 100 slashed.
+    assert_eq!(
+        f.client.get_oracle_info(&oracle).unwrap().stake_amount,
+        stake_before - 100
+    );
 }
