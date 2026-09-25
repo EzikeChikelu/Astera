@@ -14,6 +14,7 @@ const EVT: Symbol = symbol_short!("gov");
 const MIN_VOTING_PERIOD_SECS: u64 = 86_400;
 const DEFAULT_VOTING_PERIOD_SECS: u64 = 7 * 86_400;
 const DEFAULT_EXECUTION_DELAY_SECS: u64 = 48 * 3_600;
+const DEFAULT_EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
 const DEFAULT_QUORUM_BPS: u32 = 1_000;
 const DEFAULT_PASS_BPS: u32 = 6_000;
 /// #933: default quorum for parameter-change proposals (10%).
@@ -25,7 +26,6 @@ const DEFAULT_CRITICAL_QUORUM_BPS: u32 = 5_000;
 /// A passed proposal not executed within this window of passing expires and
 /// can no longer be executed, so a stale approval can't be enacted long after
 /// the conditions that justified it have changed.
-const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
 const MAX_PROPOSAL_PAGE_SIZE: u32 = 50;
 
 #[contracttype]
@@ -237,6 +237,8 @@ pub enum DataKey {
     // #1042: multisig trust anchor. Additive — untouched, this stays unset
     // and every admin-gated entrypoint above works exactly as before.
     AccessControl,
+    ExecutionExpirySecs,
+    Paused,
     // #1038: governance contract address for self-rotation
     GovernanceAddress,
 }
@@ -395,6 +397,7 @@ pub enum GovernanceError {
     // Previously an opaque raw-string panic; now a typed error clients can
     // branch on.
     AlreadyInitialized = 15,
+    Paused = 16,
 }
 
 type GovernanceResult<T> = Result<T, GovernanceError>;
@@ -411,6 +414,18 @@ fn load_config(env: &Env) -> GovernanceResult<GovernanceConfig> {
         .instance()
         .get(&DataKey::Config)
         .ok_or(GovernanceError::NotInitialized)
+}
+
+fn require_not_paused(env: &Env) -> GovernanceResult<()> {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        return Err(GovernanceError::Paused);
+    }
+    Ok(())
 }
 
 fn validate_bps(quorum_bps: u32, pass_bps: u32) -> GovernanceResult<()> {
@@ -521,8 +536,13 @@ fn finalize_proposal(env: &Env, proposal: &mut Proposal) -> GovernanceResult<()>
 /// Transitions a `Passed` proposal to `Expired` once `EXECUTION_EXPIRY_SECS`
 /// has elapsed since it passed. Returns true if the proposal is (now) expired.
 fn mark_expired_if_due(env: &Env, proposal: &mut Proposal) -> bool {
+    let expiry_secs: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ExecutionExpirySecs)
+        .unwrap_or(DEFAULT_EXECUTION_EXPIRY_SECS);
     if proposal.status == ProposalStatus::Passed
-        && env.ledger().timestamp() > proposal.passed_at.saturating_add(EXECUTION_EXPIRY_SECS)
+        && env.ledger().timestamp() > proposal.passed_at.saturating_add(expiry_secs)
     {
         proposal.status = ProposalStatus::Expired;
         true
@@ -597,6 +617,11 @@ impl Governance {
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        env.storage().instance().set(
+            &DataKey::ExecutionExpirySecs,
+            &DEFAULT_EXECUTION_EXPIRY_SECS,
+        );
+        env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
         Ok(())
     }
@@ -614,6 +639,7 @@ impl Governance {
         category: ProposalCategory,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
+        require_not_paused(&env)?;
         let config = load_config(&env)?;
         let now = env.ledger().timestamp();
         let balance = proposal_weight(&env, &config.share_token, &proposer, now);
@@ -672,6 +698,7 @@ impl Governance {
         in_favor: bool,
     ) -> Result<(), GovernanceError> {
         voter.require_auth();
+        require_not_paused(&env)?;
         let config = load_config(&env)?;
         let mut proposal: Proposal = env
             .storage()
@@ -724,6 +751,7 @@ impl Governance {
     }
 
     pub fn execute_proposal(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
+        require_not_paused(&env)?;
         let config = load_config(&env)?;
         let mut proposal: Proposal = env
             .storage()
@@ -1061,6 +1089,7 @@ impl Governance {
         caller: Address,
     ) -> Result<(), GovernanceError> {
         caller.require_auth();
+        require_not_paused(&env)?;
         let config = load_config(&env)?;
         let mut proposal: Proposal = env
             .storage()
@@ -1188,6 +1217,84 @@ impl Governance {
         load_config(&env)
     }
 
+    /// Change the voting duration for proposals created after this call.
+    pub fn set_voting_period(
+        env: Env,
+        caller: Address,
+        voting_period_secs: u64,
+    ) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        require_not_paused(&env)?;
+        if voting_period_secs < MIN_VOTING_PERIOD_SECS {
+            return Err(GovernanceError::InvalidConfig);
+        }
+        let mut config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        config.voting_period_secs = voting_period_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("vote_win")),
+            (caller, voting_period_secs),
+        );
+        Ok(())
+    }
+
+    /// Change the delay after which passed proposals become permanently expired.
+    pub fn set_execution_expiry(
+        env: Env,
+        caller: Address,
+        execution_expiry_secs: u64,
+    ) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        require_not_paused(&env)?;
+        if execution_expiry_secs == 0 {
+            return Err(GovernanceError::InvalidConfig);
+        }
+        let config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecutionExpirySecs, &execution_expiry_secs);
+        env.events().publish(
+            (EVT, symbol_short!("exec_win")),
+            (caller, execution_expiry_secs),
+        );
+        Ok(())
+    }
+
+    pub fn get_execution_expiry(env: Env) -> Result<u64, GovernanceError> {
+        load_config(&env)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecutionExpirySecs)
+            .unwrap_or(DEFAULT_EXECUTION_EXPIRY_SECS))
+    }
+
+    /// Pause or resume governance mutations. The administrator may always unpause.
+    pub fn set_paused(env: Env, caller: Address, paused: bool) -> Result<(), GovernanceError> {
+        caller.require_auth();
+        let config = load_config(&env)?;
+        if caller != config.admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        env.events()
+            .publish((EVT, symbol_short!("paused")), (caller, paused));
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// #930: Read-only preview of a voter's current voting weight for a given
     /// proposal. Uses the same snapshot-based weight as `vote()` so callers see
     /// exactly how much their vote will count before submitting a transaction.
@@ -1248,6 +1355,7 @@ impl Governance {
         pass_bps: u32,
     ) -> Result<(), GovernanceError> {
         caller.require_auth();
+        require_not_paused(&env)?;
         let mut config = load_config(&env)?;
         if caller != config.admin {
             return Err(GovernanceError::Unauthorized);
@@ -1300,6 +1408,7 @@ impl Governance {
         quorum_bps: u32,
     ) -> Result<(), GovernanceError> {
         caller.require_auth();
+        require_not_paused(&env)?;
         let mut config = load_config(&env)?;
         if caller != config.admin {
             return Err(GovernanceError::Unauthorized);
@@ -1346,6 +1455,7 @@ impl Governance {
         access_control: Address,
     ) -> Result<(), GovernanceError> {
         caller.require_auth();
+        require_not_paused(&env)?;
         let config = load_config(&env)?;
         if caller != config.admin {
             return Err(GovernanceError::Unauthorized);
@@ -1371,6 +1481,7 @@ impl Governance {
         new_access_control: Address,
     ) -> Result<(), GovernanceError> {
         access_control.require_auth();
+        require_not_paused(&env)?;
         require_access_control(&env, &access_control)?;
         env.storage()
             .instance()
@@ -1389,6 +1500,7 @@ impl Governance {
         pass_bps: u32,
     ) -> Result<(), GovernanceError> {
         access_control.require_auth();
+        require_not_paused(&env)?;
         require_access_control(&env, &access_control)?;
         let mut config = load_config(&env)?;
         validate_bps(quorum_bps, pass_bps)?;
@@ -1432,6 +1544,7 @@ impl Governance {
         quorum_bps: u32,
     ) -> Result<(), GovernanceError> {
         access_control.require_auth();
+        require_not_paused(&env)?;
         require_access_control(&env, &access_control)?;
         if quorum_bps == 0 || quorum_bps > 10_000 {
             return Err(GovernanceError::InvalidConfig);
