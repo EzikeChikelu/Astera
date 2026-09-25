@@ -5,9 +5,18 @@ use soroban_sdk::{
 
 const EVT: Symbol = symbol_short!("share");
 
+/// Maximum number of balance checkpoints retained per holder.
+/// Once the list is full the oldest entry is dropped before a new one is
+/// appended, giving a bounded rolling window (≈ 1 checkpoint / ledger-second
+/// worst-case, or ~2.8 years of daily snapshots at the common 1-per-day rate).
+/// Governance's `balance_at` queries target recent proposal-creation timestamps,
+/// so pruning ancient history does not affect correctness in practice.
+pub const MAX_CHECKPOINTS: u32 = 1_024;
+
 #[contracttype]
 pub enum DataKey {
     Admin,
+    Paused,
     Name,
     Symbol,
     Decimals,
@@ -40,8 +49,23 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
             return;
         }
     }
+    // Evict the oldest entry before appending so the Vec never exceeds the cap.
+    if checkpoints.len() >= MAX_CHECKPOINTS {
+        checkpoints.remove(0);
+    }
     checkpoints.push_back((now, new_balance));
     env.storage().persistent().set(&key, &checkpoints);
+}
+
+fn require_not_paused(env: &Env) {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        panic!("contract is paused");
+    }
 }
 
 #[contract]
@@ -54,6 +78,7 @@ impl ShareToken {
             panic!("already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::Name, &name);
         env.storage().instance().set(&DataKey::Symbol, &symbol);
@@ -62,7 +87,45 @@ impl ShareToken {
             .publish((EVT, symbol_short!("init")), (name, symbol, decimals));
     }
 
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((EVT, symbol_short!("unpause")), admin);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    pub fn admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
+    }
+
+    /// Rotates the admin to `new_admin`. Only the current admin may call this.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events()
+            .publish((EVT, symbol_short!("set_admin")), (admin, new_admin));
+    }
+
     pub fn mint(env: Env, to: Address, amount: i128) {
+        require_not_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         if amount <= 0 {
@@ -85,6 +148,7 @@ impl ShareToken {
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) {
+        require_not_paused(&env);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         if amount <= 0 {
@@ -109,7 +173,41 @@ impl ShareToken {
             .publish((EVT, symbol_short!("burn")), (from, amount, new_total));
     }
 
+    pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        require_not_paused(&env);
+        spender.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowed < amount {
+            panic!("allowance exceeded");
+        }
+        let balance = Self::balance(env.clone(), from.clone());
+        if balance < amount {
+            panic!("insufficient balance");
+        }
+        let new_balance = balance - amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from.clone()), &new_balance);
+        write_checkpoint(&env, &from, new_balance);
+
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let new_total = total - amount;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &new_total);
+        env.storage().persistent().set(
+            &DataKey::Allowance(from.clone(), spender.clone()),
+            &(allowed - amount),
+        );
+        env.events()
+            .publish((EVT, symbol_short!("burn_from")), (spender, from, amount, new_total));
+    }
+
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        require_not_paused(&env);
         from.require_auth();
         if amount <= 0 {
             panic!("amount must be positive");
@@ -135,6 +233,7 @@ impl ShareToken {
     }
 
     pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) {
+        require_not_paused(&env);
         owner.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -154,6 +253,7 @@ impl ShareToken {
     }
 
     pub fn increase_allowance(env: Env, owner: Address, spender: Address, added_amount: i128) {
+        require_not_paused(&env);
         owner.require_auth();
         if added_amount <= 0 {
             panic!("added amount must be positive");
@@ -173,6 +273,7 @@ impl ShareToken {
     }
 
     pub fn decrease_allowance(env: Env, owner: Address, spender: Address, subtracted_amount: i128) {
+        require_not_paused(&env);
         owner.require_auth();
         if subtracted_amount <= 0 {
             panic!("subtracted amount must be positive");
@@ -193,6 +294,7 @@ impl ShareToken {
     }
 
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        require_not_paused(&env);
         spender.require_auth();
         if amount <= 0 {
             panic!("amount must be positive");
@@ -377,6 +479,33 @@ mod test {
         let (client, _admin) = setup(&env);
         let to = Address::generate(&env);
         let result = client.try_mint(&to, &100i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_admin_rotates_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.admin(), admin);
+        client.set_admin(&new_admin);
+        assert_eq!(client.admin(), new_admin);
+
+        // The new admin can now mint, the old one cannot.
+        let to = Address::generate(&env);
+        client.mint(&to, &100i128);
+        assert_eq!(client.balance(&to), 100);
+    }
+
+    #[test]
+    fn test_set_admin_requires_current_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths — only the current admin may rotate.
+        let (client, _admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_set_admin(&new_admin);
         assert!(result.is_err());
     }
 
@@ -621,5 +750,35 @@ mod test {
         client.mint(&alice, &200i128);
         client.transfer(&alice, &alice, &100i128);
         assert_eq!(client.balance_at(&alice, &1_000), 200);
+    }
+
+    #[test]
+    fn test_balance_at_past_max_checkpoints_evicts_oldest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, _admin) = setup(&env);
+        let alice = Address::generate(&env);
+
+        // Mint once per second, past MAX_CHECKPOINTS, so write_checkpoint
+        // starts evicting the oldest entry on each subsequent write.
+        for i in 0..(MAX_CHECKPOINTS + 1) {
+            env.ledger().with_mut(|l| l.timestamp = 1_000 + i as u64);
+            client.mint(&alice, &1i128);
+        }
+
+        let final_balance = (MAX_CHECKPOINTS + 1) as i128;
+        assert_eq!(client.balance(&alice), final_balance);
+
+        // The very first checkpoint (ts = 1_000) was evicted to make room,
+        // so a query at or before it now finds no surviving entry.
+        assert_eq!(client.balance_at(&alice, &1_000), 0);
+
+        // The oldest surviving checkpoint (ts = 1_001) still resolves.
+        assert_eq!(client.balance_at(&alice, &1_001), 1);
+
+        // Recent history is untouched by eviction.
+        let last_ts = 1_000 + MAX_CHECKPOINTS as u64;
+        assert_eq!(client.balance_at(&alice, &last_ts), final_balance);
     }
 }

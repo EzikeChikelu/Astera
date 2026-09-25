@@ -528,6 +528,15 @@ impl InsuranceReserve {
         bump_instance(&env);
         require_not_paused(&env)?;
 
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(InsuranceError::NotInitialized)?;
+        if payer != config.pool_contract {
+            return Err(InsuranceError::Unauthorized);
+        }
+
         if principal <= 0 {
             return Err(InsuranceError::InvalidAmount);
         }
@@ -564,6 +573,13 @@ impl InsuranceReserve {
         let premium: i128 = premium
             .try_into()
             .map_err(|_| InsuranceError::AmountOverflow)?;
+        // #1417: reject a premium that floored to zero for a positive principal
+        // (e.g. min_premium_bps = 0 with dust principal). Otherwise a zero-value
+        // transfer would still book full covered exposure — real claimable risk
+        // for no premium.
+        if premium <= 0 {
+            return Err(InsuranceError::InvalidAmount);
+        }
 
         let coverage_bps = config.default_coverage_bps;
         let covered_exposure = principal
@@ -802,7 +818,9 @@ impl InsuranceReserve {
             .instance()
             .get(&DataKey::MinReserveAmount(token.clone()))
             .unwrap_or(0);
-        let is_healthy = reserve.total_reserves >= min_amount && min_amount > 0;
+        // With no configured floor there is no minimum for the reserve to
+        // violate. Treat that state as healthy, consistent with needs_top_up.
+        let is_healthy = reserve.total_reserves >= min_amount;
         ReserveHealth {
             token,
             total_reserves: reserve.total_reserves,
