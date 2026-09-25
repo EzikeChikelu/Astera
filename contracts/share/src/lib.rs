@@ -5,6 +5,11 @@ use soroban_sdk::{
 
 const EVT: Symbol = symbol_short!("share");
 
+const LEDGERS_PER_DAY: u32 = 17_280;
+const BALANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+const BALANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
+const MAX_DECIMALS: u32 = 18;
+
 /// Maximum number of balance checkpoints retained per holder.
 /// Once the list is full the oldest entry is dropped before a new one is
 /// appended, giving a bounded rolling window (≈ 1 checkpoint / ledger-second
@@ -46,6 +51,7 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
         if last.0 == now {
             checkpoints.set(checkpoints.len() - 1, (now, new_balance));
             env.storage().persistent().set(&key, &checkpoints);
+            env.storage().persistent().extend_ttl(&key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
             return;
         }
     }
@@ -55,6 +61,7 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
     }
     checkpoints.push_back((now, new_balance));
     env.storage().persistent().set(&key, &checkpoints);
+    env.storage().persistent().extend_ttl(&key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
 }
 
 fn require_not_paused(env: &Env) {
@@ -74,8 +81,12 @@ pub struct ShareToken;
 #[contractimpl]
 impl ShareToken {
     pub fn initialize(env: Env, admin: Address, decimals: u32, name: String, symbol: String) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
+        }
+        if decimals > MAX_DECIMALS {
+            panic!("decimals must not exceed 18");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -133,9 +144,11 @@ impl ShareToken {
         }
         let balance = Self::balance(env.clone(), to.clone());
         let new_balance = balance + amount;
+        let balance_key = DataKey::Balance(to.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &new_balance);
+            .set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
@@ -159,9 +172,11 @@ impl ShareToken {
             panic!("insufficient balance");
         }
         let new_balance = balance - amount;
+        let balance_key = DataKey::Balance(from.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &new_balance);
+            .set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
@@ -188,9 +203,11 @@ impl ShareToken {
             panic!("insufficient balance");
         }
         let new_balance = balance - amount;
+        let balance_key = DataKey::Balance(from.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &new_balance);
+            .set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
@@ -198,10 +215,12 @@ impl ShareToken {
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
+        let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
         env.storage().persistent().set(
-            &DataKey::Allowance(from.clone(), spender.clone()),
+            &allowance_key,
             &(allowed - amount),
         );
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events()
             .publish((EVT, symbol_short!("burn_from")), (spender, from, amount, new_total));
     }
@@ -217,16 +236,20 @@ impl ShareToken {
             panic!("insufficient balance");
         }
         let new_balance_from = balance_from - amount;
+        let balance_from_key = DataKey::Balance(from.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &new_balance_from);
+            .set(&balance_from_key, &new_balance_from);
+        env.storage().persistent().extend_ttl(&balance_from_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance_from);
 
         let balance_to = Self::balance(env.clone(), to.clone());
         let new_balance_to = balance_to + amount;
+        let balance_to_key = DataKey::Balance(to.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &new_balance_to);
+            .set(&balance_to_key, &new_balance_to);
+        env.storage().persistent().extend_ttl(&balance_to_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance_to);
         env.events()
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
@@ -238,9 +261,11 @@ impl ShareToken {
         if amount < 0 {
             panic!("amount must be non-negative");
         }
+        let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+            .set(&allowance_key, &amount);
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events()
             .publish((EVT, symbol_short!("approve")), (owner, spender, amount));
     }
@@ -262,10 +287,12 @@ impl ShareToken {
         let new_allowance = current
             .checked_add(added_amount)
             .expect("allowance overflow");
+        let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
         env.storage().persistent().set(
-            &DataKey::Allowance(owner.clone(), spender.clone()),
+            &allowance_key,
             &new_allowance,
         );
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("incrallow")),
             (owner, spender, new_allowance),
@@ -283,10 +310,12 @@ impl ShareToken {
             panic!("allowance underflow");
         }
         let new_allowance = current - subtracted_amount;
+        let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
         env.storage().persistent().set(
-            &DataKey::Allowance(owner.clone(), spender.clone()),
+            &allowance_key,
             &new_allowance,
         );
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("decrallow")),
             (owner, spender, new_allowance),
@@ -309,20 +338,26 @@ impl ShareToken {
         }
 
         let new_balance_from = balance_from - amount;
+        let balance_from_key = DataKey::Balance(from.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &new_balance_from);
+            .set(&balance_from_key, &new_balance_from);
+        env.storage().persistent().extend_ttl(&balance_from_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance_from);
         let balance_to = Self::balance(env.clone(), to.clone());
         let new_balance_to = balance_to + amount;
+        let balance_to_key = DataKey::Balance(to.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &new_balance_to);
+            .set(&balance_to_key, &new_balance_to);
+        env.storage().persistent().extend_ttl(&balance_to_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance_to);
+        let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
         env.storage().persistent().set(
-            &DataKey::Allowance(from.clone(), spender.clone()),
+            &allowance_key,
             &(allowed - amount),
         );
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
             (EVT, symbol_short!("xfer_from")),
             (spender, from, to, amount),
@@ -571,6 +606,40 @@ mod test {
         client.initialize(
             &admin,
             &7u32,
+            &String::from_str(&env, "Pool Shares"),
+            &String::from_str(&env, "POOL"),
+        );
+    }
+
+    #[test]
+    fn test_initialize_requires_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths — admin auth check must be satisfied
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        let result = client.try_initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Pool Shares"),
+            &String::from_str(&env, "POOL"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "decimals must not exceed 18")]
+    fn test_initialize_rejects_invalid_decimals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ShareToken, ());
+        let client = ShareTokenClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &19u32,
             &String::from_str(&env, "Pool Shares"),
             &String::from_str(&env, "POOL"),
         );
