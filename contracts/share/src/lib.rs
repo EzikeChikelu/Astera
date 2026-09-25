@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol,
+    Vec,
 };
 
 const EVT: Symbol = symbol_short!("share");
@@ -22,6 +23,7 @@ pub enum DataKey {
     Decimals,
     Balance(Address),
     Allowance(Address, Address),
+    AllowanceExpiration(Address, Address),
     TotalSupply,
     /// Historical (timestamp, balance) checkpoints per holder, append-only and
     /// ordered by timestamp. Lets callers (e.g. governance) read a holder's
@@ -149,8 +151,7 @@ impl ShareToken {
 
     pub fn burn(env: Env, from: Address, amount: i128) {
         require_not_paused(&env);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+        from.require_auth();
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -232,7 +233,13 @@ impl ShareToken {
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
     }
 
-    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) {
+    pub fn approve(
+        env: Env,
+        owner: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
         require_not_paused(&env);
         owner.require_auth();
         if amount < 0 {
@@ -241,6 +248,10 @@ impl ShareToken {
         env.storage()
             .persistent()
             .set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+        env.storage().persistent().set(
+            &DataKey::AllowanceExpiration(owner.clone(), spender.clone()),
+            &expiration_ledger,
+        );
         env.events()
             .publish((EVT, symbol_short!("approve")), (owner, spender, amount));
     }
@@ -249,6 +260,13 @@ impl ShareToken {
         env.storage()
             .persistent()
             .get(&DataKey::Allowance(owner, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn get_allowance_expiration(env: Env, owner: Address, spender: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AllowanceExpiration(owner, spender))
             .unwrap_or(0)
     }
 
@@ -388,6 +406,99 @@ impl ShareToken {
 
     pub fn symbol(env: Env) -> String {
         env.storage().instance().get(&DataKey::Symbol).unwrap()
+    }
+}
+
+#[contractimpl]
+impl token::TokenInterface for ShareToken {
+    fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        ShareToken::transfer(env, from, to, amount);
+    }
+
+    fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        ShareToken::transfer_from(env, spender, from, to, amount);
+    }
+
+    fn approve(env: Env, owner: Address, spender: Address, amount: i128, expiration_ledger: u32) {
+        ShareToken::approve(env, owner, spender, amount, expiration_ledger);
+    }
+
+    fn allowance(env: Env, owner: Address, spender: Address) -> i128 {
+        ShareToken::allowance(env, owner, spender)
+    }
+
+    fn balance(env: Env, id: Address) -> i128 {
+        ShareToken::balance(env, id)
+    }
+
+    fn transfer_to_host(env: Env, from: Address, amount: i128) {
+        require_not_paused(&env);
+        from.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let balance = ShareToken::balance(env.clone(), from.clone());
+        if balance < amount {
+            panic!("insufficient balance");
+        }
+        let new_balance = balance - amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from.clone()), &new_balance);
+        write_checkpoint(&env, &from, new_balance);
+
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let new_total = total - amount;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &new_total);
+        env.events()
+            .publish((EVT, symbol_short!("burn")), (from, amount, new_total));
+    }
+
+    fn transfer_from_host(env: Env, to: Address, amount: i128) {
+        require_not_paused(&env);
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        let balance = ShareToken::balance(env.clone(), to.clone());
+        let new_balance = balance + amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone()), &new_balance);
+        write_checkpoint(&env, &to, new_balance);
+
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let new_total = total + amount;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &new_total);
+        env.events()
+            .publish((EVT, symbol_short!("mint")), (to, amount, new_total));
+    }
+
+    fn burn(env: Env, from: Address, amount: i128) {
+        ShareToken::burn(env, from, amount);
+    }
+
+    fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        ShareToken::burn_from(env, spender, from, amount);
+    }
+
+    fn decimals(env: Env) -> u32 {
+        ShareToken::decimals(env)
+    }
+
+    fn name(env: Env) -> String {
+        ShareToken::name(env)
+    }
+
+    fn symbol(env: Env) -> String {
+        ShareToken::symbol(env)
+    }
+
+    fn total_supply(env: Env) -> i128 {
+        ShareToken::total_supply(env)
     }
 }
 

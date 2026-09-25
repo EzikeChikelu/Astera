@@ -278,15 +278,20 @@ pub struct CollateralDepositView {
     pub posted_at: u64,
     pub released_at: u64,
     pub seized_at: u64,
+    /// #1329: actual liquidation proceeds from Dutch auction settlement,
+    /// denominated in proceeds_token (distinct from the collateral token).
+    /// Zero if not yet settled, or pre-settlement if pool hasn't been updated yet.
+    pub settled_price: i128,
 }
 
 // ---- Pure pricing engine ----
 
 fn resolve_risk_multiplier_bps(score: u32, config: &PremiumConfig) -> u32 {
     for i in 0..config.risk_tiers.len() {
-        let tier = config.risk_tiers.get(i).expect("storage corrupted");
-        if score >= tier.min_score && score <= tier.max_score {
-            return tier.risk_multiplier_bps;
+        if let Some(tier) = config.risk_tiers.get(i) {
+            if score >= tier.min_score && score <= tier.max_score {
+                return tier.risk_multiplier_bps;
+            }
         }
     }
     config.default_risk_multiplier_bps
@@ -453,6 +458,10 @@ impl InsuranceReserve {
 
     pub fn get_credit_score_contract(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::CreditScoreContract)
+    }
+
+    pub fn get_config(env: Env) -> Option<Config> {
+        env.storage().instance().get(&DataKey::Config)
     }
 
     /// Bootstrap/top-up path — e.g. seeded from `pool.withdraw_revenue` proceeds.
@@ -679,7 +688,7 @@ impl InsuranceReserve {
         let recovered = pool_client
             .get_collateral_deposit(&invoice_id)
             .filter(|c| c.settled)
-            .map(|c| c.amount)
+            .map(|c| c.settled_price)
             .unwrap_or(0);
         let shortfall = owed
             .checked_sub(recovered)
