@@ -140,7 +140,24 @@ impl TrancheContract {
 
         // Largest `amount` such that:
         //   senior + amount <= rate_bps * (junior + senior + amount) / 10_000
-        let numerator = rate_bps * junior - (10_000 - rate_bps) * senior;
+        //
+        // Use checked arithmetic so that a very large deposit base does not
+        // cause an overflow panic (overflow-checks = true in the test/debug
+        // profile).  If either multiplication overflows the capacity available
+        // is effectively unlimited, so we return i128::MAX consistent with the
+        // rate_bps >= 10_000 fast-path above.
+        let junior_term = match rate_bps.checked_mul(junior) {
+            Some(v) => v,
+            None => return i128::MAX,
+        };
+        let senior_term = match (10_000 - rate_bps).checked_mul(senior) {
+            Some(v) => v,
+            None => return i128::MAX,
+        };
+        let numerator = match junior_term.checked_sub(senior_term) {
+            Some(v) => v,
+            None => return 0,
+        };
         if numerator <= 0 {
             return 0;
         }
