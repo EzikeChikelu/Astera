@@ -5,7 +5,7 @@ use tranche::{state::TrancheConfig, TrancheContract, TrancheContractClient};
 fn setup(env: &Env) -> (TrancheContractClient<'_>, Address) {
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
     let client = TrancheContractClient::new(env, &contract_id);
     let admin = Address::generate(env);
     let token = Address::generate(env);
@@ -33,7 +33,9 @@ fn funding_requires_admin_auth() {
     let env = Env::default();
     let (client, token) = setup(&env);
 
-    assert!(client.try_fund_invoice_from_tranches(&token, &1, &1000).is_err());
+    assert!(client
+        .try_fund_invoice_from_tranches(&token, &1, &1000)
+        .is_err());
 }
 
 #[test]

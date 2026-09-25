@@ -209,7 +209,7 @@ proptest! {
         yield_bps in 500u32..5_000u32,
         hold_duration in 86_400u64..YEAR_SECS * 3,
     ) {
-        let env = Env::default();
+        let _env = Env::default();
         let interest = (deposit_amount * yield_bps as i128 * hold_duration as i128)
             / 10_000
             / YEAR_SECS as i128;

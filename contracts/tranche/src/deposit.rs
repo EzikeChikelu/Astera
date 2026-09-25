@@ -13,7 +13,7 @@ pub fn deposit(env: &Env, investor: Address, token: Address, tranche: TrancheCla
 
     investor.require_auth();
 
-    let token_client = token::Client::new(&env, &token);
+    let token_client = token::Client::new(env, &token);
     token_client.transfer(&investor, &env.current_contract_address(), &amount);
 
     let mut pool: TranchePool = env
