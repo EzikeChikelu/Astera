@@ -26,6 +26,7 @@ const DEFAULT_CRITICAL_QUORUM_BPS: u32 = 5_000;
 /// can no longer be executed, so a stale approval can't be enacted long after
 /// the conditions that justified it have changed.
 const EXECUTION_EXPIRY_SECS: u64 = 7 * 86_400;
+const MAX_PROPOSAL_PAGE_SIZE: u32 = 50;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -1133,39 +1134,54 @@ impl Governance {
     }
 
     pub fn list_proposals(env: Env) -> Vec<Proposal> {
+        Self::list_proposals_page(env, 1, MAX_PROPOSAL_PAGE_SIZE)
+    }
+
+    /// Return a bounded page of proposals beginning at `start_id` (inclusive).
+    /// Listing is read-only; finalization and expiry are explicit state changes.
+    pub fn list_proposals_page(env: Env, start_id: u64, limit: u32) -> Vec<Proposal> {
         let count: u64 = env
             .storage()
             .instance()
             .get(&DataKey::ProposalCount)
             .unwrap_or(0);
+        let end = start_id
+            .saturating_add(limit.min(MAX_PROPOSAL_PAGE_SIZE) as u64)
+            .min(count.saturating_add(1));
         let mut proposals = Vec::new(&env);
-        for id in 1..=count {
-            if let Some(mut proposal) = env
+        for id in start_id.max(1)..end {
+            if let Some(proposal) = env
                 .storage()
                 .instance()
                 .get::<DataKey, Proposal>(&DataKey::Proposal(id))
             {
-                let mut changed = false;
-                // #932: align finalize with vote/execute — period fully elapsed
-                // at `now >= voting_ends_at`.
-                if proposal.status == ProposalStatus::Active
-                    && env.ledger().timestamp() >= proposal.voting_ends_at
-                {
-                    let _ = finalize_proposal(&env, &mut proposal);
-                    changed = true;
-                }
-                if mark_expired_if_due(&env, &mut proposal) {
-                    changed = true;
-                }
-                if changed {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::Proposal(id), &proposal);
-                }
                 proposals.push_back(proposal);
             }
         }
         proposals
+    }
+
+    /// Explicitly finalize voting or mark a passed proposal expired when due.
+    pub fn finalize_proposal_if_due(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        let mut changed = false;
+        if proposal.status == ProposalStatus::Active
+            && env.ledger().timestamp() >= proposal.voting_ends_at
+        {
+            let _ = finalize_proposal(&env, &mut proposal);
+            changed = true;
+        }
+        changed |= mark_expired_if_due(&env, &mut proposal);
+        if changed {
+            env.storage()
+                .instance()
+                .set(&DataKey::Proposal(proposal_id), &proposal);
+        }
+        Ok(())
     }
 
     pub fn get_config(env: Env) -> Result<GovernanceConfig, GovernanceError> {

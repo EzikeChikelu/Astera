@@ -143,47 +143,32 @@ fn update_leaderboard(env: &Env, referrer: &Address, new_count: u32) {
     };
 
     if let Some(i) = existing_idx {
-        board.set(i, entry);
-    } else if board.len() < MAX_LEADERBOARD_SIZE {
-        board.push_back(entry);
-    } else {
-        let mut min_idx: u32 = 0;
-        let mut min_count = board.get(0).unwrap().referral_count;
-        for i in 1..board.len() {
-            let count = board.get(i).unwrap().referral_count;
-            if count < min_count {
-                min_count = count;
-                min_idx = i;
-            }
-        }
-        if new_count <= min_count {
-            // Doesn't crack the tracked top set — nothing to persist.
+        board.remove(i);
+    } else if board.len() == MAX_LEADERBOARD_SIZE {
+        if new_count <= board.get(board.len() - 1).unwrap().referral_count {
             return;
         }
-        board.set(min_idx, entry);
+        board.pop_back();
     }
 
-    // Re-sort descending by referral_count (selection sort — board is
-    // capped at MAX_LEADERBOARD_SIZE so this stays cheap).
-    let mut sorted: Vec<LeaderboardEntry> = Vec::new(env);
-    let len = board.len();
-    for _ in 0..len {
-        let mut best_idx: u32 = 0;
-        let mut best = board.get(0).unwrap();
-        for j in 1..board.len() {
-            let candidate = board.get(j).unwrap();
-            if candidate.referral_count > best.referral_count {
-                best_idx = j;
-                best = candidate;
-            }
-        }
-        sorted.push_back(best);
-        board.remove(best_idx);
+    let mut insert_at = 0;
+    while insert_at < board.len() && board.get(insert_at).unwrap().referral_count >= new_count {
+        insert_at += 1;
     }
+    if insert_at >= MAX_LEADERBOARD_SIZE {
+        return;
+    }
+
+    let old_len = board.len();
+    board.push_back(entry.clone());
+    for i in (insert_at..old_len).rev() {
+        board.set(i + 1, board.get(i).unwrap());
+    }
+    board.set(insert_at, entry);
 
     env.storage()
         .persistent()
-        .set(&DataKey::TopReferrers, &sorted);
+        .set(&DataKey::TopReferrers, &board);
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::TopReferrers, REGISTRY_TTL, REGISTRY_TTL);
@@ -217,6 +202,7 @@ pub struct ReferralContract;
 #[contractimpl]
 impl ReferralContract {
     pub fn initialize(env: Env, admin: Address, pool: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, ReferralError::AlreadyInitialized);
         }

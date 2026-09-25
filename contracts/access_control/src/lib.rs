@@ -46,6 +46,7 @@ const DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS: u64 = 172_800;
 
 /// Maximum number of signers per role to prevent unbounded iteration.
 const MAX_SIGNERS_PER_ROLE: u32 = 32;
+const MAX_PROPOSAL_PAGE_SIZE: u32 = 100;
 
 // ─── Roles ──────────────────────────────────────────────────────────────────
 
@@ -227,6 +228,7 @@ pub enum DataKey {
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum AccessControlError {
     AlreadyInitialized = 0,
     NotInitialized = 1,
@@ -473,9 +475,42 @@ impl AccessControlContract {
             .get(&DataKey::Proposal(proposal_id))
     }
 
+    /// Read a bounded range of proposals. `start` is inclusive; an optional
+    /// status filter narrows the returned rows without changing stored state.
+    pub fn list_proposals(
+        env: Env,
+        start: u64,
+        limit: u32,
+        status_filter: Option<ProposalStatus>,
+    ) -> Vec<Proposal> {
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(0);
+        let end = start
+            .saturating_add(limit.min(MAX_PROPOSAL_PAGE_SIZE) as u64)
+            .min(next_id);
+        let mut proposals = Vec::new(&env);
+        for id in start..end {
+            if let Some(proposal) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(id))
+            {
+                if status_filter
+                    .as_ref()
+                    .map_or(true, |status| &proposal.status == status)
+                {
+                    proposals.push_back(proposal);
+                }
+            }
+        }
+        proposals
+    }
+
     /// One past `proposal_id`, i.e. proposals exist for `0..get_next_proposal_id()`.
-    /// Lets a frontend page through the full proposal history/queue without
-    /// this contract needing its own paginated listing entrypoint.
+    /// Useful as an upper bound when paging through the proposal queue.
     pub fn get_next_proposal_id(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -557,7 +592,9 @@ impl AccessControlContract {
             proposer: proposer.clone(),
             approvals,
             created_at: now,
-            expires_at: now + expiry_secs,
+            expires_at: now
+                .checked_add(expiry_secs)
+                .ok_or(AccessControlError::InvalidExpiryWindow)?,
             earliest_execution_time: 0,
             status,
         };

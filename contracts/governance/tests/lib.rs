@@ -218,8 +218,11 @@ fn test_post_creation_minting_cannot_manufacture_quorum() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err(), "proposal below quorum must be rejected");
 
-    // execute_proposal rolls back storage on error; list_proposals commits finalization
-    gov.list_proposals();
+    assert_eq!(
+        gov.list_proposals().get(0).unwrap().status,
+        ProposalStatus::Active
+    );
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -278,7 +281,7 @@ fn test_proposal_rejected_when_quorum_not_met() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err());
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -312,7 +315,7 @@ fn test_proposal_rejected_when_pass_threshold_not_met() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err());
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -438,7 +441,7 @@ fn test_proposer_cannot_cancel_passed_proposal() {
     // (finalization happens lazily on the next touch), then attempt an
     // early proposer cancellation before execution/timelock.
     env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Passed);
 
@@ -470,7 +473,7 @@ fn test_admin_can_cancel_passed_proposal() {
     gov.vote(&id, &voter, &true);
 
     env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     assert_eq!(
         gov.get_proposal(&id).unwrap().status,
         ProposalStatus::Passed
@@ -675,7 +678,7 @@ fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
     // Past voting period + execution delay, proposal is Passed but not yet executed.
     env.ledger()
         .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Passed);
 
@@ -685,7 +688,7 @@ fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err(), "expired proposal must not be executable");
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Expired);
 }
@@ -1009,7 +1012,7 @@ fn test_critical_category_requires_higher_quorum() {
 
     let critical_result = gov.try_execute_proposal(&critical_id);
     assert!(critical_result.is_err());
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&critical_id);
     assert_eq!(
         gov.get_proposal(&critical_id).unwrap().status,
         ProposalStatus::Rejected
@@ -1051,23 +1054,26 @@ fn test_list_proposals_succeeds_with_many_proposals() {
     let proposer = Address::generate(&env);
     share.mint(&proposer, &1_000_000i128);
 
-    // Enough proposals to show the linear scan cost growth in
-    // `list_proposals` (it iterates every proposal ever created) while
-    // still completing — a live DAO must not hit a ceiling here first.
-    const N: u64 = 50;
+    // A bounded first page remains inexpensive at the current page limit.
+    const N: u64 = 60;
     for _ in 0..N {
         make_proposal(&env, &gov, &proposer, &target_id);
     }
 
     let proposals = gov.list_proposals();
-    assert_eq!(proposals.len(), N as u32);
-    // IDs stay sequential so no proposal is skipped or duplicated.
+    assert_eq!(proposals.len(), 50);
+    // The default view is bounded; clients can fetch the remaining proposals.
     for (i, proposal) in proposals.iter().enumerate() {
         assert_eq!(proposal.id, (i as u64) + 1);
     }
+    let first_page = gov.list_proposals_page(&1, &20);
+    let second_page = gov.list_proposals_page(&21, &40);
+    assert_eq!(first_page.len(), 20);
+    assert_eq!(second_page.len(), 40);
+    assert_eq!(first_page.get(0).unwrap().id, 1);
+    assert_eq!(second_page.get(0).unwrap().id, 21);
     assert!(gov.get_proposal(&N).is_some());
 }
-
 
 // ── #1357: `initialize` reports typed errors instead of panicking ────────────
 
